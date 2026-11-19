@@ -1,0 +1,73 @@
+[
+ {
+  "id": 1,
+  "is_active": true,
+  "is_focused": false,
+  "tabs": [
+   {
+    "id": 1,
+    "is_active": true,
+    "layout": "splits",
+    "title": "left",
+    "windows": [
+     {
+      "columns": 98,
+      "id": 1,
+      "is_active": true,
+      "is_focused": false,
+      "lines": 75,
+      "neighbors": {
+       "right": [
+        2,
+        3
+       ]
+      },
+      "title": "left",
+      "user_vars": {
+       "slot": "left"
+      }
+     },
+     {
+      "columns": 295,
+      "id": 2,
+      "is_active": false,
+      "is_focused": false,
+      "lines": 37,
+      "neighbors": {
+       "bottom": [
+        3
+       ],
+       "left": [
+        1
+       ]
+      },
+      "title": "right-top",
+      "user_vars": {
+       "slot": "right-top"
+      }
+     },
+     {
+      "columns": 295,
+      "id": 3,
+      "is_active": false,
+      "is_focused": false,
+      "lines": 37,
+      "neighbors": {
+       "left": [
+        1
+       ],
+       "top": [
+        2
+       ]
+      },
+      "title": "right-bottom",
+      "user_vars": {
+       "slot": "right-bottom"
+      }
+     }
+    ]
+   }
+  ],
+  "wm_class": "kitty-claude"
+ }
+]

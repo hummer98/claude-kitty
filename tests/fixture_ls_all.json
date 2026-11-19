@@ -1,0 +1,277 @@
+[
+ {
+  "id": 1,
+  "is_active": true,
+  "is_focused": false,
+  "tabs": [
+   {
+    "groups": [
+     {
+      "id": 1,
+      "windows": [
+       1
+      ]
+     },
+     {
+      "id": 49,
+      "windows": [
+       2
+      ]
+     },
+     {
+      "id": 51,
+      "windows": [
+       4
+      ]
+     },
+     {
+      "id": 52,
+      "windows": [
+       6
+      ]
+     },
+     {
+      "id": 50,
+      "windows": [
+       3
+      ]
+     },
+     {
+      "id": 53,
+      "windows": [
+       5
+      ]
+     }
+    ],
+    "id": 1,
+    "is_active": true,
+    "layout": "splits",
+    "layout_state": {
+     "all_windows": {
+      "active_group_history": [
+       2,
+       3,
+       9,
+       10,
+       11,
+       18,
+       15,
+       17,
+       19,
+       16,
+       25,
+       28,
+       27,
+       32,
+       31,
+       38,
+       35,
+       37,
+       39,
+       36,
+       46,
+       45,
+       1,
+       52,
+       49,
+       51,
+       53,
+       50
+      ],
+      "active_group_idx": 0,
+      "window_groups": [
+       {
+        "id": 1,
+        "window_ids": [
+         1
+        ]
+       },
+       {
+        "id": 49,
+        "window_ids": [
+         2
+        ]
+       },
+       {
+        "id": 51,
+        "window_ids": [
+         4
+        ]
+       },
+       {
+        "id": 52,
+        "window_ids": [
+         6
+        ]
+       },
+       {
+        "id": 50,
+        "window_ids": [
+         3
+        ]
+       },
+       {
+        "id": 53,
+        "window_ids": [
+         5
+        ]
+       }
+      ]
+     },
+     "class": "Splits",
+     "opts": {
+      "equalize_on_window_close": "n",
+      "proportional": "n",
+      "split_axis": "horizontal"
+     },
+     "pairs": {
+      "bias": 0.25,
+      "one": 1,
+      "two": {
+       "horizontal": false,
+       "one": {
+        "bias": 0.33,
+        "one": 49,
+        "two": {
+         "one": 51,
+         "two": 52
+        }
+       },
+       "two": {
+        "one": 50,
+        "two": 53
+       }
+      }
+     }
+    },
+    "title": "main",
+    "windows": [
+     {
+      "columns": 98,
+      "id": 1,
+      "is_active": true,
+      "is_focused": false,
+      "lines": 75,
+      "neighbors": {
+       "right": [
+        49,
+        50
+       ]
+      },
+      "title": "main",
+      "user_vars": {
+       "role": "main"
+      }
+     },
+     {
+      "columns": 97,
+      "id": 2,
+      "is_active": false,
+      "is_focused": false,
+      "lines": 37,
+      "neighbors": {
+       "bottom": [
+        50
+       ],
+       "left": [
+        1
+       ],
+       "right": [
+        51
+       ]
+      },
+      "title": "dev-a",
+      "user_vars": {
+       "role": "dev-a"
+      }
+     },
+     {
+      "columns": 147,
+      "id": 3,
+      "is_active": false,
+      "is_focused": false,
+      "lines": 37,
+      "neighbors": {
+       "left": [
+        1
+       ],
+       "right": [
+        53
+       ],
+       "top": [
+        49,
+        51
+       ]
+      },
+      "title": "dev-b",
+      "user_vars": {
+       "role": "dev-b"
+      }
+     },
+     {
+      "columns": 98,
+      "id": 4,
+      "is_active": false,
+      "is_focused": false,
+      "lines": 37,
+      "neighbors": {
+       "bottom": [
+        50,
+        53
+       ],
+       "left": [
+        49
+       ],
+       "right": [
+        52
+       ]
+      },
+      "title": "dev-c",
+      "user_vars": {
+       "role": "dev-c"
+      }
+     },
+     {
+      "columns": 98,
+      "id": 6,
+      "is_active": false,
+      "is_focused": false,
+      "lines": 37,
+      "neighbors": {
+       "bottom": [
+        53
+       ],
+       "left": [
+        51
+       ]
+      },
+      "title": "dev-d",
+      "user_vars": {
+       "role": "dev-d"
+      }
+     },
+     {
+      "columns": 147,
+      "id": 5,
+      "is_active": false,
+      "is_focused": false,
+      "lines": 37,
+      "neighbors": {
+       "left": [
+        50
+       ],
+       "top": [
+        51,
+        52
+       ]
+      },
+      "title": "dev-e",
+      "user_vars": {
+       "role": "dev-e"
+      }
+     }
+    ]
+   }
+  ]
+ }
+]

@@ -1,0 +1,7 @@
+# 左 1/4 に 1 枚、右 3/4 を上下 2 枚に分け、全部で claude-code を起動する
+layout splits
+cd ~
+launch --title left --var slot=left bash -lic 'claude; exec bash -l'
+launch --location=vsplit --bias=75 --title right-top --var slot=right-top bash -lic 'claude; exec bash -l'
+launch --location=hsplit --bias=50 --title right-bottom --var slot=right-bottom bash -lic 'claude; exec bash -l'
+focus_matching_window var:slot=left

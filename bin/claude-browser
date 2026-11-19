@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""kitty のペインに Chrome を「常に最前面」で重ねる。ペインの役割・席ごとに独立した Chrome を持つ。
+
+  claude-browser open URL [--mode self|show] [--ratio 0.65] [--over SLOT|ROLE|ID] [--focus kitty|browser|none]
+  claude-browser move [--mode ...] [--ratio ...] [--over ...] [--focus ...]
+  claude-browser shot FILE        前面タブのスクリーンショット（CDP）
+  claude-browser url              前面タブの URL
+  claude-browser close
+  claude-browser status | list
+  claude-browser profiles         プロファイル台帳（用途・最終利用・ログイン済みのメモ）
+  claude-browser note TEXT        台帳にメモを残す（例: "github: passkey でログイン済み"）
+  共通: --key NAME でプロファイル名を明示する
+
+kitty は縮めない（縮めると全ペインの claude-code が再描画で崩れることがある）。
+プロファイル名は起動し直しても変わらないもの（ペインの user var role > slot > セッション ID）。
+プロファイルは残すので、パスキー等のログインは一度人が済ませれば以後そのまま使える。
+"""
+import argparse
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERE / "lib"))
+from config import kitten_path  # noqa: E402
+from core import (choose_key, kitty_pid_from_socket, ledger_touch, merge_place_opts,  # noqa: E402
+                  parse_journal, profile_processes, resolve_pane)
+from geometry import tab_pane_fraction, target_rect  # noqa: E402
+
+KITTEN = kitten_path(os.environ)
+CHROME = ["flatpak", "run", "com.google.Chrome"]
+CHROME_FLAGS = [
+    "--no-first-run", "--no-default-browser-check",
+    # 別デスクトップや他の窓の下にあっても描画を止めない（shot がタイムアウトしないように）
+    "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+]
+# Flatpak の Chrome が書き込める場所に置く（ホームの任意の場所はサンドボックスから見えない）
+PROFILE_ROOT = Path.home() / ".var/app/com.google.Chrome/claude-profiles"
+STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "claude-browser"
+CDP = HERE / "lib" / "cdp.mjs"
+LEDGER = PROFILE_ROOT / "ledger.json"
+DEFAULTS = {"mode": "self", "ratio": 0.65, "over": None, "focus": "kitty"}
+
+
+def die(msg):
+    print(f"claude-browser: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------- state / process ----------
+def state_path(key):
+    return STATE_DIR / f"{key}.json"
+
+
+def load_state(key):
+    try:
+        return json.loads(state_path(key).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def save_state(key, st):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_path(key).write_text(json.dumps(st))
+
+
+def scan_procs():
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                yield int(d.name), (d / "cmdline").read_bytes().decode(errors="replace").split("\0")
+            except OSError:
+                pass
+
+
+def running(profile):
+    """このプロファイルの Chrome の (pid 一覧, ポート)。ポートはプロセスの引数から取る（持ち主の確認を兼ねる）。"""
+    found = profile_processes(scan_procs(), str(profile))
+    ports = [p for _, p in found if p]
+    return [pid for pid, _ in found], (ports[0] if ports else None)
+
+
+def http_ok(port):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def node(port, *args, check=True):
+    r = subprocess.run(["node", str(CDP), str(port), *args], capture_output=True, text=True)
+    if check and r.returncode:
+        die(r.stderr.strip() or f"cdp {args[0]} に失敗")
+    return r
+
+
+def update_ledger(key, **kw):
+    """台帳は記録でしかないので、失敗しても本来の操作は止めない。複数ペインの同時更新は flock で順番に。"""
+    import fcntl
+    import tempfile
+    try:
+        PROFILE_ROOT.mkdir(parents=True, exist_ok=True)
+        with open(PROFILE_ROOT / "ledger.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                cur = json.loads(LEDGER.read_text())
+            except (OSError, ValueError):
+                cur = {}
+            new = ledger_touch(cur, key, time.strftime("%Y-%m-%d %H:%M"),
+                               session=os.environ.get("CLAUDE_CODE_SESSION_ID"), **kw)
+            with tempfile.NamedTemporaryFile("w", dir=PROFILE_ROOT, delete=False, suffix=".tmp") as tmp:
+                tmp.write(json.dumps(new, ensure_ascii=False, indent=1))
+            os.replace(tmp.name, LEDGER)
+    except OSError as e:
+        print(f"claude-browser: 台帳を更新できない: {e}", file=sys.stderr)
+
+
+# ---------- kitty ----------
+def kitty_socket():
+    env = os.environ.get("KITTY_LISTEN_ON")
+    if env:
+        return env
+    rt = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    # 生きている kitty のソケットだけを候補にする（クラッシュ後に残ったものを拾わない）
+    socks = [p for p in rt.glob("kitty-*") if (pid := kitty_pid_from_socket(str(p))) and Path(f"/proc/{pid}").exists()]
+    if len(socks) != 1:
+        die("kitty のソケットを 1 つに決められない（KITTY_LISTEN_ON を設定するか kitty の中で呼ぶ）")
+    return f"unix:{socks[0]}"
+
+
+def kitty_ls(sock):
+    out = subprocess.run([KITTEN, "@", "--to", sock, "ls"], capture_output=True, text=True)
+    if out.returncode:
+        die(f"kitten @ ls に失敗: {out.stderr.strip()}")
+    return json.loads(out.stdout)
+
+
+def own_window_id():
+    wid = os.environ.get("KITTY_WINDOW_ID")
+    return int(wid) if wid and wid.isdigit() else None
+
+
+def own_vars(osw_list, own_id):
+    for osw in osw_list:
+        for tab in osw.get("tabs", []):
+            for w in tab.get("windows", []):
+                if w["id"] == own_id:
+                    return w.get("user_vars", {})
+    return {}
+
+
+# ---------- KWin ----------
+from kwin import kwin  # noqa: E402
+
+
+def find_kitty(kitty_pid, title):
+    """kitty の OS ウィンドウ（KWin）を 1 つに決め、(internalId, クライアント領域) を返す。"""
+    out = kwin(f"""
+const ks = workspace.windowList().filter(w => w.pid === {kitty_pid} && w.normalWindow);
+let pick = ks.length === 1 ? ks : ks.filter(w => w.caption === {json.dumps(title)});
+if (pick.length === 1) {{
+    const g = pick[0].clientGeometry;
+    @@OUT@@JSON.stringify({{id: String(pick[0].internalId), x: g.x, y: g.y, w: g.width, h: g.height}}));
+}} else {{
+    @@OUT@@JSON.stringify({{count: ks.length}}));
+}}
+@@OUT@@"END");""")
+    g = json.loads(out[0]) if out else {"count": 0}
+    if "id" not in g:
+        die(f"kitty (pid {kitty_pid}) の OS ウィンドウを 1 つに決められない（候補 {g['count']} 個）")
+    return g["id"], (g["x"], g["y"], g["w"], g["h"])
+
+
+def browser_windows(cls):
+    out = kwin(f"""
+for (const w of workspace.windowList()) if (w.resourceClass === {json.dumps(cls)} && w.normalWindow)
+    @@OUT@@JSON.stringify({{id: String(w.internalId), area: w.frameGeometry.width * w.frameGeometry.height}}));
+@@OUT@@"END");""")
+    return [json.loads(l) for l in out]
+
+
+def place_browser(cls, browser_id, kitty_id, rect, focus):
+    """ブラウザの主ウィンドウだけを配置する（OAuth のポップアップや DevTools は動かさない）。"""
+    x, y, w, h = rect
+    out = kwin(f"""
+const all = workspace.windowList();
+const k = all.find(w => String(w.internalId) === {json.dumps(kitty_id)});
+const b = all.find(w => String(w.internalId) === {json.dumps(browser_id)} && w.resourceClass === {json.dumps(cls)});
+if (b) {{
+    if (k) b.desktops = k.desktops;
+    b.minimized = false;
+    b.setMaximize(false, false);
+    b.keepAbove = true;
+    b.frameGeometry = {{x: {x}, y: {y}, width: {w}, height: {h}}};
+    if ({json.dumps(focus)} === "kitty" && k) workspace.activeWindow = k;
+    else if ({json.dumps(focus)} === "browser") workspace.activeWindow = b;
+    @@OUT@@"ok");
+}}
+@@OUT@@"END");""")
+    return out == ["ok"]
+
+
+def main_browser_window(st):
+    """前回配置した窓が残っていればそれ、無ければ一番大きい窓を主ウィンドウとする。"""
+    wins = browser_windows(st["class"])
+    for w in wins:
+        if w["id"] == st.get("kwin_id"):
+            return w["id"]
+    return max(wins, key=lambda w: w["area"])["id"] if wins else None
+
+
+# ---------- commands ----------
+def prepare(args, st):
+    """起動の前に配置先を確定させる（失敗してから Chrome が残らないように）。"""
+    # focus は一回ごとの指定（ゲーム中の none が以後ずっと残らないように）なので引き継がない
+    inherit = {k: v for k, v in (st or {}).items() if k != "focus"}
+    opts = merge_place_opts({k: getattr(args, k, None) for k in DEFAULTS}, inherit, DEFAULTS)
+    if opts["over"] == "self":
+        opts["over"] = None
+    target_rect((0, 0, 1, 1), (0, 0, 1, 1), opts["mode"], float(opts["ratio"]))  # 値の検証だけ
+    sock = kitty_socket()
+    osw_list = kitty_ls(sock)
+    try:
+        osw, tab, pane = resolve_pane(osw_list, opts["over"], own_window_id())
+    except LookupError as e:
+        die(str(e))
+    kitty_pid = kitty_pid_from_socket(sock)
+    if not kitty_pid:
+        die(f"kitty のソケット名から pid が分からない: {sock}")
+    active = next((w for t in osw["tabs"] if t.get("is_active") for w in t["windows"] if w.get("is_active")), pane)
+    kitty_win = find_kitty(kitty_pid, active.get("title", ""))  # Chrome を起動する前に決めておく
+    return opts, kitty_win, tab, pane
+
+
+def placement(st, opts, kitty_win, tab, pane):
+    kitty_id, client = kitty_win
+    try:
+        frac = tab_pane_fraction(tab, pane["id"])
+    except (KeyError, ValueError) as e:
+        die(str(e))
+    rect = target_rect(client, frac, opts["mode"], float(opts["ratio"]))
+    bid = main_browser_window(st)
+    if not bid or not place_browser(st["class"], bid, kitty_id, rect, opts["focus"]):
+        die("ブラウザのウィンドウが見つからない")
+    st.update(kwin_id=bid, mode=opts["mode"], ratio=float(opts["ratio"]),
+              over=opts["over"], focus=opts["focus"])
+    return rect
+
+
+def wait_http(port, seconds):
+    for _ in range(int(seconds * 4)):
+        if http_ok(port):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def wait_window(cls, seconds):
+    for _ in range(int(seconds * 4)):
+        if browser_windows(cls):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def wait_ready(port, cls, seconds):
+    for _ in range(int(seconds * 4)):
+        if http_ok(port) and browser_windows(cls):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def cmd_open(args, key):
+    st = load_state(key) or {}
+    prep = prepare(args, st)
+    profile = PROFILE_ROOT / key
+    cls = f"claude-browser-{key}"
+    pids, port = running(profile)
+    if pids:
+        # state が無くても、同じプロファイルの Chrome が動いていれば引き継ぐ（二重起動は Chrome が拒む）
+        if not port or not wait_http(port, 10):
+            die(f"このプロファイルの Chrome (pid {pids[0]}) が応答しない。claude-browser close で止める")
+        st.update(port=port, **{"class": cls, "profile": str(profile)})
+        save_state(key, st)
+        node(port, "goto", args.url)  # タブが無ければ cdp.mjs が作る
+        if not wait_window(cls, 10):
+            die("Chrome の窓が出てこない")
+    else:
+        port = free_port()
+        profile.mkdir(parents=True, exist_ok=True)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(STATE_DIR / f"{key}.log", "wb") as log:  # 毎回作り直す（溜め込まない）
+            subprocess.Popen(CHROME + [f"--user-data-dir={profile}", f"--remote-debugging-port={port}",
+                                       f"--class={cls}", *CHROME_FLAGS, "--new-window", args.url],
+                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+        st.update(port=port, **{"class": cls, "profile": str(profile)})
+        save_state(key, st)  # 配置に失敗しても後で close / 再 open できるよう、起動直後に残す
+        if not wait_ready(port, cls, 20):
+            die(f"Chrome が起動しない（ログ: {STATE_DIR / (key + '.log')}）")
+    rect = placement(st, *prep)
+    save_state(key, st)
+    print(json.dumps({"key": key, "port": port, "cdp": f"http://127.0.0.1:{port}",
+                      "rect": rect, "mode": st["mode"], "profile": str(profile)}), flush=True)
+    update_ledger(key, url=args.url, pane_vars=own_vars(kitty_ls(kitty_socket()), own_window_id()))
+
+
+def need_running(key):
+    profile = PROFILE_ROOT / key
+    pids, port = running(profile)
+    if not pids or not port or not http_ok(port):
+        die("このセッションのブラウザは起動していない（open で起動する）")
+    st = load_state(key) or {"class": f"claude-browser-{key}", "profile": str(profile)}
+    st["port"] = port
+    return st
+
+
+def cmd_move(args, key):
+    st = need_running(key)
+    rect = placement(st, *prepare(args, st))
+    save_state(key, st)
+    print(json.dumps({"key": key, "rect": rect, "mode": st["mode"]}))
+
+
+def cmd_close(args, key):
+    profile = PROFILE_ROOT / key
+    pids, port = running(profile)
+    if port and http_ok(port):
+        node(port, "close", check=False)
+    for _ in range(20):
+        pids, _ = running(profile)
+        if not pids:
+            break
+        time.sleep(0.25)
+    for pid in pids:  # 応答しないときは、このプロファイルのプロセスだけを止める
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    state_path(key).unlink(missing_ok=True)
+    print("closed" if not pids else f"closed (SIGTERM {pids})")
+
+
+def cmd_list():
+    keys = {p.stem for p in STATE_DIR.glob("*.json")} | (
+        {p.name for p in PROFILE_ROOT.iterdir() if p.is_dir()} if PROFILE_ROOT.exists() else set())
+    for key in sorted(keys):
+        pids, port = running(PROFILE_ROOT / key)
+        st = load_state(key) or {}
+        print(json.dumps({"key": key, "running": bool(pids), "port": port,
+                          "mode": st.get("mode"), "over": st.get("over")}))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="claude-browser")
+    ap.add_argument("--key", help="プロファイル名を明示する（既定: ペインの role / slot / セッション ID）")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def place_opts(p):
+        p.add_argument("--mode", choices=["self", "show"])
+        p.add_argument("--ratio", type=float, help="show のとき上から何割をブラウザにするか（0.1〜1.0）")
+        p.add_argument("--over", help="重ねるペイン（slot 名・role 名・kitty の window id、self で自分）。既定は前回の値か自分のペイン")
+        p.add_argument("--focus", choices=["kitty", "browser", "none"],
+                       help="配置後の入力先。none は何も変えない（ゲーム中など）")
+
+    p = sub.add_parser("open"); p.add_argument("url"); place_opts(p)
+    p = sub.add_parser("move"); place_opts(p)
+    sub.add_parser("close"); sub.add_parser("status"); sub.add_parser("list"); sub.add_parser("url")
+    sub.add_parser("profiles")
+    p = sub.add_parser("note"); p.add_argument("text")
+    p = sub.add_parser("shot"); p.add_argument("file")
+    args = ap.parse_args(argv)
+
+    if args.cmd == "list":
+        return cmd_list()
+    if args.cmd == "profiles":
+        print(LEDGER.read_text() if LEDGER.exists() else "{}")
+        return
+    vars_ = {}
+    if not args.key and own_window_id() is not None:
+        vars_ = own_vars(kitty_ls(kitty_socket()), own_window_id())
+    try:
+        key = choose_key(args.key, vars_, os.environ)
+        if getattr(args, "ratio", None) is not None:
+            target_rect((0, 0, 1, 1), (0, 0, 1, 1), "show", args.ratio)
+    except ValueError as e:
+        die(str(e))
+    if args.cmd == "open":
+        cmd_open(args, key)
+    elif args.cmd == "move":
+        cmd_move(args, key)
+    elif args.cmd == "close":
+        cmd_close(args, key)
+    elif args.cmd == "shot":
+        print(node(need_running(key)["port"], "shot", os.path.abspath(args.file)).stdout.strip())
+    elif args.cmd == "note":
+        update_ledger(key, note=args.text)
+        print(f"noted: {key}")
+    elif args.cmd == "url":
+        print(node(need_running(key)["port"], "url").stdout.strip())
+    elif args.cmd == "status":
+        pids, port = running(PROFILE_ROOT / key)
+        print(json.dumps({"key": key, "running": bool(pids), "port": port, **(load_state(key) or {})}))
+
+
+if __name__ == "__main__":
+    main()

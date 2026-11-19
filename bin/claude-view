@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""kitty の claude-code ペインを決まった形に並べ替える（統括用）。
+
+  claude-view all                    kitty にいる全員を main タブに 2 段で並べる（いまの並び順を保つ）
+  claude-view focus ROLE             ROLE を右の大きな枠に出し、ほかは standby タブへ
+  claude-view pair ROLE ROLE         右の上下に 2 人
+  claude-view restore                最初の配置（設定の view.restore。既定は右上 dev-a、右下 dev-b）
+  claude-view add ROLE [--row N]     いまの配置に ROLE を足す（既定は人数の少ない段、N は上から 0,1,…）
+  claude-view remove ROLE            ROLE を standby タブへ下げる
+  claude-view swap A B               A と B の位置を入れ替える（片方が standby なら、もう片方と交代）
+  claude-view equalize               いまの配置のまま等分割にそろえる
+  claude-view rows "a,b/c"           任意の段組み（/ で段、, で横並び）
+  claude-view status                 いまの配置
+どの操作も最後は等分割（段ごとに幅を等しく、統括の左の列も 1 列分）にそろえる。
+  共通: --left ROLE（既定は設定の view.left か $CLAUDE_VIEW_LEFT、無ければ main）、--to SOCKET、--dry-run、
+        --force（保護する窓が前面でも実行）
+
+左の枠（統括）は動かさず、最後に入力先を左へ戻す。ペインを閉じる操作と send-text は使わない。
+設定の view.guard（プロセスの正規表現）に当たる窓（ゲームなど）が前面にあるときは何もせず、通知だけする。
+設定は lib/config.py（~/.config/claude-kitty/config.json と環境変数）。
+"""
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERE / "lib"))
+from config import kitten_path, load_view_config  # noqa: E402
+from core import kitty_pid_from_socket  # noqa: E402
+from geometry import tab_pane_fraction  # noqa: E402
+from view import (add_role, current_rows, parse_rows, plan, remove_role,  # noqa: E402
+                  split_two, swap_roles, validate)
+
+KITTEN = kitten_path(os.environ)
+STANDBY = "standby"
+
+
+def die(msg, code=1):
+    print(f"claude-view: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def kitty_socket(arg, left):
+    if arg:
+        return arg
+    if os.environ.get("KITTY_LISTEN_ON"):
+        return os.environ["KITTY_LISTEN_ON"]
+    rt = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    live = [p for p in rt.glob("kitty-*") if (pid := kitty_pid_from_socket(str(p))) and Path(f"/proc/{pid}").exists()]
+    # 統括（左の枠）のいる kitty を選ぶ（テスト用の kitty が同時にあっても取り違えない）
+    hits = [p for p in live if any(w["user_vars"].get("role") == left
+                                   for w in windows(ls(f"unix:{p}")))]
+    if len(hits) != 1:
+        die("対象の kitty を 1 つに決められない（--to で指定する）")
+    return f"unix:{hits[0]}"
+
+
+def kitten(sock, *args, check=True):
+    r = subprocess.run([KITTEN, "@", "--to", sock, *args], capture_output=True, text=True)
+    if check and r.returncode:
+        die(f"kitten @ {' '.join(args)} に失敗: {r.stderr.strip()}")
+    return r.stdout
+
+
+def ls(sock):
+    return json.loads(kitten(sock, "ls"))
+
+
+def windows(osw_list):
+    for osw in osw_list:
+        for tab in osw["tabs"]:
+            yield from tab["windows"]
+
+
+def role_map(osw_list):
+    """role → (window id, tab)。"""
+    out = {}
+    for osw in osw_list:
+        for tab in osw["tabs"]:
+            for w in tab["windows"]:
+                role = w.get("user_vars", {}).get("role")
+                if role:
+                    out[role] = (w["id"], tab)
+    return out
+
+
+def guarded_in_front(patterns):
+    """patterns（pgrep -f の正規表現）に当たるプロセスの窓が前面なら True。
+
+    ゲームなどにクリックやキーを送らない決まりのため。patterns が空なら KWin を呼ばずに False。
+    """
+    pids = set()
+    for pat in patterns:
+        r = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
+        pids |= {int(p) for p in r.stdout.split()}
+    if not pids:
+        return False
+    from kwin import active_window_pid
+    return active_window_pid() in pids
+
+
+def execute(sock, ops, main_tab_id, roles, dry):
+    for op in ops:
+        if dry:
+            print(" ".join(map(str, op)))
+            continue
+        kind = op[0]
+        if kind == "park":
+            kitten(sock, "detach-window", "--match", f"id:{roles[op[1]]}", "--target-tab", "@title",
+                   "--tab-title", STANDBY, "--create-if-missing", "--stay-in-tab")
+        elif kind == "bring":
+            kitten(sock, "detach-window", "--match", f"id:{roles[op[1]]}", "--target-tab", f"id:{main_tab_id}")
+        elif kind == "focus":
+            kitten(sock, "focus-window", "--match", f"id:{roles[op[1]]}")
+        elif kind == "rotate":
+            kitten(sock, "action", "layout_action", "rotate")
+        elif kind == "bias":
+            kitten(sock, "action", "layout_action", "bias", str(op[1]))
+
+
+def status(sock):
+    for osw in ls(sock):
+        for tab in osw["tabs"]:
+            names = [w.get("user_vars", {}).get("role", str(w["id"])) for w in tab["windows"]]
+            print(f"{tab['title']}{' *' if tab['is_active'] else ''}: {', '.join(names)}")
+
+
+def main(argv=None):
+    try:
+        conf = load_view_config(os.environ)
+    except ValueError as e:
+        die(str(e))
+    ap = argparse.ArgumentParser(prog="claude-view")
+    ap.add_argument("--left", default=conf["left"])
+    ap.add_argument("--to")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true", help="保護する窓（view.guard）が前面でも実行する")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("all", "restore", "status", "equalize"):
+        sub.add_parser(name)
+    p = sub.add_parser("focus"); p.add_argument("role")
+    p = sub.add_parser("pair"); p.add_argument("top"); p.add_argument("bottom")
+    p = sub.add_parser("rows"); p.add_argument("spec")
+    p = sub.add_parser("add"); p.add_argument("role"); p.add_argument("--row", type=int)
+    p = sub.add_parser("remove"); p.add_argument("role")
+    p = sub.add_parser("swap"); p.add_argument("a"); p.add_argument("b")
+    args = ap.parse_args(argv)
+
+    sock = kitty_socket(args.to, args.left)
+    if args.cmd == "status":
+        return status(sock)
+    snapshot = ls(sock)
+    smap = role_map(snapshot)
+    if args.left not in smap:
+        die(f"{args.left} が kitty に見つからない")
+    now = current_rows(smap[args.left][1], args.left, tab_pane_fraction)
+    others = [r for r in smap if r != args.left and all(r not in row for row in now)]
+    try:
+        rows = {"all": lambda: split_two([r for row in now for r in row] + others),
+                "restore": lambda: conf["restore"],
+                "equalize": lambda: now,
+                "focus": lambda: [[args.role]], "pair": lambda: [[args.top], [args.bottom]],
+                "rows": lambda: parse_rows(args.spec),
+                "add": lambda: add_role(now, args.role, args.row),
+                "remove": lambda: remove_role(now, args.role),
+                "swap": lambda: swap_roles(now, args.a, args.b)}[args.cmd]()
+    except ValueError as e:
+        die(str(e))
+
+    if not args.dry_run and not args.force and guarded_in_front(conf["guard"]):
+        subprocess.run(["notify-send", "claude-view", f"保護する窓が前面なので並べ替えを見送りました: {args.cmd}"])
+        die("保護する窓（view.guard）が前面にあるので何もしない（--force で実行）", 2)
+
+    # 同時に 2 つ並べ替えると形が崩れるので 1 つずつ
+    lock = open(Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "claude-view.lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    osw_list = ls(sock)
+    rmap = role_map(osw_list)
+    try:
+        validate(args.left, rows, rmap.keys())
+    except ValueError as e:
+        die(str(e))
+    left_id, main_tab = rmap[args.left]
+    main_roles = [w.get("user_vars", {}).get("role") for w in main_tab["windows"]]
+    if None in main_roles:
+        die("main タブに role の無いペインがある（並べ替えの対象外なので中止）")
+    roles = {r: wid for r, (wid, _) in rmap.items()}
+    execute(sock, plan(args.left, rows, main_roles), main_tab["id"], roles, args.dry_run)
+    if not args.dry_run:
+        status(sock)
+
+
+if __name__ == "__main__":
+    main()

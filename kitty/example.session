@@ -1,0 +1,20 @@
+# 例: 統括 1 人（左）と担当 5 人。各ペインは、別の場所（ほかの端末など）で動いている同じセッションが
+# /exit されるのを待ってから、このペインで resume する（claude-wait）。
+# <SESSION-ID-*> は `claude --resume` の一覧や ~/.claude/sessions/*.json の sessionId に置き換える。
+# 役割名（role）は claude-view と claude-browser が使う。名前を変えたら ~/.config/claude-kitty/config.json の
+# view.left / view.restore もそろえる（SETUP.md）。手元の版は kitty/<名前>.session に置けば git に入らない。
+new_tab main
+layout splits
+cd ~
+launch --title main --var role=main --var slot=left bash -lic 'claude-wait main <SESSION-ID-MAIN>'
+focus
+launch --title dev-a --var role=dev-a --var slot=right-top --location=vsplit --bias=75 bash -lic 'claude-wait dev-a <SESSION-ID-A>'
+launch --title dev-b --var role=dev-b --var slot=right-bottom --location=hsplit --bias=50 bash -lic 'claude-wait dev-b <SESSION-ID-B>'
+
+# いま前に出していない担当（claude-view focus / add で main タブへ持ってくる）
+new_tab standby
+layout splits
+cd ~
+launch --title dev-c --var role=dev-c --var slot=standby-1 bash -lic 'claude-wait dev-c <SESSION-ID-C>'
+launch --title dev-d --var role=dev-d --var slot=standby-2 --location=hsplit --bias=67 bash -lic 'claude-wait dev-d <SESSION-ID-D>'
+launch --title dev-e --var role=dev-e --var slot=standby-3 --location=hsplit bash -lic 'claude-wait dev-e <SESSION-ID-E>'

@@ -1,0 +1,5 @@
+__pycache__/
+# 手元のセッション（実在のセッション ID や役割名が入る）は公開しない。例は example.session
+kitty/*.session
+!kitty/example.session
+!kitty/claude3.session

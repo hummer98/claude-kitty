@@ -1,0 +1,15 @@
+#!/bin/bash
+# claude-code を並べた kitty を起動し、仮想デスクトップ2に置く（デスクトップの移動は KDE Plasma の KWin 用）。
+# kitty の場所は $CLAUDE_KITTY_KITTY で変えられる（既定は公式インストーラの ~/.local/kitty.app）。
+# claude-code の中から起動すると CLAUDE_* の環境変数を引き継ぎ、子の claude が
+# 「子セッション」扱いになって会話記録を保存しなくなるので、それらを消してから起動する。
+session=${1:-$HOME/.config/kitty/claude3.session}
+kitty=${CLAUDE_KITTY_KITTY:-$HOME/.local/kitty.app/bin/kitty}  # 下で CLAUDE_* を消す前に読む
+for v in $(env | grep -oE '^(CLAUDE[A-Z_]*|CLAUDECODE)='); do unset "${v%=}"; done
+cd ~ || exit 1
+"$kitty" --detach --class kitty-claude --start-as maximized --session "$session"
+sleep 2
+id=$(qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$(dirname "$(readlink -f "$0")")/../lib/kitty_to_d2.js" claude_kitty_to_d2) &&
+qdbus org.kde.KWin /Scripting/Script"$id" org.kde.kwin.Script.run >/dev/null
+sleep 1
+qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript claude_kitty_to_d2 >/dev/null
