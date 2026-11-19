@@ -1,0 +1,609 @@
+#!/usr/bin/env python3
+"""kitty の中の Claude Code セッションの名簿を保ち、kitty の再起動や落ちたあとに元へ戻す。
+
+  claude-roster save [--auto]                       いまの名簿を保存する（世代を残す。--auto はタイマー用）
+  claude-roster restore [ROLE...] [--from FILE] [--dry-run] [--include-absent] [--force]
+                                                    名簿の役割のうち、kitty にいないものを開いて並べ直す
+  claude-roster restart ROLE [--model M] [--cwd DIR] 1 人を起動し直す（idle のときだけ。保護するプロセスが動いている間はしない）
+  claude-roster status                              名簿といまの差
+  claude-roster show                                名簿の中身（1 行 1 人）
+  共通: --to SOCKET（kitty を指定）
+
+名簿: $CLAUDE_ROSTER_DIR（既定 $XDG_DATA_HOME/claude-kitty、無ければ ~/.local/share/claude-kitty）/roster.json。
+設定: ~/.config/claude-kitty/config.json の view.left / view.guard と roster
+  {"roster": {"models": {"dev-a": "opus"}, "ignore": ["scratch"], "generations": 5, "keep_absent_hours": 24}}
+ペインを閉じる操作と send-text は使わない。他のセッションの claude を止めるのは restart だけ。
+"""
+import argparse
+import fcntl
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERE / "lib"))
+from config import config_path, kitten_path, load_view_config  # noqa: E402
+from core import kitty_pid_from_socket  # noqa: E402
+from geometry import tab_pane_fraction  # noqa: E402
+from guard import guarded_in_front  # noqa: E402
+import roster as R  # noqa: E402
+
+ENV = os.environ
+KITTEN = kitten_path(ENV)
+SESSIONS = Path(ENV.get("CLAUDE_SESSIONS_DIR") or Path.home() / ".claude/sessions")
+PROJECTS = Path(ENV.get("CLAUDE_PROJECTS_DIR") or Path.home() / ".claude/projects")
+RT = Path(ENV.get("XDG_RUNTIME_DIR") or "/tmp")
+
+
+def die(msg, code=1):
+    print(f"claude-roster: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def roster_dir():
+    if ENV.get("CLAUDE_ROSTER_DIR"):
+        return Path(ENV["CLAUDE_ROSTER_DIR"])
+    base = Path(ENV["XDG_DATA_HOME"]) if ENV.get("XDG_DATA_HOME") else Path.home() / ".local/share"
+    return base / "claude-kitty"
+
+
+def roster_conf():
+    """設定の roster 節（無ければ既定）。壊れていれば止める（別のモデルで開かないように）。"""
+    out = {"models": {}, "ignore": [], "generations": 5, "keep_absent_hours": 24}
+    path = config_path(ENV)
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return out
+    except (OSError, ValueError) as e:
+        die(f"設定ファイルを読めない: {path}: {e}")
+    r = data.get("roster", {}) if isinstance(data, dict) else {}
+    if not isinstance(r, dict):
+        die(f"{path} の roster がオブジェクトでない")
+    if not isinstance(r.get("models", {}), dict) or not all(isinstance(v, str) for v in r.get("models", {}).values()):
+        die(f"{path} の roster.models は 役割→モデル名")
+    if not isinstance(r.get("ignore", []), list):
+        die(f"{path} の roster.ignore は役割のリスト")
+    g = r.get("generations", 5)
+    h = r.get("keep_absent_hours", 24)
+    if isinstance(g, bool) or not isinstance(g, int) or not 1 <= g <= 50:
+        die(f"{path} の roster.generations は 1〜50")
+    if isinstance(h, bool) or not isinstance(h, (int, float)) or h < 0:
+        die(f"{path} の roster.keep_absent_hours は 0 以上の数")
+    out.update(models=r.get("models", {}), ignore=r.get("ignore", []), generations=g, keep_absent_hours=h)
+    return out
+
+
+# ---- プロセスとセッション ---------------------------------------------------
+
+def start_time(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def ppid_of(pid):
+    try:
+        return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def cmdline(pid):
+    try:
+        return [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
+    except OSError:
+        return []
+
+
+def live_sessions():
+    """~/.claude/sessions/*.json のうち、プロセスが生きているもの（procStart で pid の再利用を除く）。"""
+    out = []
+    for f in SESSIONS.glob("*.json"):
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        pid = d.get("pid") or (int(f.stem) if f.stem.isdigit() else None)
+        st = start_time(pid) if pid else None
+        if st is None or (d.get("procStart") is not None and str(d["procStart"]) != st):
+            continue
+        d["pid"] = pid
+        out.append(d)
+    return out
+
+
+def busy_sessions(sessions):
+    """{session_id: 理由}。どこかで claude が開いている、または claude-wait が待っている ID（開くと二重になる）。
+
+    claude-wait のロックは試しに取ると、ちょうど起動した claude-wait を追い返してしまうので、
+    /proc のコマンド行で見る。
+    """
+    busy = {s["sessionId"]: f"いま動いている (pid {s['pid']})" for s in sessions if s.get("sessionId")}
+    me = os.getpid()
+    for p in Path("/proc").iterdir():
+        if not p.name.isdigit() or int(p.name) == me:
+            continue
+        info = R.parse_argv(cmdline(int(p.name)))
+        if info and info.get("session_id") and info["session_id"] not in busy:
+            what = "claude-wait が待っている" if info["tool"] == "claude-wait" else "claude が開いている"
+            busy[info["session_id"]] = f"{what} (pid {p.name})"
+    return busy
+
+
+def settings_model(cwd):
+    return R.settings_model(cwd, lambda p: Path(p).read_text())
+
+
+def transcript_model(sid):
+    """会話記録の末尾から、最後の assistant の model。大きいので後ろから読む。"""
+    try:
+        files = list(PROJECTS.glob(f"*/{sid}.jsonl"))
+    except OSError:
+        return None
+    files = [f for f in files if f.is_file()]
+    if not files:
+        return None
+    f = max(files, key=lambda x: x.stat().st_mtime)
+    size = f.stat().st_size
+    for span in (256 * 1024, 4 * 1024 * 1024):
+        with open(f, "rb") as fh:
+            fh.seek(max(0, size - span))
+            data = fh.read()
+        lines = data.decode(errors="replace").splitlines()
+        if size > span:
+            lines = lines[1:]  # 途中から読んだ最初の行は切れている
+        m = R.transcript_model(lines)
+        if m or size <= span:
+            return m
+    return None
+
+
+# ---- kitty ------------------------------------------------------------------
+
+def kitten(sock, *args, check=True):
+    r = subprocess.run([KITTEN, "@", "--to", sock, *args], capture_output=True, text=True, timeout=10)
+    if check and r.returncode:
+        die(f"kitten @ {' '.join(args[:2])} に失敗: {r.stderr.strip()}")
+    return r
+
+
+def ls(sock):
+    r = kitten(sock, "ls", check=False)
+    if r.returncode:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+def roles_in(osw_list):
+    return {(w.get("user_vars") or {}).get("role") for osw in osw_list for t in osw.get("tabs", [])
+            for w in t.get("windows", [])} - {None}
+
+
+def kitties():
+    """動いている kitty の [(socket, ls)]。"""
+    out = []
+    for p in sorted(RT.glob("kitty-*")):
+        pid = kitty_pid_from_socket(str(p))
+        if not pid or not Path(f"/proc/{pid}").exists():
+            continue
+        data = ls(f"unix:{p}")
+        if data is not None:
+            out.append((f"unix:{p}", data))
+    return out
+
+
+def find_kitty(arg, left, known_roles=()):
+    """(socket, ls) か (None, None)。統括のいる kitty、いなければ名簿の役割がいちばん多い kitty。"""
+    if arg:
+        data = ls(arg)
+        if data is None:
+            die(f"{arg} の kitty に繋がらない")
+        return arg, data
+    ks = kitties()
+    # 試験用の kitty（別のクラス）が同じ役割名で動いていることがあるので、claude-kitty のクラスの窓を優先する
+    cls = ENV.get("CLAUDE_KITTY_CLASS") or "kitty-claude"
+    mine = [k for k in ks if any(o.get("wm_class") == cls for o in k[1])]
+    ks = mine or ks
+    hits = [k for k in ks if left in roles_in(k[1])]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        die(f"{left} のいる kitty が 2 つある（--to で指定する）")
+    known = set(known_roles)
+    scored = sorted(((len(known & roles_in(d)), s, d) for s, d in ks), key=lambda x: -x[0])
+    if scored and scored[0][0] > 0:
+        if len(scored) > 1 and scored[1][0] == scored[0][0]:
+            die("名簿の役割のいる kitty を 1 つに決められない（--to で指定する）")
+        return scored[0][1], scored[0][2]
+    return None, None
+
+
+# ---- 名簿の読み書き -------------------------------------------------------------
+
+def roster_lock(block=True):
+    d = roster_dir()
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fh = open(d / ".lock", "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+    except OSError:
+        fh.close()
+        return None
+    return fh
+
+
+def load_roster(path=None, set_aside=False):
+    """名簿を読む。set_aside（保存のとき）なら、読めない名簿を roster.json.bad へ退けて None を返す
+    （壊れた名簿のせいで自動保存が永久に止まらないように。退けたものは手で調べられる）。"""
+    path = Path(path) if path else roster_dir() / "roster.json"
+    try:
+        return R.check_roster(json.loads(path.read_text()))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        if not set_aside:
+            die(f"名簿を読めない: {path}: {e}（claude-roster show --from {path}.1 で前の世代を見る）")
+        bad = path.with_name(path.name + ".bad")
+        os.replace(path, bad)
+        print(f"claude-roster: 読めない名簿を {bad} へ退けた: {e}", file=sys.stderr)
+        return None
+
+
+def write_roster(data, generations):
+    """roster.json に書く。中身が前と意味のある違いがあれば、前のものを roster.json.1 … へ回す。"""
+    d = roster_dir()
+    cur = d / "roster.json"
+    old = None
+    try:
+        old = json.loads(cur.read_text())
+    except (OSError, ValueError):
+        pass
+    changed = R.signature(old) != R.signature(data)
+    if changed and old is not None:
+        for i in range(generations - 1, 0, -1):
+            src = cur if i == 1 else d / f"roster.json.{i - 1}"
+            if src.exists():
+                os.replace(src, d / f"roster.json.{i}")
+    tmp = d / f".roster.json.{os.getpid()}.tmp"
+    # セッション ID とフォルダが入るので本人だけ（作るときから 0600）
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps(data, ensure_ascii=False, indent=1))
+    os.replace(tmp, cur)
+    return changed
+
+
+def current_roster(sock, data, left, conf):
+    try:
+        return _current_roster(data, left, conf)
+    except (KeyError, ValueError) as e:  # splits 以外の配置（stack でズーム中など）で位置が取れないとき
+        die(f"ペインの配置を読めない（splits でないタブがあるかもしれない）: {e}")
+
+
+def _current_roster(data, left, conf):
+    return R.build_roster(data, live_sessions(), left, tab_pane_fraction, conf["models"], settings_model,
+                          transcript_model, now=time.time(), ignore=set(conf["ignore"]))
+
+
+def show(rost):
+    for t in rost["tabs"]:
+        shape = f"  段組み {R.rows_spec(t['rows'])}" if "rows" in t else ""
+        print(f"[{t['title']}] {', '.join(t['roles'])}{shape}")
+    for role, e in rost["sessions"].items():
+        sid = (e.get("session_id") or "-")[:8]
+        extra = " 引き継ぎ" if e.get("carried") else ""
+        extra += " （ペイン無し）" if e.get("absent_since") else ""
+        print(f"  {role}: {sid} {e.get('state')} {e.get('kind') or '-'} model={e.get('model') or '-'}"
+              f"({e.get('model_source') or '-'}) {e.get('cwd')}{extra}")
+
+
+# ---- コマンド ---------------------------------------------------------------
+
+def cmd_save(args, view, conf):
+    lock = roster_lock(block=not args.auto)
+    if lock is None:
+        print("claude-roster: 復元か保存の最中なので、今回は保存しない", file=sys.stderr)
+        return 0
+    old = load_roster(set_aside=True)
+    sock, data = find_kitty(args.to, view["left"], (old or {}).get("sessions", {}).keys())
+    if sock is None:
+        # kitty が落ちた直後に空の名簿で上書きしない（戻すための名簿が消えてしまう）
+        print("claude-roster: 対象の kitty が無いので保存しない（前の名簿を残す）", file=sys.stderr)
+        return 0 if args.auto else 1
+    new = current_roster(sock, data, view["left"], conf)
+    if not new["sessions"]:
+        print("claude-roster: 役割のあるペインが無いので保存しない", file=sys.stderr)
+        return 0 if args.auto else 1
+    if args.auto and old and view["left"] in old["sessions"] and view["left"] not in new["sessions"]:
+        # 統括のペインが無いときに書くと、統括と段組みが名簿から消える（戻すと配置が崩れる）。手の save で確定する
+        print(f"claude-roster: 統括 {view['left']} のペインが無いので自動では保存しない（claude-roster save で確定）",
+              file=sys.stderr)
+        return 0
+    new["socket"] = sock
+    new = R.carry_over(new, old, new["saved_at"], conf["keep_absent_hours"] * 3600, drop_absent=not args.auto)
+    changed = write_roster(new, conf["generations"])
+    if not args.auto:
+        show(new)
+        print(f"保存した: {roster_dir() / 'roster.json'}{'（前と同じ中身）' if not changed else ''}")
+        if new.get("skipped"):
+            print("入れなかった役割（名前に区切り文字がある・重複）: " + ", ".join(new["skipped"]))
+    return 0
+
+
+def wait_for_kitty(left, roles, before, timeout=20.0):
+    """新しく起動した kitty の socket を待つ。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for sock, data in kitties():
+            if sock in before:
+                continue
+            have = roles_in(data)
+            if left in have or set(roles) & have:
+                return sock
+        time.sleep(0.5)
+    return None
+
+
+def run_view(sock, left, rows, dry):
+    spec = R.rows_spec(rows)
+    cmd = [str(HERE / "bin/claude-view"), "--to", sock, "--left", left] + (["--dry-run"] if dry else []) + ["rows", spec]
+    print("並べ直す: claude-view rows " + repr(spec))
+    r = subprocess.run(cmd)
+    if r.returncode == 2:
+        print("claude-roster: 保護する窓が前面なので並べ直さなかった。あとで claude-view rows " + repr(spec), file=sys.stderr)
+    return r.returncode
+
+
+def cmd_restore(args, view, conf):
+    rost = load_roster(args.source)
+    if rost is None:
+        die("名簿が無い（先に claude-roster save）")
+    left = rost["left"]
+    if not args.dry_run and not args.force and guarded_in_front(view["guard"]):
+        die("保護する窓（view.guard）が前面にあるので開かない（--force で実行）", 2)
+    lock = roster_lock()  # 途中で自動保存が半端な名簿を書かないように
+    sock, data = find_kitty(args.to, left, rost["sessions"].keys())
+    present = roles_in(data) if data else set()
+    busy = busy_sessions(live_sessions())
+    try:
+        launch, skipped = R.plan_restore(rost, present, busy, only=args.roles, include_absent=args.include_absent)
+    except ValueError as e:
+        die(str(e))
+    for role, why in skipped:
+        print(f"開かない: {role}: {why}")
+    if any("いま動いている" in why for _, why in skipped):
+        print("（kitty が落ちた直後なら、claude の後片付けが終わっていないだけかもしれない。数秒後にもう一度 restore する）")
+    wait_cmd = ENV.get("CLAUDE_ROSTER_WAIT_CMD") or str(HERE / "bin/claude-wait")
+    main = next((t for t in rost["tabs"] if "rows" in t), None)
+    if sock is None:
+        if not args.dry_run and not args.force and guard_running(view["guard"]):
+            # 新しい kitty の窓は最大化して出るので、保護するアプリが背面で動いているだけでも開かない
+            die("保護するプロセス（view.guard。全画面のアプリなど）が動いているので kitty を起動しない（--force で実行）", 2)
+        if left not in launch:
+            print(f"注意: 統括 {left} を開かないので、並べ直しはしない")
+        text = R.session_file(rost, launch, wait_cmd, header=f"claude-roster restore（名簿 {time.strftime('%F %T', time.localtime(rost['saved_at']))}）")
+        if text is None:
+            print("開くものが無い")
+            return 0
+        sdir = RT / "claude-roster"
+        sdir.mkdir(mode=0o700, exist_ok=True)
+        sfile = sdir / f"restore-{int(time.time())}.session"
+        sfile.write_text(text)
+        print(f"kitty が無いので、セッションファイルから起動する: {sfile}")
+        if args.dry_run:
+            print(text, end="")
+            return 0
+        before = {s for s, _ in kitties()}
+        launcher = ENV.get("CLAUDE_ROSTER_LAUNCHER") or str(HERE / "bin/claude-kitty")
+        subprocess.run([launcher, str(sfile)], check=False)
+        sock = wait_for_kitty(left, launch, before)
+        if sock is None:
+            die("起動した kitty が見つからない（20 秒待った）")
+        print(f"起動した: {sock}")
+        rows = R.filter_rows(main.get("rows") if main else [], set(launch))
+        if left in launch and rows:
+            time.sleep(1.0)
+            run_view(sock, left, rows, False)
+        lock.close()
+        return 0
+    # kitty は動いている: 欠けた分だけ足す
+    if not launch:
+        print("欠けている役割は無い")
+        return 0
+    tabs = {t["title"] for osw in data for t in osw.get("tabs", [])}
+    for role in launch:
+        # 統括は名簿の統括のタブ（無ければ新しいタブ）へ。ほかは standby に入れて claude-view rows で前に出す
+        title = (main["title"] or "main") if role == left and main else R.target_tab(rost, role)
+        a = R.launch_args(role, rost["sessions"][role], wait_cmd, title, title in tabs)
+        print("足す: " + role + (f"（タブ {title}）"))
+        if args.dry_run:
+            print("  kitten @ " + " ".join(a))
+            continue
+        kitten(sock, *a)
+        tabs.add(title)
+    if (left in present or left in launch) and main and any(r in launch for row in main.get("rows", []) for r in row):
+        rows = R.filter_rows(main["rows"], present | set(launch))
+        if not args.dry_run:
+            time.sleep(0.5)
+        run_view(sock, left, rows, args.dry_run)
+    lock.close()
+    return 0
+
+
+def guard_running(patterns):
+    for pat in patterns:
+        r = subprocess.run(["pgrep", "-f", "--", pat], capture_output=True, text=True)
+        if r.returncode > 1:
+            die(f"view.guard の {pat!r} で pgrep が失敗: {r.stderr.strip()}")
+        if r.stdout.split():
+            return True
+    return False
+
+
+def state_word(sid):
+    try:
+        r = subprocess.run([str(HERE / "bin/claude-state"), "get", sid], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def read_waiter(sid):
+    try:
+        d = json.loads((RT / "claude-wait" / f"{sid}.waiter").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not isinstance(d.get("pid"), int):
+        return None
+    if start_time(d["pid"]) != d.get("start"):
+        return None  # その claude-wait はもういない（pid の再利用も除く）
+    return d
+
+
+def find_pane(data, role):
+    for osw in data:
+        for t in osw.get("tabs", []):
+            for w in t.get("windows", []):
+                if (w.get("user_vars") or {}).get("role") == role:
+                    return w
+    return None
+
+
+def cmd_restart(args, view, conf):
+    rost = load_roster()
+    entry = (rost or {}).get("sessions", {}).get(args.role) or {}
+    if guard_running(view["guard"]):
+        die("保護するプロセス（view.guard。全画面のアプリなど）が動いているので止めない", 2)
+    sock, data = find_kitty(args.to, view["left"], (rost or {}).get("sessions", {}).keys())
+    if sock is None:
+        die("対象の kitty が無い（claude-roster restore）")
+    sessions = live_sessions()
+    by_pid = {s["pid"]: s for s in sessions}
+    by_sid = {s.get("sessionId"): s for s in sessions}
+    win = find_pane(data, args.role)
+    pane = R.pane_session(win, by_pid, by_sid) if win else None
+    sj = (pane or {}).get("session")
+    if pane and sj is None and pane.get("session_id"):
+        sj = by_sid.get(pane["session_id"])
+    sid = (pane or {}).get("session_id")
+    wait_id = (pane or {}).get("wait_id")  # claude-wait の引数の ID（/clear のあとは sid と違う）
+    waiter = read_waiter(wait_id) if wait_id else None
+    # 前面の claude の親が、その claude-wait であること（止めたあとに続きを開けるのはそれだけ）
+    if pane and pane.get("front_pid") and waiter and ppid_of(pane["front_pid"]) != waiter["pid"]:
+        waiter = None
+    why = R.restart_refusal(args.role, pane, sj, state_word(sid) if sid else "", False, waiter)
+    if why:
+        die(why, 3)
+    target = R.stop_target(pane, sj, sessions, allow_bg=args.allow_bg)
+    if not target:
+        die("止める pid を決められない（背景セッションは --allow-bg を付けたときだけ。host を他と共有していれば止めない）", 3)
+    # 名簿の値は、名簿のセッションがいまのセッションと同じときだけ使う（保存のあとに入れ替わっていれば、いまの値）
+    same = entry.get("session_id") == sid
+    cwd = args.cwd or (entry.get("cwd") if same else None) or sj.get("cwd")
+    if cwd and not Path(cwd).is_dir():
+        die(f"フォルダが無い: {cwd}")
+    model = args.model or (entry.get("model") if same else None) or pane.get("argv_model")
+    print(f"{args.role}: {sid[:8]} を止めて、{cwd} / モデル {model or '既定'} で開き直す（pid {target}"
+          f"{'、背景セッションの host' if sj.get('kind') == 'bg' else ''}）")
+    if args.dry_run:
+        return 0
+    nxt = RT / "claude-wait" / f"{wait_id}.next"
+    tmp = nxt.with_name(f".{nxt.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(R.next_payload(waiter["pid"], wait_id, sid, cwd, model, time.time())))
+    os.replace(tmp, nxt)
+    # 止める直前にもう一度: 同じプロセスのまま idle か（確かめてから送るまでの間に動き出していないか）
+    st = start_time(target)
+    again = next((s for s in live_sessions() if s.get("sessionId") == sid), None)
+    word = state_word(sid)
+    if (st is None or not again or again.get("status") != "idle" or (word and word not in ("idle", "done"))
+            or guard_running(view["guard"])):
+        nxt.unlink(missing_ok=True)
+        die("止める直前に状態が変わったのでやめた", 3)
+    os.kill(target, signal.SIGTERM)
+    front = pane.get("front_pid")
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline and start_time(target) == st:
+        time.sleep(0.3)
+    if start_time(target) == st:
+        # 後で人が /exit したときに勝手に開き直さないよう、続きの指示は消す
+        nxt.unlink(missing_ok=True)
+        print(f"claude-roster: {args.timeout:.0f} 秒で止まらなかった（続きの指示は消した。止まればシェルに戻る）", file=sys.stderr)
+        return 1
+    if sj.get("kind") == "bg" and front and front != target and start_time(front):
+        # 背景セッションの前面は host が止まれば終わるはず。残っていれば前面も止める（claude-wait が続きを開く）
+        time.sleep(3)
+        if start_time(front) and ppid_of(front) == waiter["pid"]:
+            os.kill(front, signal.SIGTERM)
+    while time.monotonic() < deadline + 30:
+        s = next((s for s in live_sessions() if s.get("sessionId") == sid), None)
+        if s and s["pid"] != target:
+            print(f"開き直した: pid {s['pid']}（/rename {args.role} が要るかもしれない）")
+            return 0
+        time.sleep(0.5)
+    print("claude-roster: 止めたが、まだ開き直したのを確認できない（ペインを見る）", file=sys.stderr)
+    return 1
+
+
+def cmd_status(args, view, conf):
+    rost = load_roster()
+    if rost is None:
+        die("名簿が無い（先に claude-roster save）")
+    sock, data = find_kitty(args.to, rost["left"], rost["sessions"].keys())
+    now_r = current_roster(sock, data, rost["left"], conf) if sock else None
+    age = time.time() - rost["saved_at"]
+    print(f"名簿: {time.strftime('%F %T', time.localtime(rost['saved_at']))}（{age / 60:.0f} 分前）"
+          f"、kitty: {sock or '無し'}")
+    lines = R.diff_lines(rost, now_r)
+    for line in lines or ["差なし"]:
+        print(line)
+    return 0
+
+
+def main(argv=None):
+    if (sys.argv[1:] if argv is None else argv) == ["--version"]:  # 版の表示だけは設定や kitty を読まずに返す
+        from version import handle_version
+        handle_version((sys.argv[1:] if argv is None else argv), "claude-roster")
+        return 0
+    sys.stdout.reconfigure(line_buffering=True)  # 子の claude-view の出力と順番が入れ替わらないように
+    try:
+        view = load_view_config(ENV)
+    except ValueError as e:
+        die(str(e))
+    conf = roster_conf()
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--to", help="kitty の socket（unix:/run/user/…/kitty-<pid>）")
+    ap = argparse.ArgumentParser(prog="claude-roster")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("save", parents=[common]); p.add_argument("--auto", action="store_true")
+    p = sub.add_parser("restore", parents=[common]); p.add_argument("roles", nargs="*")
+    p.add_argument("--from", dest="source"); p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--include-absent", action="store_true"); p.add_argument("--force", action="store_true")
+    p = sub.add_parser("restart", parents=[common]); p.add_argument("role"); p.add_argument("--model"); p.add_argument("--cwd")
+    p.add_argument("--timeout", type=float, default=30.0); p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--allow-bg", action="store_true", help="背景セッション（kind=bg）も止める（実物では確かめていない）")
+    sub.add_parser("status", parents=[common])
+    p = sub.add_parser("show"); p.add_argument("--from", dest="source")
+    args = ap.parse_args(argv)
+    if args.cmd == "show":
+        rost = load_roster(args.source)
+        if rost is None:
+            die("名簿が無い")
+        show(rost)
+        return 0
+    return {"save": cmd_save, "restore": cmd_restore, "restart": cmd_restart, "status": cmd_status}[args.cmd](args, view, conf)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""usage: claude-wait <名前> <セッションID> [--rename]
+"""usage: claude-wait <名前> <セッションID> [--model <モデル>] [--rename]
 
+--model を付けると、そのモデルで再開する（claude --resume <ID> --model <モデル>）。
 --rename を付けると、再開するときにセッション名を <名前> にする（claude --resume <ID> -n <名前>）。
 ただし resume では -n が効かないので、再開の前に「/rename <名前> と打ってください」と表示する。
 
@@ -13,6 +14,12 @@
 - JSON はプロセスの後片付けの途中で消えるので、見つけた pid そのもの（procStart で同一性を確認）が消えるまで待つ。
   /clear で sessionId が変わっても、その pid が生きている間は待ち続ける。
 - 見当たらない状態が 3 回続いてから再開する。同じ ID の claude-wait 同士は flock で 1 つだけにする。
+
+続きの指示（claude-roster restart が書く）: claude が終わったとき $XDG_RUNTIME_DIR/claude-wait/<ID>.next があり、
+この claude-wait 宛て（pid）で新しければ（5 分以内）、シェルに戻らずに、その cwd とモデルで resume し直す
+（開く ID は指示の中のもの。/clear で ID が変わっていても、いまの会話に戻る。ファイルの名前は引数の ID のまま）。
+そのために、claude を開いている間は $XDG_RUNTIME_DIR/claude-wait/<ID>.waiter に自分の pid を書いておく
+（claude-roster はこれを見て、止めても続きを開ける claude-wait かを確かめる）。
 """
 import fcntl
 import json
@@ -26,8 +33,14 @@ from pathlib import Path
 
 INTERVAL = float(os.environ.get("CLAUDE_WAIT_INTERVAL", "2"))
 SESSIONS = Path(os.environ.get("CLAUDE_SESSIONS_DIR", Path.home() / ".claude/sessions"))
+CLAUDE = os.environ.get("CLAUDE_WAIT_CLAUDE") or "claude"  # テスト用: 偽の claude
 NEEDED_MISSES = 3
 TRACE = bool(os.environ.get("CLAUDE_WAIT_TRACE"))  # テスト用: 判定の変化を stderr に出す（固定の sleep で待たずに済むように）
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+    from roster import read_next  # noqa: E402
+except Exception:  # lib が読めなくても、待って開くことはできるように（続きの指示だけ使えない）
+    read_next = None
 
 
 def shell():
@@ -76,13 +89,81 @@ def find_live(sid):
     return ("unsure", None, None, None) if unsure else ("none", None, None, None)
 
 
+def wait_free(name, sid):
+    """sid を開いているプロセスが確実にいなくなるまで待つ。待ったことを表示したら True。"""
+    misses, told, last = 0, False, None
+    while misses < NEEDED_MISSES:
+        state, pid, start, kind = find_live(sid)
+        if TRACE and state != last:
+            print(f"trace: {state}", file=sys.stderr, flush=True)
+            last = state
+        if state == "live":
+            if not told:
+                if kind == "bg":
+                    # daemon の中の背景セッションは、前面の claude を閉じても終わらない（それで待ち続けた事故があった）
+                    print(f"{name} ({sid})\nこのセッションは背景（daemon）で動いています。"
+                          "前面の claude を閉じても終わりません。"
+                          f"idle を確かめてから、そのプロセス（pid {pid}）を止めてください。"
+                          "止まれば、ここで自動的に再開します。（Ctrl-C で待機をやめる）", flush=True)
+                else:
+                    print(f"{name} ({sid})\nいま別の場所で動いています (pid {pid})。"
+                          "そちらで /exit すると、ここで自動的に再開します。（Ctrl-C で待機をやめる）", flush=True)
+                told = True
+            while start_time(pid) == start:  # JSON が消えても、プロセスが終わるまでは待つ
+                time.sleep(INTERVAL)
+            misses = 0
+        elif state == "unsure":
+            misses = 0
+            time.sleep(INTERVAL / 4)
+        else:
+            misses += 1
+            if misses < NEEDED_MISSES:
+                time.sleep(INTERVAL / 2)
+    return told
+
+
+def write_json(path, data):
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data))
+    os.replace(tmp, path)
+
+
+def take_next(path, wait_id):
+    """続きの指示を読んで消す（1 回だけ使う）。この claude-wait 宛てで新しいものだけ {"session_id", "cwd", "model"}。"""
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    if read_next is None:
+        return None
+    return read_next(text, os.getpid(), wait_id, time.time())
+
+
 def main():
-    args = [a for a in sys.argv[1:] if a != "--rename"]
-    rename = "--rename" in sys.argv[1:]
-    if len(args) != 2:
-        print("usage: claude-wait <name> <session-id> [--rename]")
+    if sys.argv[1:] == ["--version"]:  # 版の表示だけは待たずに返す（シェルにも入らない）
+        from version import handle_version
+        handle_version(sys.argv[1:], "claude-wait")
+        return
+    argv, rename, model = [], False, None
+    it = iter(sys.argv[1:])
+    for a in it:
+        if a == "--rename":
+            rename = True
+        elif a == "--model":
+            model = next(it, None)
+        elif a.startswith("--model="):
+            model = a.split("=", 1)[1]
+        else:
+            argv.append(a)
+    if len(argv) != 2 or ("--model" in sys.argv[1:] and not model):
+        print("usage: claude-wait <name> <session-id> [--model <model>] [--rename]")
         shell()
-    name, sid = args
+    name, sid = argv
+    wait_id = sid  # 引数の ID（ロック・.waiter・.next の名前）。sid は開く ID で、続きの指示で変わりうる
     if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", sid):
         print(f"claude-wait: セッション ID の形が違う: {sid}")
         shell()
@@ -95,35 +176,7 @@ def main():
         shell()
     sys.stdout.write(f"\033]2;{name} (待機中)\a")
     try:
-        misses, told, last = 0, False, None
-        while misses < NEEDED_MISSES:
-            state, pid, start, kind = find_live(sid)
-            if TRACE and state != last:
-                print(f"trace: {state}", file=sys.stderr, flush=True)
-                last = state
-            if state == "live":
-                if not told:
-                    if kind == "bg":
-                        # daemon の中の背景セッションは、前面の claude を閉じても終わらない（それで待ち続けた事故があった）
-                        print(f"{name} ({sid})\nこのセッションは背景（daemon）で動いています。"
-                              "前面の claude を閉じても終わりません。"
-                              f"idle を確かめてから、そのプロセス（pid {pid}）を止めてください。"
-                              "止まれば、ここで自動的に再開します。（Ctrl-C で待機をやめる）", flush=True)
-                    else:
-                        print(f"{name} ({sid})\nいま別の場所で動いています (pid {pid})。"
-                              "そちらで /exit すると、ここで自動的に再開します。（Ctrl-C で待機をやめる）", flush=True)
-                    told = True
-                while start_time(pid) == start:  # JSON が消えても、プロセスが終わるまでは待つ
-                    time.sleep(INTERVAL)
-                misses = 0
-            elif state == "unsure":
-                misses = 0
-                time.sleep(INTERVAL / 4)
-            else:
-                misses += 1
-                if misses < NEEDED_MISSES:
-                    time.sleep(INTERVAL / 2)
-        if told:
+        if wait_free(name, sid):
             print("終了を確認しました。再開します…", flush=True)
     except KeyboardInterrupt:
         print(f"\n[{name}] 待機をやめました。再開するには: claude-wait {name} {sid}")
@@ -131,10 +184,47 @@ def main():
         shell()
     # claude の Ctrl-C で自分が止まらないように、待ち受け側は SIGINT を無視し、子には既定に戻して渡す
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    if rename:  # resume では -n で名前が変わらないので、手で打ってもらう（-n は害がないので残す）
-        print(f"[{name}] 再開したら /rename {name} と打ってください。", flush=True)
-    subprocess.run(["claude", "--resume", sid] + (["-n", name] if rename else []),
-                   preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+    wdir = rt / "claude-wait"
+    waiter, nxt = wdir / f"{wait_id}.waiter", wdir / f"{wait_id}.next"
+    try:
+        wdir.mkdir(mode=0o700, exist_ok=True)
+        try:
+            nxt.unlink()  # 前の claude-wait 宛ての残り（pid が違うので使われないが、紛らわしいので消す）
+        except FileNotFoundError:
+            pass
+        write_json(waiter, {"pid": os.getpid(), "start": start_time(os.getpid()), "name": name, "session_id": wait_id})
+    except OSError as e:
+        print(f"[{name}] 続きの指示の置き場を作れない（restart は使えない）: {e}", flush=True)
+    while True:
+        if rename:  # resume では -n で名前が変わらないので、手で打ってもらう（-n は害がないので残す）
+            print(f"[{name}] 再開したら /rename {name} と打ってください。", flush=True)
+        subprocess.run([CLAUDE, "--resume", sid] + (["--model", model] if model else []) + (["-n", name] if rename else []),
+                       preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        follow = take_next(nxt, wait_id)
+        if not follow:
+            break
+        sid = follow["session_id"]
+        print(f"[{name}] 続きの指示で再開します（フォルダ {follow['cwd'] or os.getcwd()}、"
+              f"モデル {follow['model'] or model or '既定'}）…", flush=True)
+        if follow["cwd"]:
+            try:
+                os.chdir(follow["cwd"])
+            except OSError as e:
+                print(f"[{name}] フォルダに移れない（いまのフォルダのまま）: {e}", flush=True)
+        model = follow["model"] or model
+        # 止めた claude（背景セッションなら daemon の中の host）が確実に終わってから開く。
+        # 待っている間は Ctrl-C でやめられるように SIGINT を戻す
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            wait_free(name, sid)
+        except KeyboardInterrupt:
+            print(f"\n[{name}] 待機をやめました。再開するには: claude-wait {name} {sid}")
+            break
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        waiter.unlink()
+    except OSError:
+        pass
     lock.close()  # claude が終わるまでロックを持つ（その間に別の claude-wait が開かないように）
     print(f"[{name}] claude が終了しました。再開するには: claude --resume {sid}")
     shell()

@@ -1,0 +1,17 @@
+# claude-state watch: done（完了・未読）のペインに 2 秒続けてフォーカスしたら idle に戻す常駐。
+# kitty の watcher は、動いている kitty で設定を読み直しても前からあるペインに付かないため、kitty の外で同じ規則を行う。
+#
+#   cp contrib/systemd/claude-state-watch.service ~/.config/systemd/user/
+#   （ExecStart のパスを、このリポジトリの場所に合わせる）
+#   systemctl --user daemon-reload && systemctl --user enable --now claude-state-watch.service
+[Unit]
+Description=claude-state watch (done のペインを見たら idle に戻す)
+
+[Service]
+ExecStart=/usr/bin/python3 %h/claude-kitty/bin/claude-state watch
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=default.target

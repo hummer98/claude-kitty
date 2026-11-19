@@ -3,12 +3,20 @@
 # kitty の場所は $CLAUDE_KITTY_KITTY で変えられる（既定は公式インストーラの ~/.local/kitty.app）。
 # claude-code の中から起動すると CLAUDE_* の環境変数を引き継ぎ、子の claude が
 # 「子セッション」扱いになって会話記録を保存しなくなるので、それらを消してから起動する。
+# 窓のクラスは $CLAUDE_KITTY_CLASS（既定 kitty-claude）、起動の形は $CLAUDE_KITTY_START_AS（既定 maximized）。
+# 試験用の kitty を別のクラスで起動したときは、本物の窓を動かさないよう KWin の移動をしない。
+if [ "$*" = --version ]; then  # 版は lib/version.py が VERSION から読む（ほかのコマンドと同じ所）
+	exec python3 "$(dirname "$(readlink -f "$0")")/../lib/version.py" claude-kitty
+fi
 session=${1:-$HOME/.config/kitty/claude3.session}
 kitty=${CLAUDE_KITTY_KITTY:-$HOME/.local/kitty.app/bin/kitty}
+class=${CLAUDE_KITTY_CLASS:-kitty-claude}
+start_as=${CLAUDE_KITTY_START_AS:-maximized}
 # この道具自身の設定（CLAUDE_KITTY_* / CLAUDE_VIEW_*）は残し、中の claude-view に届ける
 for v in $(env | grep -oE '^(CLAUDE[A-Z_]*|CLAUDECODE)=' | grep -vE '^CLAUDE_(KITTY|VIEW)_'); do unset "${v%=}"; done
 cd ~ || exit 1
-"$kitty" --detach --class kitty-claude --start-as maximized --session "$session"
+"$kitty" --detach --class "$class" --start-as "$start_as" --session "$session"
+[ "$class" = kitty-claude ] || exit 0
 sleep 2
 id=$(qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$(dirname "$(readlink -f "$0")")/../lib/kitty_to_d2.js" claude_kitty_to_d2) &&
 qdbus org.kde.KWin /Scripting/Script"$id" org.kde.kwin.Script.run >/dev/null

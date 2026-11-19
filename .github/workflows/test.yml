@@ -1,0 +1,32 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# 同じ枝・PR に続けて push したら、古い方の実行は止める
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.x"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      # テストは kitty・Chrome・KWin・Node を使わない（どれも偽物）。git と pgrep（procps）は ubuntu-latest に入っている
+      - name: Run all tests
+        run: |
+          python --version
+          python tests/run.py

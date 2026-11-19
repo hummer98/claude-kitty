@@ -27,10 +27,12 @@ kitty は公式のインストーラ（`curl -L https://sw.kovidgoyal.net/kitty/
 REPO=~/claude-kitty
 git clone https://github.com/hummer98/claude-kitty "$REPO"
 mkdir -p ~/.local/bin ~/.config/kitty
-for f in claude-kitty claude-view claude-wait claude-browser; do ln -sfn "$REPO/bin/$f" ~/.local/bin/$f; done
+for f in claude-kitty claude-view claude-wait claude-browser claude-state claude-show \
+         claude-guard claude-lang-check claude-session-stats claude-roster; do ln -sfn "$REPO/bin/$f" ~/.local/bin/$f; done
 # 既に ~/.config/kitty/kitty.conf があるなら、先に退避するか、中身を自分の kitty.conf に取り込む
 ln -sfn "$REPO/kitty/kitty.conf"       ~/.config/kitty/kitty.conf
 ln -sfn "$REPO/kitty/claude3.session"  ~/.config/kitty/claude3.session
+ln -sfn "$REPO/kitty/claude_state_watcher.py" ~/.config/kitty/claude_state_watcher.py   # 状態の色の「完了（未読）」を戻す
 ```
 
 - `~/.local/bin` が PATH に入っていること（`claude-wait` はセッションファイルの `bash -lic` から呼ばれるので、ログインシェルの PATH）。
@@ -64,7 +66,7 @@ ln -sfn "$REPO/kitty/mine.session" ~/.config/kitty/mine.session
 
 - `left`: 左の列に固定する統括の role。`claude-view` は、この role がいる kitty を操作の対象に選ぶ。
 - `restore`: `claude-view restore` の配置（段のリスト、または `"a,b/c"`）。
-- `guard`: 前面にあったら並べ替えを控える窓のプロセス（`pgrep -f` の正規表現）。ゲームなど、キーやフォーカスを奪われたくないもの。空なら確認しない。
+- `guard`: 前面にあったら並べ替えを控える窓のプロセス（`pgrep -f` の正規表現）。全画面のアプリや発表中の画面など、キーやフォーカスを奪われたくない窓。空なら確認しない。
 - 環境変数 `CLAUDE_VIEW_LEFT` / `CLAUDE_VIEW_RESTORE` / `CLAUDE_VIEW_GUARD`（`none` で止める）が設定ファイルより、引数 `--left` がさらに優先。空文字の環境変数は未設定と同じ。
 
 ## 3. kitty.conf の要点
@@ -83,6 +85,17 @@ enabled_layouts splits,stack
 
 - `allow_remote_control` と `listen_on` は kitty の起動時にしか読まれない。変えたら kitty を起動し直す。
 - ソケット名は `kitty-<pid>` の形のままにする（`lib/core.py` の `kitty_pid_from_socket` がこの名前から pid を取る）。
+- `background` は claude-state が idle のときに戻す色の基準になる（`state.base_background` で別に指定もできる）。
+- `watcher claude_state_watcher.py`（リポジトリの kitty.conf にある）: claude-state の done（緑）を、ペインにフォーカスが来たら idle（元の色）に戻す。相対パスは kitty の設定ディレクトリから解かれるので、`~/.config/kitty/` にリンクを張る（2. の手順）。
+  - 動いている kitty で `kitten @ load-config` しても、前からあるペインには watcher が付かない（kitty はペインを作るときに watcher を写し取る）。`on_tab_bar_dirty` の経路でも効くはずだったが、実物（0.51）では前面の done のペインに 3.5 秒フォーカスしても消えなかった。そのため done → idle は常駐の `claude-state watch` を正とする（下）。watcher は、新しいペインと kitty の再起動後に効くので残してよい（二重に動いても害は無い）。
+  - `claude-state watch` を systemd のユーザーサービスで動かす:
+    ```sh
+    mkdir -p ~/.config/systemd/user
+    sed "s#%h/claude-kitty#$REPO#" "$REPO/contrib/systemd/claude-state-watch.service" > ~/.config/systemd/user/claude-state-watch.service
+    systemctl --user daemon-reload && systemctl --user enable --now claude-state-watch.service
+    ```
+  - **設定の読み直しは、`set-colors` で付けた全ペインの背景を kitty.conf の色に戻す**（0.51 で確認）。watcher が読み込まれていれば、読み直しに気づいて記録の色で塗り直す（`on_tab_bar_dirty` で `get_options()` が変わったのを見て、0.3 秒後に塗る）。`claude-state watch` も、ペインごとに記録の色と実際の色が 2 回続けて違えば塗り直す。どちらも無いまま読み直したときは `claude-state repaint` で塗り直す。
+- 任意: `filter_notification all` で、claude-code が入力待ちのたびに出すデスクトップ通知を止められる（待受中はペインの色で分かるため）。
 
 ## 4. 起動と確かめ方
 
@@ -106,7 +119,49 @@ claude-browser shot /tmp/shot.png && claude-browser close
 - 環境変数（`CLAUDE_VIEW_*` など）は、シェルの rc か設定ファイルで与える。`claude-kitty` は `CLAUDE_KITTY_*` と `CLAUDE_VIEW_*` 以外の `CLAUDE_*` を消して kitty を起動する。
 - `claude-wait` の確かめ方: 別の端末で `claude` を開き、そのセッション ID で `claude-wait test <ID>` を kitty のペインで実行する。元の端末で `/exit` すると、kitty 側で resume される。
 
-## 5. 守るべき決まり
+## 5. 状態の色（claude-state）
+
+`~/.claude/settings.json` の `hooks` に足す（既存のキーは残す）。`claude-state` は PATH にある前提（無ければ絶対パスで書く）。
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "claude-state hook UserPromptSubmit", "timeout": 10}]}],
+    "Stop":             [{"hooks": [{"type": "command", "command": "claude-state hook Stop", "timeout": 10}]}],
+    "StopFailure":      [{"hooks": [{"type": "command", "command": "claude-state hook StopFailure", "timeout": 10}]}],
+    "Notification": [{"matcher": "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt",
+                      "hooks": [{"type": "command", "command": "claude-state hook Notification", "timeout": 10}]}],
+    "PreToolUse":         [{"matcher": "*", "hooks": [{"type": "command", "command": "claude-state hook PreToolUse", "timeout": 10}]}],
+    "PermissionRequest":  [{"matcher": "*", "hooks": [{"type": "command", "command": "claude-state hook PermissionRequest", "timeout": 10}]}],
+    "SubagentStart":      [{"hooks": [{"type": "command", "command": "claude-state hook SubagentStart", "timeout": 10}]}],
+    "SubagentStop":       [{"hooks": [{"type": "command", "command": "claude-state hook SubagentStop", "timeout": 10}]}],
+    "PostToolUse":        [{"matcher": "*", "hooks": [{"type": "command", "command": "claude-state hook PostToolUse", "timeout": 10}]}],
+    "PostToolUseFailure": [{"matcher": "*", "hooks": [{"type": "command", "command": "claude-state hook PostToolUseFailure", "timeout": 10}]}],
+    "SessionStart": [{"hooks": [{"type": "command", "command": "claude-state hook SessionStart", "timeout": 10}]}],
+    "SessionEnd":   [{"hooks": [{"type": "command", "command": "claude-state hook SessionEnd", "timeout": 10}]}]
+  }
+}
+```
+
+- `idle_prompt`（入力欄のまま 60 秒）は待ちではなく、Esc で止めた（Stop が来ない）ときに本体を止まったことにするために受ける。
+- PreToolUse・PostToolUse は全部のツールで呼ぶ: 許可・質問の待ちを id ごとに外す、Stop のあとに本体やサブエージェントが動いたのを知る、のため（変わらなければ記録を読むだけで 30ms ほどで終わる）。
+- PermissionRequest は許可の画面が出る直前に来る（Notification の `permission_prompt` は約 6 秒あと）。何も出力しないので、許可の判断には加わらない。無くても動くが、そのときは「どのツールの許可か」が分からず、どれかのツールが終われば外れる。
+- SubagentStart / SubagentStop は、サブエージェントが動いている間を作業中にするため。
+- 手で確かめる: `echo '{"session_id":"t1"}' | KITTY_WINDOW_ID=<テスト用のペイン> claude-state hook Notification` → `claude-state list` → `... hook SessionEnd`。動いているほかのペインで試さない。
+
+ステータス行（`statusLine` の command）で名前に色を付ける例（stdin の JSON の `session_id` を使う）:
+
+```sh
+input=$(cat)
+sid=$(printf '%s' "$input" | jq -r '.session_id // empty')
+name=$(printf '%s' "$input" | jq -r '.session_name // "?"')
+command -v claude-state >/dev/null 2>&1 && [ -n "$sid" ] && name=$(claude-state paint "$sid" "$name")
+# サブエージェントの要約（動いている数 / 終わったまま残っている数と、いちばん古いものからの時間）。無ければ空
+subs=$(command -v claude-state >/dev/null 2>&1 && [ -n "$sid" ] && claude-state subagents "$sid")
+printf '%s%s' "$name" "${subs:+ | $subs}"
+```
+
+## 6. 守るべき決まり
 
 - **close と send-text を使わない。** `kitten @ close-window` などのペインやタブを閉じる操作と、`kitten @ send-text` は、中で動いている Claude Code の作業や入力を壊す。`claude-view` も使わない（テストで確かめている）。並べ替えは `detach-window`・`focus-window`・`layout_action` だけで行う。
 - **同じセッション ID を 2 つのプロセスで同時に開かない。** 会話記録が壊れうる。別の場所から移すときは必ず `claude-wait` を通す（相手が確実に終わってから resume する。同じ ID の `claude-wait` 同士も flock で 1 つだけにする）。
@@ -136,6 +191,7 @@ kitty と `kitten @` の部分（ペインの一覧・移動・分割比・フ�
 | `bin/claude-browser` | `kitty_socket()` | `/proc` で kitty の生存確認 | `os.kill(pid, 0)` |
 | `bin/claude-browser` | `scan_procs()` / `running()` | `/proc/*/cmdline` で Chrome のプロセスと引数を読む | `ps -axww -o pid=,args=`（引数の区切りが空白になるので、`--user-data-dir=` と `--remote-debugging-port=` は正規表現で取り出す。プロファイルのパスに空白を入れないこと）か `psutil`（引数をリストで返す） |
 | `bin/claude-browser` | `CHROME`・`PROFILE_ROOT`・`LEDGER` | `flatpak run com.google.Chrome`、`~/.var/app/com.google.Chrome/claude-profiles`（Flatpak の Chrome が書ける場所） | `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` を直接起動する（`open -a` だと既存の Chrome に吸収されるので、`--user-data-dir` 付きで実行ファイルを呼ぶ）。プロファイルは `~/.claude-browser/profiles/<key>` など空白の無い場所に置く（`ps` の出力から引数を取り出すとき、`Application Support` の空白で切れるため）。サンドボックスが無いので file:// の許可は要らない |
+| `bin/claude-state` | `ancestors()` / `read_environ()` | `/proc/<pid>/stat`・`cmdline`・`environ` で、入れ子の claude かを見分ける | `ps -o ppid=,args= -p <pid>` で親をたどる。起動時の環境は `ps -E` などで読めないことがあるので、読めなければ「入れ子でない」と見なす（既定の動き） |
 | `bin/claude-browser` | `cmd_open()` の `--class=claude-browser-<key>` | X11/Wayland の窓のクラスで Chrome の窓を見分ける | macOS では効かない。窓は pid（`running()` で分かる）で見分ける |
 | `bin/claude-browser` | `find_kitty()` | KWin で kitty の窓（pid とタイトル）とクライアント領域を取る | Hammerspoon: `hs.application.applicationForPID(pid):allWindows()` と `win:frame()`。AppleScript: `System Events` の `position` / `size`（タイトルバーを含むので、kitty の `hide_window_decorations` か高さの差し引きが要る） |
 | `bin/claude-browser` | `browser_windows()` / `main_browser_window()` | KWin で窓のクラスごとに窓を列挙 | Hammerspoon で Chrome の pid の窓を列挙。または CDP の `Browser.getWindowForTarget` で窓 ID を取る |

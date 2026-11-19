@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """kitty のペインに Chrome を「常に最前面」で重ねる。ペインの役割・席ごとに独立した Chrome を持つ。
 
-  claude-browser open URL [--mode self|show] [--ratio 0.65] [--over SLOT|ROLE|ID] [--focus kitty|browser|none]
-  claude-browser move [--mode ...] [--ratio ...] [--over ...] [--focus ...]
+  claude-browser open URL [--mode self|show] [--ratio 0.65] [--area pane|right] [--over SLOT|ROLE|ID] [--focus kitty|browser|none]
+  claude-browser move [--mode ...] [--ratio ...] [--area ...] [--over ...] [--focus ...]
   claude-browser shot FILE        前面タブのスクリーンショット（CDP）
   claude-browser url              前面タブの URL
   claude-browser close
@@ -28,10 +28,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
-from config import kitten_path  # noqa: E402
+from config import kitten_path, load_view_config  # noqa: E402
 from core import (choose_key, kitty_pid_from_socket, ledger_touch, merge_place_opts,  # noqa: E402
                   parse_journal, profile_processes, resolve_pane)
-from geometry import tab_pane_fraction, target_rect  # noqa: E402
+from geometry import fit_correction, right_area_fraction, tab_pane_fraction, target_rect  # noqa: E402
 
 KITTEN = kitten_path(os.environ)
 CHROME = ["flatpak", "run", "com.google.Chrome"]
@@ -46,7 +46,8 @@ PROFILE_ROOT = Path.home() / ".var/app/com.google.Chrome/claude-profiles"
 STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "claude-browser"
 CDP = HERE / "lib" / "cdp.mjs"
 LEDGER = PROFILE_ROOT / "ledger.json"
-DEFAULTS = {"mode": "self", "ratio": 0.65, "over": None, "focus": "kitty"}
+DEFAULTS = {"mode": "self", "ratio": 0.65, "over": None, "focus": "kitty", "area": "pane"}
+SETTLE = 0.4  # 配置してから、窓の大きさが落ち着くまで待つ秒数（Chrome が自分で大きさを戻すことがある）
 
 
 def die(msg):
@@ -194,7 +195,11 @@ for (const w of workspace.windowList()) if (w.resourceClass === {json.dumps(cls)
 
 
 def place_browser(cls, browser_id, kitty_id, rect, focus):
-    """ブラウザの主ウィンドウだけを配置する（OAuth のポップアップや DevTools は動かさない）。"""
+    """ブラウザの主ウィンドウだけを配置する（OAuth のポップアップや DevTools は動かさない）。
+
+    実際の矩形 (x, y, w, h) を返す（窓が無ければ None）。最大化の解除は、最大化しているときだけにする
+    （解除すると前の大きさに戻す処理が後から走り、指定した大きさを上書きすることがある）。
+    """
     x, y, w, h = rect
     out = kwin(f"""
 const all = workspace.windowList();
@@ -203,15 +208,24 @@ const b = all.find(w => String(w.internalId) === {json.dumps(browser_id)} && w.r
 if (b) {{
     if (k) b.desktops = k.desktops;
     b.minimized = false;
-    b.setMaximize(false, false);
+    if (b.maximizeMode !== 0) b.setMaximize(false, false);
     b.keepAbove = true;
     b.frameGeometry = {{x: {x}, y: {y}, width: {w}, height: {h}}};
     if ({json.dumps(focus)} === "kitty" && k) workspace.activeWindow = k;
     else if ({json.dumps(focus)} === "browser") workspace.activeWindow = b;
-    @@OUT@@"ok");
+    const g = b.frameGeometry;
+    @@OUT@@JSON.stringify([g.x, g.y, g.width, g.height]));
 }}
 @@OUT@@"END");""")
-    return out == ["ok"]
+    return tuple(json.loads(out[0])) if out else None
+
+
+def browser_rect(browser_id):
+    out = kwin(f"""
+const b = workspace.windowList().find(w => String(w.internalId) === {json.dumps(browser_id)});
+if (b) {{ const g = b.frameGeometry; @@OUT@@JSON.stringify([g.x, g.y, g.width, g.height])); }}
+@@OUT@@"END");""")
+    return tuple(json.loads(out[0])) if out else None
 
 
 def main_browser_window(st):
@@ -226,8 +240,9 @@ def main_browser_window(st):
 # ---------- commands ----------
 def prepare(args, st):
     """起動の前に配置先を確定させる（失敗してから Chrome が残らないように）。"""
-    # focus は一回ごとの指定（ゲーム中の none が以後ずっと残らないように）なので引き継がない
-    inherit = {k: v for k, v in (st or {}).items() if k != "focus"}
+    # focus と area は一回ごとの指定なので引き継がない（focus: 保護する窓が前面のときの none が以後ずっと残らないように。
+    # area: claude-show が右側全体に開いたあと、自分の作業用の open が他のペインまで覆わないように）
+    inherit = {k: v for k, v in (st or {}).items() if k not in ("focus", "area")}
     opts = merge_place_opts({k: getattr(args, k, None) for k in DEFAULTS}, inherit, DEFAULTS)
     if opts["over"] == "self":
         opts["over"] = None
@@ -246,18 +261,61 @@ def prepare(args, st):
     return opts, kitty_win, tab, pane
 
 
-def placement(st, opts, kitty_win, tab, pane):
+def left_window_id(tab):
+    """そのタブで、左の列（view.left の役割）のペインの id。いなければ None。"""
+    try:
+        left = load_view_config(os.environ)["left"]
+    except ValueError:
+        left = os.environ.get("CLAUDE_VIEW_LEFT") or DEFAULT_LEFT
+    return next((w["id"] for w in tab.get("windows", []) if (w.get("user_vars") or {}).get("role") == left), None)
+
+
+DEFAULT_LEFT = "main"
+
+
+def _off(want, got):
+    return sum(abs(a - b) for a, b in zip(want, got))
+
+
+def area_fraction(opts, tab, pane):
+    """重ねる場所の割合。pane: そのペイン。right: 左の列（統括）を除いた右側全体。"""
+    if opts.get("area") == "right":
+        return right_area_fraction(tab, left_window_id(tab))
+    return tab_pane_fraction(tab, pane["id"])
+
+
+def placement(st, opts, kitty_win, tab, pane, settle=SETTLE):
     kitty_id, client = kitty_win
     try:
-        frac = tab_pane_fraction(tab, pane["id"])
+        frac = area_fraction(opts, tab, pane)
     except (KeyError, ValueError) as e:
         die(str(e))
     rect = target_rect(client, frac, opts["mode"], float(opts["ratio"]))
     bid = main_browser_window(st)
-    if not bid or not place_browser(st["class"], bid, kitty_id, rect, opts["focus"]):
+    got = place_browser(st["class"], bid, kitty_id, rect, opts["focus"]) if bid else None
+    if got is None:
         die("ブラウザのウィンドウが見つからない")
+    # 指定と実際がずれたら、落ち着いてから直す。1 度目は同じ矩形を置き直す（最大化の解除などで Chrome が後から
+    # 前の大きさに戻したとき）。それでもずれていれば、一定のずれ（窓の装飾の分など）なので打ち消す
+    for attempt in range(2):
+        time.sleep(settle)
+        got = browser_rect(bid) or got
+        if not fit_correction(rect, got) and all(abs(a - b) <= 2 for a, b in zip(rect, got)):
+            break
+        fix = rect if attempt == 0 else fit_correction(rect, got)
+        if fix is None:
+            break  # 大きなずれ: 打ち消すと極端に小さくなりうるので、指定のままにして知らせる
+        before = got
+        got = place_browser(st["class"], bid, kitty_id, fix, "none") or got
+        if attempt == 1:
+            time.sleep(settle)
+            got = browser_rect(bid) or got
+            if _off(rect, got) > _off(rect, before):  # 打ち消して悪くなったら、指定の矩形に戻す
+                got = place_browser(st["class"], bid, kitty_id, rect, "none") or got
     st.update(kwin_id=bid, mode=opts["mode"], ratio=float(opts["ratio"]),
-              over=opts["over"], focus=opts["focus"])
+              over=opts["over"], focus=opts["focus"], area=opts["area"])
+    if _off(rect, got) > 8:
+        print(f"claude-browser: 窓が指定の位置に収まらない（指定 {rect}、実際 {got}）", file=sys.stderr)
     return rect
 
 
@@ -366,6 +424,10 @@ def cmd_list():
 
 
 def main(argv=None):
+    if (sys.argv[1:] if argv is None else argv) == ["--version"]:  # 版の表示だけは設定や kitty を読まずに返す
+        from version import handle_version
+        handle_version((sys.argv[1:] if argv is None else argv), "claude-browser")
+        return 0
     ap = argparse.ArgumentParser(prog="claude-browser")
     ap.add_argument("--key", help="プロファイル名を明示する（既定: ペインの role / slot / セッション ID）")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -374,8 +436,10 @@ def main(argv=None):
         p.add_argument("--mode", choices=["self", "show"])
         p.add_argument("--ratio", type=float, help="show のとき上から何割をブラウザにするか（0.1〜1.0）")
         p.add_argument("--over", help="重ねるペイン（slot 名・role 名・kitty の window id、self で自分）。既定は前回の値か自分のペイン")
+        p.add_argument("--area", choices=["pane", "right"],
+                       help="重ねる場所。pane: ペイン（既定）、right: 左の列（統括）を除いた kitty の右側全体")
         p.add_argument("--focus", choices=["kitty", "browser", "none"],
-                       help="配置後の入力先。none は何も変えない（ゲーム中など）")
+                       help="配置後の入力先。none は何も変えない（全画面のアプリを使っている最中など）")
 
     p = sub.add_parser("open"); p.add_argument("url"); place_opts(p)
     p = sub.add_parser("move"); place_opts(p)

@@ -113,3 +113,13 @@ def plan(left, rows, main_roles):
         for j in range(len(row) - 1):
             ops += [("focus", row[j]), ("bias", round(100 / (len(row) - j)))]
     return ops + [("focus", left)]
+
+
+def overlay_ids(tab):
+    """タブの中の overlay（claude-show の画像など）の window id。
+
+    overlay は重ねた先のペインと同じ window group に入り、kitten @ ls ではふつうのペインと同じように
+    並ぶ（role も無い）。group の 2 つめ以降が overlay なので、並べ替えの対象から外すのに使う。
+    """
+    groups = ((tab.get("layout_state") or {}).get("all_windows") or {}).get("window_groups") or []
+    return {i for g in groups for i in (g.get("window_ids") or [])[1:]}

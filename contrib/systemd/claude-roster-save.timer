@@ -1,0 +1,15 @@
+# 5 分ごとに claude-roster-save.service を走らせる（kitty を起動し直しても、5 分前までの名簿で戻せる）。
+# Claude Code の settings.json（hook）を変えずに済むよう、タイマーにしている。
+#   cp contrib/systemd/claude-roster-save.* ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now claude-roster-save.timer
+#   systemctl --user list-timers claude-roster-save.timer
+[Unit]
+Description=Save the claude-kitty roster every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+# claude-roster の名簿を保存する（タイマー claude-roster-save.timer から呼ぶ）。
+# kitty が無いとき（落ちた直後など）は何も書かない。ペインが無くなった役割は 24 時間、名簿に残す。
+# 読むのは kitten @ ls と ~/.claude/sessions だけで、kitty も claude も操作しない。
+[Unit]
+Description=Save the claude-kitty roster (claude-roster save --auto)
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=%h/claude-kitty/bin/claude-roster save --auto

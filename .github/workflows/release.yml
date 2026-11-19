@@ -1,0 +1,75 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # 過去の commit に後から付けたタグ（v0.1.0 など）は、その commit に release.yml が無いので push では起動しない。
+  # そのときは Actions の画面か `gh workflow run release.yml -f tag=v0.1.0` で、既定の枝のこの定義から走らせる
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release を作るタグ（例 v0.1.0）"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      # 全部の履歴とタグを取る（既定の枝の CHANGELOG を読む・タグが既定の枝にあるかを見る・いちばん新しい版を決めるため）
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      # 本文は既定の枝（main）の CHANGELOG から取る。過去の commit に付けたタグには CHANGELOG も tools も無いため。
+      # tools/release.sh は main を先に push してからタグを push する
+      - name: Extract the release notes from CHANGELOG.md
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          case "$tag" in v[0-9]*) ;; *) echo "::error::not a version tag: $tag"; exit 1 ;; esac
+          ver="${tag#v}"
+          sha="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
+          if ! git merge-base --is-ancestor "$sha" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::$tag is not on $DEFAULT_BRANCH"
+            exit 1
+          fi
+          # タグの commit に VERSION があるなら、タグと一致していること（release.sh を通さずに付けたタグを止める）
+          if [ -f VERSION ]; then
+            file_ver="$(head -n 1 VERSION | tr -d '[:space:]')"
+            if [ "$ver" != "$file_ver" ]; then
+              echo "::error::tag $tag does not match VERSION ($file_ver)"
+              exit 1
+            fi
+          fi
+          git show "origin/$DEFAULT_BRANCH:CHANGELOG.md" > "$RUNNER_TEMP/CHANGELOG.md"
+          git show "origin/$DEFAULT_BRANCH:tools/changelog_section.py" > "$RUNNER_TEMP/changelog_section.py"
+          python "$RUNNER_TEMP/changelog_section.py" "$ver" --file "$RUNNER_TEMP/CHANGELOG.md" > "$RUNNER_TEMP/notes.md"
+          # 過去の版を後から出しても「Latest」がそちらに移らないよう、v* のタグでいちばん新しい版のときだけ latest にする。
+          # 「-rc1」などの付いた版は prerelease にして、latest にしない
+          newest="$(git tag -l 'v*' | { grep -v -- - || true; } | sort -V | tail -n 1)"
+          case "$ver" in
+            *-*) echo "latest=false" >> "$GITHUB_ENV"; echo "prerelease=true" >> "$GITHUB_ENV" ;;
+            *) if [ "$newest" = "$tag" ]; then echo "latest=true" >> "$GITHUB_ENV"; else echo "latest=false" >> "$GITHUB_ENV"; fi
+               echo "prerelease=false" >> "$GITHUB_ENV" ;;
+          esac
+          cat "$RUNNER_TEMP/notes.md"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest="$latest" \
+            --prerelease="$prerelease" \
+            --verify-tag

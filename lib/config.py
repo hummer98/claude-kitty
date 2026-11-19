@@ -4,7 +4,7 @@
 設定ファイルは $CLAUDE_KITTY_CONFIG、無ければ $XDG_CONFIG_HOME/claude-kitty/config.json
 （既定 ~/.config/claude-kitty/config.json）。リポジトリの外に置き、手元の役割名はそこに書く。
 
-  {"view": {"left": "main", "restore": [["dev-a"], ["dev-b"]], "guard": ["^\\\\./SomeGame"]}}
+  {"view": {"left": "main", "restore": [["dev-a"], ["dev-b"]], "guard": ["^\\\\./fullscreen-app"]}}
 
 restore は段のリストか "a,b/c" の形の文字列。guard は前面にあったら並べ替えない窓のプロセスの
 正規表現（pgrep -f に渡す）。既定は空で、そのときは前面の窓を調べない（KWin を呼ばない）。
@@ -71,7 +71,7 @@ def load_view_config(env, path=None):
         out["left"] = env["CLAUDE_VIEW_LEFT"]
     if env.get("CLAUDE_VIEW_RESTORE"):
         out["restore"] = _rows(env["CLAUDE_VIEW_RESTORE"], "CLAUDE_VIEW_RESTORE")
-    # 空のまま export されただけで設定ファイルの guard（ゲームの保護など）が黙って外れないよう、止めるのは "none" のときだけ
+    # 空のまま export されただけで設定ファイルの guard（保護する窓の指定）が黙って外れないよう、止めるのは "none" のときだけ
     if env.get("CLAUDE_VIEW_GUARD"):
         out["guard"] = [] if env["CLAUDE_VIEW_GUARD"] == "none" else [env["CLAUDE_VIEW_GUARD"]]
     return out
@@ -89,3 +89,53 @@ def kitten_path(env, exists=os.path.exists, which=shutil.which):
         return found
     mac = "/Applications/kitty.app/Contents/MacOS/kitten"
     return mac if exists(mac) else "kitten"
+
+
+def kitty_conf_path(env):
+    """kitty.conf の場所: $KITTY_CONFIG_DIRECTORY > $XDG_CONFIG_HOME/kitty > ~/.config/kitty。"""
+    if env.get("KITTY_CONFIG_DIRECTORY"):
+        return Path(env["KITTY_CONFIG_DIRECTORY"]) / "kitty.conf"
+    base = Path(env["XDG_CONFIG_HOME"]) if env.get("XDG_CONFIG_HOME") else Path.home() / ".config"
+    return base / "kitty" / "kitty.conf"
+
+
+def load_state_config(env, path=None):
+    """claude-state の設定 {"colors", "notice", "base", "done_dwell", "watch_sockets", "left"} を返す。
+
+      {"state": {"colors": {"waiting": {"background": "#2e2a22", "name": 208}},
+                 "base_background": "#232627",
+                 "notice": {"contains": ["返事は不要"], "prefix": ["【通知】"]}}}
+
+    base_background を書かなければ kitty.conf の background（ペインの元の色）を使う。
+    設定ファイルが壊れていれば ValueError（呼ぶ側が既定に戻すか決める）。
+    """
+    from state import DEFAULT_BASE, kitty_conf_background, merge_colors, merge_notice, merge_subagent_colors
+    path = Path(path) if path else config_path(env)
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    st = data.get("state", {}) if isinstance(data, dict) else None
+    if not isinstance(st, dict):
+        raise ValueError(f"設定ファイルの state がオブジェクトでない: {path}")
+    base = st.get("base_background")
+    if base is None:
+        try:
+            base = kitty_conf_background(kitty_conf_path(env).read_text())
+        except OSError:
+            base = None
+    elif not (isinstance(base, str) and len(base) == 7 and base.startswith("#")):
+        raise ValueError(f"{path} の state.base_background は #rrggbb: {base!r}")
+    dwell = st.get("done_dwell_seconds", 2)
+    if isinstance(dwell, bool) or not isinstance(dwell, (int, float)) or not 0 <= dwell <= 3600:
+        raise ValueError(f"{path} の state.done_dwell_seconds は 0〜3600 の数: {dwell!r}")
+    socks = st.get("watch_sockets")
+    if socks is not None and not (isinstance(socks, list) and all(isinstance(x, str) and x for x in socks)):
+        raise ValueError(f"{path} の state.watch_sockets は socket（unix:/…）の文字列の一覧: {socks!r}")
+    view = data.get("view") if isinstance(data, dict) else None
+    left = view.get("left") if isinstance(view, dict) and isinstance(view.get("left"), str) else DEFAULT_VIEW["left"]
+    return {"colors": merge_colors(st.get("colors")), "notice": merge_notice(st.get("notice")), "base": base or DEFAULT_BASE,
+            "done_dwell": float(dwell), "watch_sockets": socks or None, "subagent_colors": merge_subagent_colors(st.get("subagent_colors")),
+            "left": env.get("CLAUDE_VIEW_LEFT") or left}

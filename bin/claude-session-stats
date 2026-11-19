@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Claude Code の会話の記録（~/.claude/projects の jsonl）から、期間ごとの数字を Markdown で出す。
+
+  claude-session-stats                          今日（JST）までの 7 日と、その前の 7 日
+  claude-session-stats --end yesterday          昨日までの 7 日（今日の分は途中までになるため）
+  claude-session-stats --end last-sunday        今日より前の直近の日曜までの 7 日（週 1 回のタイマー用）
+  claude-session-stats --end 2026-01-31 --days 14
+  claude-session-stats --start 2026-01-10 --end 2026-01-31    前の期間は同じ日数だけ前
+  claude-session-stats --out DIR/stats_{end}.md   {end} は直近の期間の最後の日に置き換わる
+  claude-session-stats --stdout                 ファイルに書かず、標準出力に出す
+
+役割名・言い直しの言葉・伏せる語・用語集の道具は、設定ファイル（~/.config/claude-kitty/config.json）の
+"session_stats" の節から読む。書き出しの前に、メールアドレスとユーザー名を伏せる。詳しくは docs/session-stats.md。
+終了コード: 0 = 書けた、2 = 引数か設定が正しくない、1 = 書けない。
+"""
+import argparse
+import getpass
+import os
+import sys
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import sessionstats as ss  # noqa: E402
+
+
+def parse_args(argv):
+    ap = argparse.ArgumentParser(prog="claude-session-stats", description="Claude Code の記録から期間ごとの数字を出す")
+    ap.add_argument("--end", help="直近の期間の最後の日（YYYY-MM-DD か today / yesterday / last-sunday、含む）。既定は今日（JST）")
+    ap.add_argument("--start", help="直近の期間の最初の日（YYYY-MM-DD）。指定すると --days より優先")
+    ap.add_argument("--days", type=int, default=7, help="直近の期間の日数（既定 7）。前の期間も同じ日数")
+    ap.add_argument("--config", help="設定ファイル（既定 $CLAUDE_KITTY_CONFIG か ~/.config/claude-kitty/config.json）")
+    ap.add_argument("--projects", help="記録のフォルダ（既定は設定の projects、無ければ ~/.claude/projects）")
+    ap.add_argument("--home-project", help="統括の記録があるフォルダの名前（既定はホームのパスから作る）")
+    ap.add_argument("--glossary", help="用語集のファイル（設定の glossary.file の代わり。道具は glossary.module）")
+    ap.add_argument("--no-glossary", action="store_true", help="用語集の検査をしない")
+    out = ap.add_mutually_exclusive_group()
+    out.add_argument("--out", help="書くファイル（{end} は直近の期間の最後の日）")
+    out.add_argument("--out-dir", help="書くフォルダ（ファイル名は session_stats_<最後の日>.md）。既定は設定の out_dir、"
+                                       "無ければ ~/.local/share/claude-kitty/stats")
+    out.add_argument("--stdout", action="store_true", help="ファイルに書かず、標準出力に出す")
+    return ap.parse_args(argv)
+
+
+def _day(s, today):
+    if s == "today":
+        return today
+    if s == "yesterday":
+        return today - timedelta(days=1)
+    if s == "last-sunday":
+        # 今日より前の、いちばん近い日曜。タイマーを逃して火曜に走っても、週の区切り（月〜日）がずれない
+        return today - timedelta(days=(today.weekday() + 1) % 7 or 7)
+    return date.fromisoformat(s)
+
+
+def main(argv=None, env=None, now=None):
+    env = os.environ if env is None else env
+    if (sys.argv[1:] if argv is None else argv) == ["--version"]:  # 版の表示だけは設定や kitty を読まずに返す
+        from version import handle_version
+        handle_version((sys.argv[1:] if argv is None else argv), "claude-session-stats")
+        return 0
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    now = now or datetime.now(ss.JST)
+    today = now.date()
+    try:
+        end = _day(args.end, today) if args.end else today
+        if args.start:
+            start = _day(args.start, today)
+            ndays = (end - start).days + 1
+        else:
+            ndays = args.days
+            start = end - timedelta(days=ndays - 1)
+    except ValueError as e:
+        print(f"claude-session-stats: 日付の形が違う: {e}", file=sys.stderr)
+        return 2
+    if ndays < 1:
+        print("claude-session-stats: 期間が 1 日より短い", file=sys.stderr)
+        return 2
+    try:
+        cfg = ss.load_settings(env, args.config, required=bool(args.config))
+    except ValueError as e:
+        print(f"claude-session-stats: {e}", file=sys.stderr)
+        return 2
+    if args.projects:
+        cfg["projects"] = os.path.expanduser(args.projects)
+    if args.home_project:
+        cfg["home_project"] = args.home_project
+    cur_days = [start + timedelta(days=i) for i in range(ndays)]
+    prev_days = [start - timedelta(days=ndays - i) for i in range(ndays)]
+
+    glossary = None
+    g = cfg["glossary"]
+    # 用語集は統括の返答にだけかけるので、統括が無ければ道具を読まない（使わない道具を走らせない）
+    if not args.no_glossary and cfg["master"] and (g or args.glossary):
+        if not g:
+            print("claude-session-stats: --glossary には設定の glossary.module（道具）が要る（用語集の件数は出さない）",
+                  file=sys.stderr)
+        else:
+            try:
+                glossary = ss.Glossary.load(g["module"], os.path.expanduser(args.glossary or g["file"]), g["scene"])
+            except Exception as e:  # noqa: BLE001  道具の中の例外でも、残りの数字は出す
+                print(f"claude-session-stats: 用語集を読めない（用語集の件数は出さない）: {e}", file=sys.stderr)
+
+    result, gstats = ss.collect(cfg, prev_days[0], end + timedelta(days=1), glossary)
+    if glossary is not None and glossary.errors:
+        print(f"claude-session-stats: 用語集の道具が {glossary.errors} 件の返答で例外を出した（0 件と数えた）: "
+              f"{glossary.last_error}", file=sys.stderr)
+    generated = now.strftime("%Y-%m-%d %H:%M")
+    md = ss.build_report(result, gstats, prev_days, cur_days, generated, cfg)
+    md = ss.redact(md, cfg["redact"] + [getpass.getuser(), os.path.basename(os.path.realpath(os.path.expanduser("~")))])
+    if args.stdout:
+        sys.stdout.write(md)
+        return 0
+    if args.out:
+        out = os.path.expanduser(args.out.replace("{end}", end.isoformat()))
+    else:
+        out = os.path.join(os.path.expanduser(args.out_dir) if args.out_dir else cfg["out_dir"],
+                           f"session_stats_{end.isoformat()}.md")
+    out = os.path.normpath(out)
+    tmp = out + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(md)
+        os.replace(tmp, out)  # 途中で止まっても、半端なファイルを残さない
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        print(f"claude-session-stats: 書けない: {out}: {e}", file=sys.stderr)
+        return 1
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

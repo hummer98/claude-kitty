@@ -1,0 +1,12 @@
+# claude-session-stats を 1 回走らせる（タイマー claude-session-stats.timer から呼ぶ）。
+# 写す先: ~/.config/systemd/user/。ExecStart のパスは、claude-kitty を置いた場所に直す。
+# 今日より前の直近の日曜までを数える（逃して火曜に走っても、週の区切りが月〜日のまま）。{end} は直近の期間の最後の日に置き換わる。
+[Unit]
+Description=Weekly numbers from Claude Code transcripts (claude-session-stats)
+
+[Service]
+Type=oneshot
+# 記録を全部読むので、前面の作業の邪魔をしないよう優先度を下げる
+Nice=10
+IOSchedulingClass=idle
+ExecStart=%h/claude-kitty/bin/claude-session-stats --end last-sunday --out %h/.local/share/claude-kitty/stats/session_stats_{end}.md

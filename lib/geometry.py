@@ -94,3 +94,42 @@ def tab_pane_fraction(tab, window_id):
             return (0.0, 0.0, 1.0, 1.0)
         raise KeyError(f"kitty window {window_id} is not in the split tree")
     return pane_fraction(tab.get("windows", []), window_id)
+
+
+def right_area_fraction(tab, left_window_id=None):
+    """タブの左の列（統括のペイン left_window_id）を除いた右側全体の割合 (x, 0, 1 - x, 1)。
+
+    left_window_id が無い・木に無いときは、splits の根が左右の分割ならその左側を左の列とする。
+    どちらでもなければ（左右に分かれていない）タブ全体。
+    """
+    if left_window_id is not None:
+        try:
+            x, _y, w, _h = tab_pane_fraction(tab, left_window_id)
+        except (KeyError, ValueError):
+            pass
+        else:
+            if x + w < 1.0:
+                return (x + w, 0.0, 1.0 - (x + w), 1.0)
+    state = tab.get("layout_state") or {}
+    root = state.get("pairs") if state.get("class") == "Splits" else None
+    if isinstance(root, dict) and "one" in root and "two" in root and root.get("horizontal", True):
+        b = root.get("bias", 0.5)
+        return (b, 0.0, 1.0 - b, 1.0)
+    return (0.0, 0.0, 1.0, 1.0)
+
+
+MAX_OFFSET = 64  # 一定のずれとして打ち消す上限（窓の装飾・影の大きさ）
+
+
+def fit_correction(want, got):
+    """配置した窓の実際の矩形 got が want とずれていれば、ずれを打ち消す矩形を返す（ずれが 2px 以下なら None）。
+
+    窓の装飾（タイトルバー）や、最大化の解除で前の大きさに戻されるなどで、指定と実際がずれることがある。
+    """
+    if got is None or all(abs(a - b) <= 2 for a, b in zip(want, got)):
+        return None
+    if any(abs(a - b) > MAX_OFFSET for a, b in zip(want, got)):
+        return None  # 装飾の分より大きなずれ（大きさを戻されたなど）は打ち消さない（極端に小さな窓にしない）
+    wx, wy, ww, wh = want
+    gx, gy, gw, gh = got
+    return (wx - (gx - wx), wy - (gy - wy), max(1, ww - (gw - ww)), max(1, wh - (gh - wh)))

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Stop hook: 最後の返答が日本語（設定で変えられる）でなければ、書き直させる。
+
+  claude-lang-check            hook 用。stdin に Stop hook の JSON。止めるときだけ stdout に
+                               {"decision": "block", "reason": ...} を出す。何が起きても exit 0
+  claude-lang-check judge [FILE]   本文（FILE か stdin）を判定して結果を 1 行で出す（試す用。
+                                   exit 0 = 通す、1 = 止める、2 = 読めない）
+
+判定はシェルの中だけで行う（AI に判定させる prompt / agent 型の hook はトークンを使うので使わない）。
+止めるのは 1 回の返答につき 1 回まで。stop_hook_active が真なら必ず通す。詳しくは docs/lang-check.md。
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+
+def main(argv):
+    if argv[1:] == ["--version"]:  # 版の表示だけは設定や kitty を読まずに返す
+        from version import handle_version
+        handle_version(argv[1:], "claude-lang-check")
+        return 0
+    if argv[1:2] == ["judge"]:
+        from langcheck import judge, load_lang_config
+        try:
+            text = Path(argv[2]).read_text() if len(argv) > 2 else sys.stdin.read()
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"claude-lang-check: 読めない: {e}", file=sys.stderr)
+            return 2
+        cfg, problems = load_lang_config(os.environ)
+        for p in problems:
+            print(f"claude-lang-check: {p}", file=sys.stderr)
+        block, why = judge(text, cfg)
+        print(f"{'block' if block else 'pass'}: {why}")
+        return 1 if block else 0
+    try:
+        from langcheck import decide
+        out = decide(sys.stdin.read(), os.environ)
+    except Exception as e:  # noqa: BLE001  hook が壊れて返答を止めたままにしないため、何があっても通す
+        out = None
+        try:
+            from langcheck import log_error
+            log_error(os.environ, f"{type(e).__name__}: {e}")
+        except Exception:  # noqa: BLE001
+            pass
+    if out:
+        sys.stdout.write(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

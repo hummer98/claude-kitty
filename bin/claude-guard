@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""名前の付いたガードが働いている間、決めたパスへの書き込みと決めたコマンドを止める（PreToolUse hook）。
+
+  claude-guard hook                     hook 用。stdin に PreToolUse の JSON。止めるときだけ stdout に
+                                        permissionDecision "deny" の JSON を出す。何が起きても exit 0
+  claude-guard status                   ガードごとに、働いているか・条件・期限・例外を 1 行ずつ（問題があれば exit 1）
+  claude-guard check '<command>'        Bash のコマンドを判定して結果を出す（exit 0 = 通す、1 = 止める）
+      [--file PATH] [--tool Write]      Edit / Write の形で判定する
+      [--cwd DIR] [--assume-active]     働いているものとして判定する（条件を調べない）
+  claude-guard on <名前> [--minutes N] [--reason ...]     持ち主の無い旗を立てる（全員を止める。既定 60 分）
+  claude-guard off <名前> [--force]                       旗を外す（acquire のロックは --force のときだけ）
+  claude-guard acquire <名前> [--minutes N] [--reason ...] [--owner ID]
+                                        排他のロックとして旗を立てる。先に持つ人がいれば exit 1
+  claude-guard release <名前> [--owner ID] [--force]      持ち主だけが外せる（--force で誰でも）
+  claude-guard allow <名前|all> --minutes N --reason ...  期限付きで止めを外す（e2e など）
+  claude-guard revoke <名前|all>                          許可を消す
+
+判定は AI を使わず、ここだけで行う。詳しくは docs/guard-hook.md。
+"""
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+
+def hook():
+    try:
+        from guardhook import decide
+        out = decide(sys.stdin.read(), os.environ)
+    except Exception as e:  # noqa: BLE001  hook が壊れてツールを止めたままにしないため、何があっても通す
+        out = None
+        try:
+            from guardhook import log_error
+            log_error(os.environ, f"{type(e).__name__}: {e}")
+        except Exception:  # noqa: BLE001
+            pass
+    if out:
+        sys.stdout.write(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+def until_text(data):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(data["until"]))
+
+
+def main(argv):
+    if argv[1:2] in ([], ["hook"]):
+        return hook()
+    if argv[1:] == ["--version"]:  # 版の表示だけは設定や kitty を読まずに返す
+        from version import handle_version
+        handle_version(argv[1:], "claude-guard")
+        return 0
+    import guardhook as gh
+    p = argparse.ArgumentParser(prog="claude-guard")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    c = sub.add_parser("check")
+    c.add_argument("command", nargs="?")
+    c.add_argument("--file")
+    c.add_argument("--tool", default="Write")
+    c.add_argument("--cwd")
+    c.add_argument("--session")
+    c.add_argument("--assume-active", action="store_true")
+    for name in ("on", "acquire", "allow"):
+        s = sub.add_parser(name)
+        s.add_argument("name")
+        s.add_argument("--minutes", type=float, default=None if name == "allow" else 60, required=(name == "allow"))
+        s.add_argument("--reason", required=(name == "allow"), default="")
+        if name == "acquire":
+            s.add_argument("--owner")
+    sub.add_parser("revoke").add_argument("name")
+    o = sub.add_parser("off")
+    o.add_argument("name")
+    o.add_argument("--force", action="store_true")
+    r = sub.add_parser("release")
+    r.add_argument("name")
+    r.add_argument("--owner")
+    r.add_argument("--force", action="store_true")
+    ns = p.parse_args(argv[1:])
+    env = os.environ
+    try:
+        if ns.cmd == "status":
+            lines, bad = gh.status_lines(env)
+            print("\n".join(lines))
+            return 1 if bad else 0
+        if ns.cmd == "check":
+            if ns.file:
+                data = {"tool_name": ns.tool, "tool_input": {"file_path": ns.file, "notebook_path": ns.file}}
+            elif ns.command is not None:
+                data = {"tool_name": "Bash", "tool_input": {"command": ns.command}}
+            else:
+                p.error("check には '<command>' か --file が要る")
+            data["cwd"] = ns.cwd or os.getcwd()
+            if ns.session:
+                data["session_id"] = ns.session
+            reason = gh.evaluate(data, env, assume=ns.assume_active)
+            print(f"block: {reason}" if reason else "pass")
+            return 1 if reason else 0
+        if ns.cmd == "on":
+            ok, d = gh.set_flag(env, ns.name, ns.minutes, ns.reason, by=gh.owner_id(env))
+            if not ok:
+                print(f"{ns.name}: {d['owner']} がロックとして持っている（{until_text(d)} まで）。上書きしない", file=sys.stderr)
+                return 1
+            print(f"{ns.name}: 旗を立てた（{until_text(d)} まで）")
+            return 0
+        if ns.cmd == "off":
+            res, d = gh.clear_flag(env, ns.name, ns.force)
+            if res == "locked":
+                print(f"{ns.name}: {d['owner']} のロック。外すなら release（持ち主）か off --force", file=sys.stderr)
+                return 1
+            print(f"{ns.name}: 旗を外した" if res == "removed" else f"{ns.name}: 旗は無い")
+            return 0
+        if ns.cmd == "acquire":
+            ok, d = gh.acquire(env, ns.name, ns.minutes, ns.reason, gh.owner_id(env, ns.owner))
+            if ok:
+                print(f"{ns.name}: 取った（持ち主 {d['owner']}、{until_text(d)} まで）")
+                return 0
+            who = d.get("owner") or "持ち主なし（on で立てた旗）"
+            print(f"{ns.name}: ほかが持っている（{who}、{until_text(d) if 'until' in d else '?'} まで"
+                  + (f"、{d['reason']}" if d.get("reason") else "") + "）", file=sys.stderr)
+            return 1
+        if ns.cmd == "release":
+            res, d = gh.release(env, ns.name, gh.owner_id(env, ns.owner), ns.force)
+            if res == "not-owner":
+                print(f"{ns.name}: 持ち主でない（持ち主 {d.get('owner') or 'なし'}）。外すなら --force", file=sys.stderr)
+                return 1
+            print(f"{ns.name}: 外した" if res == "released" else f"{ns.name}: 旗は無い")
+            return 0
+        if ns.cmd == "allow":
+            d = gh.write_state(env, ns.name, "allow", ns.minutes, ns.reason, by=gh.owner_id(env))
+            print(f"{ns.name}: 許可を置いた（{until_text(d)} まで、{d['reason']}）")
+            return 0
+        if ns.cmd == "revoke":
+            print(f"{ns.name}: 許可を消した" if gh.remove_state(env, ns.name, "allow") else f"{ns.name}: 許可は無い")
+            return 0
+    except ValueError as e:
+        print(f"claude-guard: {e}", file=sys.stderr)
+        return 2
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

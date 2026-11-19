@@ -16,7 +16,7 @@
         --force（保護する窓が前面でも実行）
 
 左の枠（統括）は動かさず、最後に入力先を左へ戻す。ペインを閉じる操作と send-text は使わない。
-設定の view.guard（プロセスの正規表現）に当たる窓（ゲームなど）が前面にあるときは何もせず、通知だけする。
+設定の view.guard（プロセスの正規表現）に当たる窓（全画面のアプリや発表中の画面など、キーやフォーカスを奪われたくない窓）が前面にあるときは何もせず、通知だけする。
 設定は lib/config.py（~/.config/claude-kitty/config.json と環境変数）。
 """
 import argparse
@@ -32,7 +32,9 @@ sys.path.insert(0, str(HERE / "lib"))
 from config import kitten_path, load_view_config  # noqa: E402
 from core import kitty_pid_from_socket  # noqa: E402
 from geometry import tab_pane_fraction  # noqa: E402
-from view import (add_role, current_rows, parse_rows, plan, remove_role,  # noqa: E402
+from guard import guarded_in_front as _guarded_in_front  # noqa: E402
+from kstate import Kitten, refresh_marks, state_dir, state_lock  # noqa: E402
+from view import (add_role, current_rows, overlay_ids, parse_rows, plan, remove_role,  # noqa: E402
                   split_two, swap_roles, validate)
 
 KITTEN = kitten_path(os.environ)
@@ -81,7 +83,10 @@ def role_map(osw_list):
     out = {}
     for osw in osw_list:
         for tab in osw["tabs"]:
+            skip = overlay_ids(tab)
             for w in tab["windows"]:
+                if w["id"] in skip:
+                    continue
                 role = w.get("user_vars", {}).get("role")
                 if role:
                     out[role] = (w["id"], tab)
@@ -89,20 +94,11 @@ def role_map(osw_list):
 
 
 def guarded_in_front(patterns):
-    """patterns（pgrep -f の正規表現）に当たるプロセスの窓が前面なら True。
-
-    ゲームなどにクリックやキーを送らない決まりのため。patterns が空なら KWin を呼ばずに False。
-    """
-    pids = set()
-    for pat in patterns:
-        r = subprocess.run(["pgrep", "-f", "--", pat], capture_output=True, text=True)
-        if r.returncode > 1:  # 正規表現の誤りなどを「当たらない」と見なすと、保護が黙って外れる
-            die(f"view.guard の {pat!r} で pgrep が失敗: {r.stderr.strip()}")
-        pids |= {int(p) for p in r.stdout.split()}
-    if not pids:
-        return False
-    from kwin import active_window_pid
-    return active_window_pid() in pids
+    """patterns に当たるプロセスの窓が前面なら True（lib/guard.py）。pgrep が失敗したら止める。"""
+    try:
+        return _guarded_in_front(patterns)
+    except ValueError as e:
+        die(str(e))
 
 
 def execute(sock, ops, main_tab_id, roles, dry):
@@ -132,6 +128,10 @@ def status(sock):
 
 
 def main(argv=None):
+    if (sys.argv[1:] if argv is None else argv) == ["--version"]:  # 版の表示だけは設定や kitty を読まずに返す
+        from version import handle_version
+        handle_version((sys.argv[1:] if argv is None else argv), "claude-view")
+        return 0
     try:
         conf = load_view_config(os.environ)
     except ValueError as e:
@@ -174,7 +174,6 @@ def main(argv=None):
         die(str(e))
 
     if not args.dry_run and not args.force and guarded_in_front(conf["guard"]):
-        subprocess.run(["notify-send", "claude-view", f"保護する窓が前面なので並べ替えを見送りました: {args.cmd}"])
         die("保護する窓（view.guard）が前面にあるので何もしない（--force で実行）", 2)
 
     # 同時に 2 つ並べ替えると形が崩れるので 1 つずつ
@@ -187,13 +186,24 @@ def main(argv=None):
     except ValueError as e:
         die(str(e))
     left_id, main_tab = rmap[args.left]
-    main_roles = [w.get("user_vars", {}).get("role") for w in main_tab["windows"]]
+    # overlay（claude-show の画像など）は重ねた先のペインと一緒に動くので数えない
+    main_roles = [w.get("user_vars", {}).get("role") for w in main_tab["windows"] if w["id"] not in overlay_ids(main_tab)]
     if None in main_roles:
         die("main タブに role の無いペインがある（並べ替えの対象外なので中止）")
     roles = {r: wid for r, (wid, _) in rmap.items()}
-    execute(sock, plan(args.left, rows, main_roles), main_tab["id"], roles, args.dry_run)
-    if not args.dry_run:
-        status(sock)
+    ops = plan(args.left, rows, main_roles)
+    if args.dry_run:
+        execute(sock, ops, main_tab["id"], roles, True)
+        return
+    # claude-state が待受中のペインのいるタブの題に「●」を付けるので、standby を題で探す前に外し、
+    # 並べ替えたあとに付け直す（その間は hook に付けさせない）
+    d = state_dir()
+    kit = Kitten(KITTEN, sock)
+    with state_lock(d, timeout=5.0):
+        refresh_marks(kit, d, args.left, clear=True)
+        execute(sock, ops, main_tab["id"], roles, False)
+        refresh_marks(kit, d, args.left)
+    status(sock)
 
 
 if __name__ == "__main__":

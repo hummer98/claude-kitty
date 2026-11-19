@@ -1,0 +1,14 @@
+# 毎週月曜の朝に claude-session-stats.service を走らせる。
+# Persistent=true: 電源が切れていて逃したら、次に起動したときに走らせる。
+#   systemctl --user daemon-reload && systemctl --user enable --now claude-session-stats.timer
+#   systemctl --user list-timers claude-session-stats.timer
+[Unit]
+Description=Run claude-session-stats every Monday morning
+
+[Timer]
+OnCalendar=Mon *-*-* 07:30:00
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

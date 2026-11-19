@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""見てほしいもの（HTML・画像）を、自分のペインの上に開く。
+
+  claude-show FILE_OR_URL [--ratio 0.6]
+
+- HTML / URL: claude-browser open <file:// か URL> --area right --mode show --focus none（左の列（統括）を除いた
+  kitty の右側全体の上だけ覆い、会話は見せたまま。ユーザーに見せる用途なので広く）
+- 画像（png/jpg/jpeg/webp/gif/svg）: 自分のペインの上に kitty の overlay で kitten icat を出す。
+  閉じるには、overlay をクリックしてからキーを押す。
+- 入力先は動かさない（HTML の Chrome も画像の overlay も、フォーカスを取らない。ユーザーが打っている途中の
+  文字が、別の窓に入ってしまわないように）。
+- 保護する窓（view.guard、全画面のアプリや発表中の画面など）が前面なら何もしないで、その旨を返す（exit 2）。
+- kitty の外では xdg-open に渡す。
+使う kitten @ は ls・launch だけ（close 系と send-text は使わない）。
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+HERE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERE / "lib"))
+from config import kitten_path, load_view_config  # noqa: E402
+from guard import guarded_in_front  # noqa: E402
+from kstate import Kitten  # noqa: E402
+from state import find_window  # noqa: E402
+
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+HTML_EXT = {".html", ".htm", ".xhtml"}
+BROWSER = HERE / "bin" / "claude-browser"
+
+
+def classify(target):
+    """("url", url) / ("html", Path) / ("image", Path) / ("other", Path)。"""
+    u = urlparse(target)
+    if u.scheme in ("http", "https"):
+        return "url", target
+    if u.scheme == "file":
+        target = u.path
+    p = Path(target).expanduser().resolve()
+    ext = p.suffix.lower()
+    if ext in HTML_EXT:
+        return "html", p
+    if ext in IMAGE_EXT:
+        return "image", p
+    return "other", p
+
+
+def is_guarded(env, run=subprocess.run, active_pid=None):
+    """(保護する窓が前面か, 理由)。前面の窓を確かめられないときも「動かさない」側に倒す。"""
+    try:
+        patterns = load_view_config(env)["guard"]
+        return guarded_in_front(patterns, run=run, active_pid=active_pid), "保護する窓（view.guard）が前面にある"
+    except ValueError as e:
+        return True, str(e)
+    except SystemExit:  # kwin.die（前面の窓が分からない）
+        return True, "前面の窓を確かめられない"
+
+
+def overlay_args(kitten, wid, path):
+    """自分のペインに重ねる overlay の launch 引数。入力先は変えない（--keep-focus）。"""
+    return ["launch", "--type=overlay", "--match", f"window_id:{wid}", "--next-to", f"id:{wid}",
+            "--title", f"claude-show: {path.name}", "--keep-focus",
+            "--", kitten, "icat", "--hold", "--align", "center", str(path)]
+
+
+def show(target, env, ratio, run=subprocess.run, active_pid=None):
+    """(exit code, 結果の dict)。"""
+    kind, val = classify(target)
+    if kind != "url" and not Path(val).is_file():
+        return 1, {"error": f"ファイルが無い: {val}"}
+    guarded, why = is_guarded(env, run=run, active_pid=active_pid)
+    if guarded:
+        return 2, {"skipped": why, "target": str(val)}
+    wid, sock = env.get("KITTY_WINDOW_ID"), env.get("KITTY_LISTEN_ON")
+    if not wid or not sock:
+        r = run(["xdg-open", val if kind == "url" else str(val)], capture_output=True, text=True)
+        return (0 if r.returncode == 0 else 1), {"shown": "xdg-open", "target": str(val)}
+    if kind in ("url", "html"):
+        url = val if kind == "url" else val.as_uri()
+        cmd = [str(BROWSER), "open", url, "--area", "right", "--mode", "show", "--focus", "none"]
+        if ratio is not None:
+            cmd += ["--ratio", str(ratio)]
+        r = run(cmd, capture_output=True, text=True)
+        out = {"shown": "browser", "target": url}
+        if r.returncode:
+            out["error"] = (r.stderr or r.stdout).strip()
+        return (0 if r.returncode == 0 else 1), out
+    if kind == "image":
+        kitten = kitten_path(env)
+        kit = Kitten(kitten, sock, 5.0)
+        hit = find_window(kit.ls() or [], int(wid))
+        if hit is None:
+            return 1, {"error": f"自分のペイン (id {wid}) が kitty に見つからない"}
+        osw, tab, w = hit
+        if kit(*overlay_args(kitten, int(wid), val)) is None:
+            return 1, {"error": "kitten @ launch に失敗"}
+        out = {"shown": "overlay", "target": str(val), "window": int(wid), "focus": "kept",
+               "close": "overlay をクリックしてからキーを押すと閉じる"}
+        if not tab.get("is_active"):
+            out["note"] = "自分のペインはいま表示されていないタブにある（タブを開けば見える）"
+        return 0, out
+    return 1, {"error": f"開き方が分からない種類: {val}（HTML・画像・URL のどれか）"}
+
+
+def main(argv=None):
+    if (sys.argv[1:] if argv is None else argv) == ["--version"]:  # 版の表示だけは設定や kitty を読まずに返す
+        from version import handle_version
+        handle_version((sys.argv[1:] if argv is None else argv), "claude-show")
+        return 0
+    ap = argparse.ArgumentParser(prog="claude-show")
+    ap.add_argument("target", help="HTML・画像のファイル、または URL")
+    ap.add_argument("--ratio", type=float, help="HTML のとき、ペインの上から何割をブラウザにするか")
+    args = ap.parse_args(argv)
+    code, out = show(args.target, os.environ, args.ratio)
+    print(json.dumps(out, ensure_ascii=False))
+    if code == 2:
+        print(f"claude-show: {out['skipped']}ので開かない", file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
