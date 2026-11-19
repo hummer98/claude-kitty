@@ -745,8 +745,16 @@ class ClaudeViewCli(unittest.TestCase):
         finally:
             s.kill(); s.wait()
         self.assertIn("qdbus", self.calls.read_text())  # 前面の確認をした
-        self.assertNotIn("detach-window", self.calls.read_text())  # 確認できなければ（journal に出ない）並べ替えない
+        self.assertNotIn("detach-window", self.calls.read_text())  # 前面を確かめられなければ並べ替えない
         self.assertNotEqual(r.returncode, 0)
+
+    def test_bad_guard_regex_refused(self):
+        # pgrep が失敗したのを「当たらない」と見なすと保護が黙って外れるので、止める
+        for pat in ("[", "(?"):
+            self.conf.write_text(json.dumps({"view": {"guard": [pat]}}))
+            r = self.run_view("restore", PATH=f"{Path(self.tmp.name)}:/usr/bin:/bin")
+            self.assertNotEqual(r.returncode, 0, pat)
+            self.assertTrue(not self.calls.exists() or "detach-window" not in self.calls.read_text(), pat)
 
 
 if __name__ == "__main__":

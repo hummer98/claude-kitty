@@ -95,7 +95,9 @@ def guarded_in_front(patterns):
     """
     pids = set()
     for pat in patterns:
-        r = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
+        r = subprocess.run(["pgrep", "-f", "--", pat], capture_output=True, text=True)
+        if r.returncode > 1:  # 正規表現の誤りなどを「当たらない」と見なすと、保護が黙って外れる
+            die(f"view.guard の {pat!r} で pgrep が失敗: {r.stderr.strip()}")
         pids |= {int(p) for p in r.stdout.split()}
     if not pids:
         return False

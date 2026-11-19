@@ -4,8 +4,9 @@
 # claude-code の中から起動すると CLAUDE_* の環境変数を引き継ぎ、子の claude が
 # 「子セッション」扱いになって会話記録を保存しなくなるので、それらを消してから起動する。
 session=${1:-$HOME/.config/kitty/claude3.session}
-kitty=${CLAUDE_KITTY_KITTY:-$HOME/.local/kitty.app/bin/kitty}  # 下で CLAUDE_* を消す前に読む
-for v in $(env | grep -oE '^(CLAUDE[A-Z_]*|CLAUDECODE)='); do unset "${v%=}"; done
+kitty=${CLAUDE_KITTY_KITTY:-$HOME/.local/kitty.app/bin/kitty}
+# この道具自身の設定（CLAUDE_KITTY_* / CLAUDE_VIEW_*）は残し、中の claude-view に届ける
+for v in $(env | grep -oE '^(CLAUDE[A-Z_]*|CLAUDECODE)=' | grep -vE '^CLAUDE_(KITTY|VIEW)_'); do unset "${v%=}"; done
 cd ~ || exit 1
 "$kitty" --detach --class kitty-claude --start-as maximized --session "$session"
 sleep 2

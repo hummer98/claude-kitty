@@ -102,7 +102,8 @@ claude-browser open https://example.com --mode show --ratio 0.6   # 7. 自分の
 claude-browser shot /tmp/shot.png && claude-browser close
 ```
 
-- 4〜6 は example.session のように `role` の付いたペインが要る（claude3.session には `slot` しか無いので、`claude-view` の対象外）。
+- 5〜6 は example.session のように `role` の付いたペインが要る（claude3.session には `slot` しか無いので、並べ替えの対象外。`status` は role が無ければ window id を出す）。
+- 環境変数（`CLAUDE_VIEW_*` など）は、シェルの rc か設定ファイルで与える。`claude-kitty` は `CLAUDE_KITTY_*` と `CLAUDE_VIEW_*` 以外の `CLAUDE_*` を消して kitty を起動する。
 - `claude-wait` の確かめ方: 別の端末で `claude` を開き、そのセッション ID で `claude-wait test <ID>` を kitty のペインで実行する。元の端末で `/exit` すると、kitty 側で resume される。
 
 ## 5. 守るべき決まり
@@ -124,6 +125,7 @@ kitty と `kitten @` の部分（ペインの一覧・移動・分割比・フ�
 |---|---|---|---|
 | `bin/claude-kitty` | 末尾の `qdbus ... loadScript lib/kitty_to_d2.js` | KWin スクリプトで仮想デスクトップ 2 へ移して最大化 | 省く（Space の指定は公式 API が無い）か、Hammerspoon で最大化。`--detach` は macOS では使えないので `open -n -a kitty --args --session "$session"` などで起動する |
 | `bin/claude-kitty` | `kitty=${CLAUDE_KITTY_KITTY:-~/.local/kitty.app/bin/kitty}` | 公式インストーラの場所 | `CLAUDE_KITTY_KITTY=/Applications/kitty.app/Contents/MacOS/kitty` |
+| `bin/claude-kitty` | `readlink -f "$0"` | GNU coreutils | macOS 12.3 より前には `-f` が無い。`python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$0"` などに置き換える |
 | `lib/kitty_to_d2.js` | 全体 | KWin スクリプト | 不要（上と同じ） |
 | `lib/kwin.py` | `kwin()` | `qdbus` で KWin スクリプトを読み込み、`journalctl --user` から `console.info` の出力を受け取る | Hammerspoon の `hs` コマンド（`hs -c 'lua'`、`hs.ipc` を有効にする）か `osascript`（AppleScript / JXA）。どちらも結果を標準出力で直接返せるので、journal を読む仕組み（`core.parse_journal`）は要らなくなる |
 | `lib/kwin.py` | `active_window_pid()` | `workspace.activeWindow.pid` | `hs -c 'print(hs.window.frontmostWindow():application():pid())'`、または `osascript -e 'tell application "System Events" to unix id of first process whose frontmost is true'` |
@@ -145,7 +147,7 @@ OS を問わず動くもの（そのまま使える見込み）: `lib/view.py`�
 
 ### kitty.conf の差
 
-- `XDG_RUNTIME_DIR` は macOS には無い。`listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}` は空に展開されて `/kitty-<pid>` を作ろうとして失敗するので、`listen_on unix:/tmp/kitty-{kitty_pid}` にする。道具は `XDG_RUNTIME_DIR` が無ければ `/tmp` を探すので、これでそろう。
+- `XDG_RUNTIME_DIR` は macOS には無い。`listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}` は正しいソケットの場所にならない（未定義の変数のまま残るか空になる）ので、`listen_on unix:/tmp/kitty-{kitty_pid}` にする。道具は `XDG_RUNTIME_DIR` が無ければ `/tmp` を探すので、これでそろう。
 - フォント（`Adwaita Mono`・`Noto Sans Mono CJK JP`）は Linux の fontconfig の事情による設定。macOS では `font_family Menlo` などに変え、`symbol_map` の行は消してよい。
 
 ### 移植の進め方（おすすめの順）
