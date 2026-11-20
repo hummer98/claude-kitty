@@ -6,6 +6,37 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `tools/install.sh`: clone したあと 1 行で入れる（Linux と macOS。POSIX sh と python3 だけ）。部品は `--links`（`bin/` のコマンドを `~/.local/bin` へ）・`--hooks[=state,lang,guard]`（`~/.claude/settings.json` に hook）・`--kitty`（kitty.conf に include の 1 行と watcher のリンク）・`--systemd`（ユーザーユニットを写して enable、Linux だけ。macOS は launchd の案内）・`--all`。
+  - まず何をするかを見せ、確認してから行う（`--yes` で省く、`--dry-run` で見るだけ）。何度流しても同じ結果で、`--uninstall` で同じ部品を外せる。
+  - 既にあるものは壊さない: 別のファイルは上書きしない、既存のキーと hook は残す、同じ道具・同じ引数の hook は（パスの書き方が違っても）二重に足さない、手で入れた中身の違うユニットは上書きしない。書き換える `settings.json` と kitty.conf は `<名前>.bak-<日時>` を作ってから一時ファイル経由で置き換える。`settings.json` が JSON として読めなければ、どの部品も行わずに止める。
+- `tools/merge_hooks.py`: settings.json の hook を足す・外す・調べる（install.sh と doctor が使う）。
+- `claude-kitty doctor [--json]`: kitty の版・`kitten @ ls`（allow_remote_control と listen_on）・`layout_state.pairs`・python3 と node の版・コマンドのリンク・どの hook が入っているか・kitty.conf の watcher と filter_notification・systemd のサービス・設定ファイルの各節が読めるか・KWin・Chrome を 1 行ずつ調べ、足りなければ直し方を出す。読むだけ。NG があれば終了コード 1。
+- `kitty/claude-kitty.conf`（と macOS 用の `claude-kitty-macos.conf`）: claude-kitty に要る kitty の設定だけ（リモート操作・ソケット・splits・通知・watcher）。自分の kitty.conf から include する。
+- `config.example.json`（全部の節・全部の項目の例）と [docs/config.md](docs/config.md)（各項目の意味と既定値）。
+- README の冒頭に「最短の導入」（clone → `tools/install.sh --all` → `claude-kitty doctor`）。手作業の手順は SETUP.md に残した。SETUP.md に macOS の launchd の例。
+
+### 変更
+
+- `claude-roster`: 設定の `roster` 節の読み込みを `lib/config.py` の `load_roster_config` に移した（doctor とテストから同じ関数で読むため。動きは同じ）。
+
+### 修正
+
+- `claude-guard`: 区切りを引用したヒアドキュメント（`cat >> README.md <<'EOF' … EOF`）の本文に、止める対象のコマンドの名前が書いてあるだけで止めていた。引用した区切りを見落として本文をコマンドとして読んでいたため。引用符の中（`echo` や `printf` の引数、`git commit -m` の値）とヒアドキュメントの本文は文字列として扱い、コマンドとみない。
+  - bash が実際に動かすものは今までどおり読む: `bash -c` / `sh -c` の中身、二重引用符の中と区切りを引用しない `<<EOF` の本文の `$(...)` と `` `...` ``（二重引用符の中の置換は、前の版では読んでいなかった）。
+  - 複数行の二重引用符の中の `<<` を、ヒアドキュメントの始まりと取り違えて後ろの行を読み飛ばすことがあった（止めるべきコマンドを見逃しうる）のも直した。
+  - 本文を stdin から動かすもの（`bash <<'EOF'`・`sh -s <<EOF`・`ssh host <<'EOF'`）は、本文を `bash -c` の中身と同じに読む。算術式の `<<`（`$((1<<2))`）をヒアドキュメントの始まりとみて、後ろの行を読み飛ばさない。
+- `claude-state watch`（と doctor）: kitty のソケットの持ち主が生きているかを `/proc` で見ていたため、macOS では動いている kitty を見つけられなかった。signal 0 で確かめる。
+
+### 上げるときに手で行うこと
+
+0.2.0 から上げるとき。`git pull` のあと、次の 1 行で足りる（もう入っているものはそのまま）。
+
+1. `tools/install.sh --all --dry-run` で何が足されるかを見て、`tools/install.sh --all` を流す。手で入れた hook・リンク・ユニットはそのまま「入っている」と数え、足りないものだけを足す（0.2.0 の手順で `claude-lang-check` を hook に絶対パスで入れ、`~/.local/bin` にリンクしていなければ、そのリンクが足される）。
+2. `claude-kitty doctor` で NG が無いことを確かめる。
+3. kitty.conf を自分のものにしている（リポジトリの `kitty/kitty.conf` へのリンクでない）なら、install.sh が足した include を読ませるために kitty を起動し直す（`allow_remote_control` と `listen_on` は起動時にだけ読まれる）。
+
 ## [0.2.0] - 2026-11-20
 
 ### 追加

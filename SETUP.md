@@ -21,6 +21,29 @@ kitty は公式のインストーラ（`curl -L https://sw.kovidgoyal.net/kitty/
 
 ## 2. インストール
 
+ふつうは `tools/install.sh` で入れる（下の手作業と同じことを、既にあるものを壊さずに行う）。
+
+```sh
+REPO=~/claude-kitty
+git clone https://github.com/hummer98/claude-kitty "$REPO"
+"$REPO/tools/install.sh" --dry-run --all   # 何をするかを見るだけ
+"$REPO/tools/install.sh" --all             # 確認してから入れる（--yes で確認を省く）
+claude-kitty doctor                        # 足りないものと直し方
+```
+
+| 部品 | 行うこと | 外す（`--uninstall`） |
+|---|---|---|
+| `--links` | `bin/` の全コマンドを `~/.local/bin`（`$CLAUDE_KITTY_BIN_DIR`）にリンク。既にある別のファイルは上書きしない | このリポジトリを指すリンクだけ消す |
+| `--hooks[=state,lang,guard]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既存のキーと hook は残し、同じ道具・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じ道具の hook を外す（手で入れたものも） |
+| `--kitty` | kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）を足し（末尾なので、自分の `listen_on`・`enabled_layouts`・`allow_remote_control`・`filter_notification` は上書きされる。あれば先に「!」で見せる）、`claude_state_watcher.py` と `claude3.session` のリンクを張る。kitty.conf がこのリポジトリの `kitty/kitty.conf` へのリンクなら触らない | 足した行とリンクだけ外す |
+| `--systemd` | `contrib/systemd/` のユニットを `~/.config/systemd/user/` に、パスを置き換えて写し、`daemon-reload` と `enable --now`（Linux だけ）。手で入れた中身の違うユニットは上書きしない | 自分が入れたユニットを止めて消す |
+
+- 引数なしは `--all` と同じで、変えるものがあれば確認を取る（端末でなければ `--yes` が要る）。
+- `claude-kitty doctor` は読むだけ（`kitten @ ls`・`systemctl --user is-enabled` / `is-active`・設定の読み込み）。`--json` も出せる。
+- 版を上げたときは `git pull` のあと `tools/install.sh --all` を流し直せば、増えたコマンドや hook だけを足す（CHANGELOG の「上げるときに手で行うこと」も見る）。
+
+### 手作業で入れる
+
 リポジトリをどこかに置き（以下 `$REPO`）、`~/.local/bin` と `~/.config/kitty` へシンボリックリンクを張る。リンクなので、リポジトリを更新すればそのまま反映される。
 
 ```sh
@@ -38,6 +61,8 @@ ln -sfn "$REPO/kitty/claude_state_watcher.py" ~/.config/kitty/claude_state_watch
 - `~/.local/bin` が PATH に入っていること（`claude-wait` はセッションファイルの `bash -lic` から呼ばれるので、ログインシェルの PATH）。
 - `bin/` の道具は `Path(__file__).resolve()` でリポジトリの `lib/` を見つけるので、リンク経由で動く。
 
+kitty.conf を差し替えたくなければ、リンクの代わりに自分の kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf` の 1 行を足す（要る設定だけが入っている。macOS は `claude-kitty-macos.conf`）。
+
 ### 自分のセッション配置
 
 `kitty/example.session` を写して `kitty/<名前>.session` を作る（`.gitignore` で `kitty/*.session` は example と claude3 以外 git に入らない）。
@@ -52,7 +77,7 @@ ln -sfn "$REPO/kitty/mine.session" ~/.config/kitty/mine.session
 
 ### 設定ファイル（役割名を変えたとき）
 
-`~/.config/claude-kitty/config.json`（リポジトリの外）:
+`~/.config/claude-kitty/config.json`（リポジトリの外。全部の節の例は [config.example.json](config.example.json)、各項目の意味と既定値は [docs/config.md](docs/config.md)）:
 
 ```json
 {
@@ -201,9 +226,29 @@ kitty と `kitten @` の部分（ペインの一覧・移動・分割比・フ�
 
 OS を問わず動くもの（そのまま使える見込み）: `lib/view.py`・`lib/geometry.py`・`lib/core.py`（`parse_journal` は KWin 専用だが副作用はない）・`lib/config.py`・`lib/cdp.mjs`・`bin/claude-view` の並べ替え（`kitten @ ls` / `detach-window` / `focus-window` / `layout_action`）。
 
+### macOS: launchd で常駐させる
+
+`tools/install.sh --systemd` は macOS では何もしない。`claude-state watch`（完了のペインを見たら idle に戻す常駐）は LaunchAgent で動かす。例（`$REPO` は実際のパスに書き換える）:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ~/Library/LaunchAgents/com.example.claude-state-watch.plist -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.claude-state-watch</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/python3</string><string>$REPO/bin/claude-state</string><string>watch</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+```
+
+`/usr/bin/python3`（Command Line Tools のもの）は 3.10 より古いことがあるので、`python3 --version` を確かめ、古ければ Homebrew などの python3 の絶対パスを書く。`launchctl load ~/Library/LaunchAgents/com.example.claude-state-watch.plist` で始める。`claude-roster save --auto`（5 分ごと）と `claude-session-stats`（週 1 回）は、同じ形で `StartInterval`（秒）か `StartCalendarInterval` を使う。
+
 ### kitty.conf の差
 
-- `XDG_RUNTIME_DIR` は macOS には無い。`listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}` は正しいソケットの場所にならない（未定義の変数のまま残るか空になる）ので、`listen_on unix:/tmp/kitty-{kitty_pid}` にする。道具は `XDG_RUNTIME_DIR` が無ければ `/tmp` を探すので、これでそろう。
+- `XDG_RUNTIME_DIR` は macOS には無い。`listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}` は正しいソケットの場所にならない（未定義の変数のまま残るか空になる）ので、`listen_on unix:/tmp/kitty-{kitty_pid}` にする。道具は `XDG_RUNTIME_DIR` が無ければ `/tmp` を探すので、これでそろう。`tools/install.sh --kitty` は macOS では、この形の `kitty/claude-kitty-macos.conf` を include する。
 - フォント（`Adwaita Mono`・`Noto Sans Mono CJK JP`）は Linux の fontconfig の事情による設定。macOS では `font_family Menlo` などに変え、`symbol_map` の行は消してよい。
 
 ### 移植の進め方（おすすめの順）

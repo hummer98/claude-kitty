@@ -13,6 +13,22 @@
 
 作者の環境は Linux（KDE Plasma 6 Wayland）。窓の操作に KWin スクリプトを使う部分は Linux/KDE 専用で、kitty と `kitten @` の部分は OS を問わない。セットアップの手順と macOS への移植の手引きは [SETUP.md](SETUP.md)。
 
+## 最短の導入
+
+前提は kitty・Python 3.10 以降・Claude Code（[SETUP.md の 1.](SETUP.md#1-前提)）。
+
+```sh
+git clone https://github.com/hummer98/claude-kitty ~/claude-kitty
+~/claude-kitty/tools/install.sh --all     # 何をするかを見せ、確認してから入れる（--dry-run で見るだけ）
+claude-kitty doctor                       # 足りないものと直し方を 1 行ずつ出す（NG が無ければ終了コード 0）
+```
+
+- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-lang-check`・`claude-guard`）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf` の 1 行を足す、systemd のユーザーユニットを入れる（Linux だけ。macOS は launchd の案内を出す）。部品ごとに `--links` `--hooks[=state,lang,guard]` `--kitty` `--systemd` で選べる。
+- 既にあるものは壊さない: 別のファイルは上書きせず、既存の hook とキーは残し、同じ hook は二重に足さない。書き換える設定は `<名前>.bak-<日時>` に残す。何度流しても同じで、`--uninstall` で同じ部品を外せる。
+- kitty の設定（リモート操作とソケット）は kitty を起動し直してから効く。そのあと `claude-kitty` で kitty を開き、`claude-kitty doctor` をもう一度。
+- 役割名などの設定は `~/.config/claude-kitty/config.json`（無くても既定値で動く）。全項目の例は [config.example.json](config.example.json)、意味と既定値は [docs/config.md](docs/config.md)。
+- 手作業で入れる手順と、各部品の中身は [SETUP.md](SETUP.md)。
+
 | 道具 | 何をするか | OS 依存 |
 |---|---|---|
 | `bin/claude-kitty` | kitty を `CLAUDE_*` 環境変数なしで起動し、セッションファイルどおりにペインを開く | 仮想デスクトップへの移動だけ KWin |
@@ -32,6 +48,7 @@
 
 `claude-kitty [session]` — kitty を CLAUDE_* 環境変数なしで起動し（Claude Code の中から起動すると、中の claude が子セッション扱いになり会話記録が残らなくなるのを避ける）、仮想デスクトップ 2 に最大化する。既定の配置は `kitty/claude3.session`（左 1/4 + 右上下）。
 
+- `claude-kitty doctor [--json]`: 入っているもの・動くもの（kitty の版とリモート操作、`layout_state.pairs`、python3・node、コマンドのリンク、hook、kitty.conf の watcher、systemd、設定ファイル、KWin、Chrome）を 1 行ずつ調べ、足りなければ直し方を出す。読むだけ。NG があれば終了コード 1。
 - `kitty/example.session`: 統括 1 + 担当 5 の例（各ペインが `claude-wait` で待ってから resume する）。手元の版は `kitty/<名前>.session` に置けば git に入らない（`.gitignore`）。
 
 ## claude-view（統括用の配置）
