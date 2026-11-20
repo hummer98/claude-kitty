@@ -155,6 +155,109 @@ class BrowserPlacement(unittest.TestCase):
         self.assertEqual(rect, (1000, 40, 3000, 600))
 
 
+class BrowserStaleOver(unittest.TestCase):
+    """前回の over の先（aom-text）が見えないタブ（standby）に移ったあとの open / claude-show / move。
+    本物の resolve_pane を使い、kitty の ls だけを偽物にする。"""
+
+    def setUp(self):
+        import importlib.machinery as m
+        import importlib.util as u
+        path = Path(__file__).resolve().parent.parent / "bin" / "claude-browser"
+        loader = m.SourceFileLoader("claude_browser_stale", str(path))
+        self.b = u.module_from_spec(u.spec_from_loader("claude_browser_stale", loader))
+        loader.exec_module(self.b)
+        standby = {"is_active": False, "layout_state": {"class": "Splits", "pairs": 40},
+                   "groups": [{"id": 40, "windows": [40]}], "windows": [{"id": 40, "user_vars": {"role": "aom-text"}}]}
+        self.ls = [{"tabs": [dict(BrowserArea.TAB, is_active=True), standby]}]
+        self.b.kitty_socket = lambda: "s"
+        self.b.kitty_ls = lambda sock: self.ls
+        self.b.kitty_pid_from_socket = lambda sock: 1
+        self.b.find_kitty = lambda pid, title: ("K", (0, 0, 100, 100))
+        self.b.is_mac = lambda: False
+        self.b.own_window_id = lambda: 2  # 呼び出した自分は見えているタブのペイン 2
+
+    def prep(self, st, move=False, **given):
+        import contextlib
+        import io
+        args = SimpleNamespace(**dict({"mode": None, "ratio": None, "over": None, "focus": None, "area": None}, **given))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            opts, _kw, tab, pane = self.b.prepare(args, st, move=move)
+        return opts, pane, err.getvalue()
+
+    def test_claude_show_after_over_moved_to_hidden_tab(self):
+        # claude-show は open --mode show --area others --focus none。others に over は関係ないので探しに行かない
+        for st in ({"mode": "show", "ratio": 0.6, "area": "pane", "over": "aom-text"},
+                   {"mode": "self", "ratio": 0.65, "area": "pane", "over": "40"}):
+            opts, pane, err = self.prep(st, mode="show", area="others", focus="none")
+            self.assertEqual((opts["area"], opts["over"], pane["id"], err), ("others", None, 2, ""), st)
+
+    def test_area_others_open_ignores_previous_over(self):
+        opts, pane, err = self.prep({"mode": "self", "area": "pane", "over": "aom-text"}, area="others")
+        self.assertEqual((opts["area"], opts["over"], pane["id"], err), ("others", None, 2, ""))
+        opts, pane, _ = self.prep({"mode": "self", "area": "pane", "over": "aom-text"}, area="right")
+        self.assertEqual((opts["area"], opts["over"], pane["id"]), ("right", None, 2))
+
+    def test_open_without_area_falls_back_to_own_pane(self):
+        # 前回は self で aom-text の上（pane）。area も over も省いた open は pane で over を引き継ぐが、先が見えない
+        opts, pane, err = self.prep({"mode": "self", "ratio": 0.65, "area": "pane", "over": "aom-text"})
+        self.assertEqual((opts["area"], opts["over"], pane["id"]), ("pane", None, 2))
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertIn("自分のペインに戻す", err)
+        # 前回が show・pane なら、open は show の既定の others（over は使わない）
+        opts, pane, err = self.prep({"mode": "show", "ratio": 0.6, "area": "pane", "over": "aom-text"})
+        self.assertEqual((opts["area"], opts["over"], pane["id"], err), ("others", None, 2, ""))
+
+    def test_fallback_is_saved_as_self(self):
+        st = {"class": "c", "mode": "self", "ratio": 0.65, "area": "pane", "over": "aom-text"}
+        opts, pane, _ = self.prep(st)
+        self.b.main_browser_window = lambda st: "B"
+        self.b.place_browser = lambda cls, bid, kid, rect, focus: rect
+        self.b.browser_rect = lambda bid: None
+        self.b.placement(st, opts, ("K", (0, 40, 4000, 2000)), BrowserArea.TAB, pane, settle=0)
+        self.assertIsNone(st["over"])  # 次の open で同じ見えない先を探しに行かない
+        opts, pane, err = self.prep(st)
+        self.assertEqual((opts["over"], pane["id"], err), (None, 2, ""))
+
+    def test_gone_over_falls_back_too(self):
+        opts, pane, err = self.prep({"mode": "self", "area": "pane", "over": "no-such-role"})
+        self.assertEqual((opts["over"], pane["id"]), (None, 2))
+        self.assertIn("no-such-role", err)
+
+    def test_move_falls_back_to_own_pane(self):
+        opts, pane, err = self.prep({"mode": "show", "ratio": 0.6, "area": "pane", "over": "aom-text"}, move=True)
+        self.assertEqual((opts["mode"], opts["area"], opts["ratio"], opts["over"], pane["id"]),
+                         ("show", "pane", 0.6, None, 2))
+        self.assertIn("自分のペインに戻す", err)
+        opts, pane, err = self.prep({"mode": "show", "area": "others", "over": "aom-text"}, move=True)
+        self.assertEqual((opts["area"], opts["over"], pane["id"], err), ("others", None, 2, ""))
+
+    def test_visible_inherited_over_is_still_used(self):
+        opts, pane, err = self.prep({"mode": "self", "area": "pane", "over": "3"})
+        self.assertEqual((opts["over"], pane["id"], err), ("3", 3, ""))
+        opts, pane, _ = self.prep({"mode": "show", "ratio": 0.6, "area": "pane", "over": "3"}, move=True)
+        self.assertEqual((opts["over"], pane["id"]), ("3", 3))
+
+    def test_outside_kitty_fails_without_fallback_warning(self):
+        self.b.own_window_id = lambda: None  # kitty の外: 戻る先の自分のペインが無い
+        import contextlib
+        import io
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            self.b.prepare(SimpleNamespace(mode=None, ratio=None, over=None, focus=None, area=None),
+                           {"mode": "self", "area": "pane", "over": "aom-text"})
+        self.assertNotIn("自分のペインに戻す", err.getvalue())
+        self.assertIn("表示されていないタブ", err.getvalue())
+
+    def test_explicit_over_on_hidden_tab_still_fails(self):
+        for given in ({"over": "aom-text"}, {"over": "aom-text", "mode": "show", "area": "others"},
+                      {"over": "no-such-role"}):
+            with self.assertRaises(SystemExit):
+                self.prep({"mode": "self", "area": "pane"}, **given)
+            with self.assertRaises(SystemExit):
+                self.prep({"mode": "self", "area": "pane", "over": "aom-text"}, move=True, **given)
+
+
 def win(id, cols, lines, **nb):
     return {"id": id, "columns": cols, "lines": lines,
             "neighbors": {d: nb.get(d, []) for d in ("left", "right", "top", "bottom")}}
@@ -340,6 +443,16 @@ class PlaceOpts(unittest.TestCase):
         self.assertEqual(self.r(mode="show", over="dev-a", area="others")["area"], "others")
         self.assertEqual(self.r(mode="show", over="self")["area"], "others")
         self.assertEqual(self.r({"mode": "show", "area": "pane", "over": "dev-a"}, mode="show")["area"], "others")
+
+    def test_previous_over_only_for_pane(self):
+        # 前回の over を引き継ぐのは pane のときだけ（others・right は自分のペインと左の列で決まり、over は関係ない）
+        st = {"mode": "self", "area": "pane", "over": "dev-a"}
+        self.assertEqual(self.r(st)["over"], "dev-a")
+        for given in ({"area": "others"}, {"area": "right"}, {"mode": "show"}, {"mode": "show", "area": "others"}):
+            self.assertIsNone(self.r(st, **given)["over"], given)
+        self.assertIsNone(self.r({"mode": "show", "area": "others", "over": "dev-a"}, move=True)["over"])
+        self.assertEqual(self.r(dict(st, mode="show"), move=True)["over"], "dev-a")
+        self.assertEqual(self.r(st, over="dev-b", area="others")["over"], "dev-b")  # 明示はそのまま
 
     def test_move_keeps_area_and_ratio(self):
         st = {"mode": "show", "ratio": 0.6, "area": "pane", "over": "dev-a"}

@@ -76,6 +76,9 @@ def resolve_place_opts(given, state, move=False):
     - mode・over: 未指定なら前回の値（open を呼び直しても show が self に戻って会話を隠さないように）。
       ただし open では、前回が他のペインの場所（others・right）なら mode を引き継がず self に戻す
       （claude-show で見せたあとの、自分の作業用の open が他のペインを覆わないように）。
+      over を引き継ぐのは、決まった area が pane のときだけ。others・right は「呼び出した自分のペインを避ける」
+      「左の列を除く」規則で over は関係ないので、前回の over の先（見えないタブに移ったかもしれない）を探しに
+      行かないよう None にする。引き継いだ先が見つからないときに自分のペインに戻すのは prepare。
     - focus: 一回ごとの指定（保護する窓が前面のときの none が以後ずっと残らないように）。
     - area: 明示が最優先。move で mode も area も省いたときは前回の area（同じものを置き直すだけ）。
       --over を明示したときは pane（その先に重ねる指定なので）。
@@ -96,6 +99,8 @@ def resolve_place_opts(given, state, move=False):
         area = "pane"
     if area is None:
         area = AREA_FOR_MODE.get(mode, "pane")
+    if given.get("over") is None and area != "pane":
+        over = None
     ratio = given.get("ratio")
     if ratio is None and state.get("ratio") is not None and (state.get("area") or "pane") == area:
         ratio = state["ratio"]

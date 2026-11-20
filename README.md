@@ -124,6 +124,7 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
   - `--over`: 別のペイン（slot 名 left/right-top/right-bottom か window id）に重ねる。`--over` を指定して area を省くと `pane`（show でもその先のペインの上）
   - `--focus none`: 入力先を変えない（全画面のアプリを使っている最中など）
 - `open` を呼び直しても、未指定の mode/over は前回の値を引き継ぐ（ペインの上の show のあとの open で、会話を隠す self に戻らないように）。ただし前回が他のペインの場所（`others`・`right`。claude-show の HTML など）なら mode は引き継がず self に戻す（そのあとの自分の作業用の `open` が他のペインを覆わないように）。focus と area は一回ごとの指定で、引き継がない（area は mode の既定に戻る）。ratio は前回と同じ area になったときだけ引き継ぐ（area が違えば「上から何割」の基準が違う）。
+- 前回の over を引き継ぐのは、area が `pane` になったときだけ（`others`・`right` は自分のペインと左の列で決まり、前回の over は使わない）。引き継いだ over の先が見えていないタブに移った・もう無いときは、止めずに自分のペインに重ね、stderr に 1 行で知らせる（以後の状態も自分のペイン）。`--over` を明示したときは、先が見えないタブにあればエラーで止まる。
 - `move` で mode も area も省けば、前回の area と ratio のまま置き直す。`--mode` を指定したときの area はその mode の既定。
 - `move …` / `close` / `shot FILE`（CDP）/ `url` / `status` / `list` / `profiles` / `note TEXT`
 - タブの切り替えや分割比の変更には追従しないので、そのときは `move` を呼ぶ。

@@ -359,7 +359,16 @@ def prepare(args, st, move=False):
     try:
         osw, tab, pane = resolve_pane(osw_list, opts["over"], own_window_id())
     except LookupError as e:
-        die(str(e))
+        own_id = own_window_id()
+        if getattr(args, "over", None) is not None or opts["over"] is None or own_id is None:
+            die(str(e))  # --over の明示は勝手に変えない。kitty の外では戻る先の自分のペインが無い
+        # 前回から引き継いだだけの over の先が、見えないタブに移った・もう無い: 止めずに自分のペインに戻す
+        warn(f"前回の重ね先 {opts['over']} が使えないので、自分のペインに戻す（{e}）")
+        opts["over"] = None  # 状態にも self として残る（次の open で同じ先を探しに行かない）
+        try:
+            osw, tab, pane = resolve_pane(osw_list, None, own_id)
+        except LookupError as e2:
+            die(str(e2))
     kitty_pid = kitty_pid_from_socket(sock)
     if not kitty_pid:
         die(f"kitty のソケット名から pid が分からない: {sock}")
@@ -579,7 +588,7 @@ def main(argv=None):
                        help="self: 自分だけで確認する（既定、自分のペイン）。show: ユーザーに見せる（既定で他のペインの場所に縦 100%%）")
         p.add_argument("--ratio", type=float,
                        help="show のとき範囲の上から何割をブラウザにするか（0.1〜1.0。既定 others は 1.0、pane / right は 0.65）")
-        p.add_argument("--over", help="重ねるペイン（slot 名・role 名・kitty の window id、self で自分）。既定は前回の値か自分のペイン")
+        p.add_argument("--over", help="重ねるペイン（slot 名・role 名・kitty の window id、self で自分）。既定は前回の値（area が pane のときだけ）か自分のペイン")
         p.add_argument("--area", choices=["pane", "others", "right"],
                        help="重ねる場所。既定は self なら pane、show なら others（--over を指定すれば pane、move で省くと前回の場所）。"
                             "pane: ペイン、others: 左の列（統括）を除いた右側のうち自分の横を避けた広い方、"

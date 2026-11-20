@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-21
+
+### 修正
+
+- `claude-browser`: 前回の `--over` の先のペインが見えていないタブに移ったあと、`claude-show`（`open --mode show --area others`）や `--area others` の `open` まで「ペイン N はいま表示されていないタブにある」で止まり、`claude-browser close` するまで開けなかった。前回の over を引き継ぐのは area が `pane` のときだけにした（`others`・`right` は呼び出した自分のペインと左の列で決まるので、前回の over は使わない）。引き継いだ over の先が見えないタブにある・もう無いときは、止めずに自分のペインに戻して stderr に 1 行で知らせ、状態にも自分のペインとして残す（`move` で area も over も省いたときも同じ）。`--over` を明示したときは、前と同じくエラーで止まる。
+
+### 変更
+
+- PRACTICES.md: プロンプトの略号に `pre`（preview: 生成物を見せる。HTML・画像は `claude-show`、デプロイ先はその URL）を足した。
+
 ## [0.6.0] - 2026-11-20
 
 ### 追加
@@ -200,7 +210,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/hummer98/claude-kitty/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hummer98/claude-kitty/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hummer98/claude-kitty/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hummer98/claude-kitty/compare/v0.3.0...v0.4.0
