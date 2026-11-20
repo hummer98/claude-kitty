@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-20
+
+### 変更
+
+- `claude-browser`: `--mode show` の既定の場所を、新しい `--area others`（自分以外のペインの場所に縦 100%）にした。前は自分のペインの上 0.65 だけで、小さいペインでは画面の 1/5 幅 × 3 割高さほどになり、見せるには小さすぎた。使い分けは、自分だけで確認するなら `--mode self`（既定、自分のペイン）、ユーザーに見せるなら `--mode show`。
+  - others: 左の列（統括）を除いた右側のうち、自分のペインの横を除いた左右の隙間の広い方を、右側の全高で使う。広い方が右側の幅の 30% 未満なら右側を半分に分けて自分の中心が無い方、自分が左の列にいれば右側全体。避けるのは呼び出した自分のペインで、`--over` の先ではない。
+  - show で `--ratio` を省くと、others では 1.0（全高）。pane・right では前と同じ 0.65。
+  - `--area pane` / `--area right` は明示すれば前と同じ（前の show の動きは `--mode show --area pane`）。
+  - `--over` を指定して area を省くと `pane`（その先のペインの上。show でも前と同じ）。
+  - `open` は、前回が他のペインの場所（`others`・`right`）なら mode を引き継がず self に戻す（claude-show のあとの、`--mode` なしの自分の作業用の `open` が他のペインを覆わないように）。
+  - `move` で mode も area も省けば前回の area のまま置き直す（前は open と同じく area を引き継がなかった）。ratio は前回と同じ area のときだけ引き継ぐ。
+  - `list` の各行に `area` を足した。
+  - `open` / `move` の結果の JSON に `area` を足した。
+- `claude-show`: HTML と URL を `--area others` で開く（前は `--area right` で右側全体の上 0.65）。画像は前と同じく自分のペインの overlay。
+
 ## [0.3.0] - 2026-11-20
 
 ### 追加
@@ -115,7 +130,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/hummer98/claude-kitty/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hummer98/claude-kitty/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hummer98/claude-kitty/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hummer98/claude-kitty/releases/tag/v0.1.0

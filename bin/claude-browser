@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """kitty のペインに Chrome を「常に最前面」で重ねる。ペインの役割・席ごとに独立した Chrome を持つ。
 
-  claude-browser open URL [--mode self|show] [--ratio 0.65] [--area pane|right] [--over SLOT|ROLE|ID] [--focus kitty|browser|none]
+  claude-browser open URL [--mode self|show] [--ratio R] [--area pane|others|right] [--over SLOT|ROLE|ID] [--focus kitty|browser|none]
   claude-browser move [--mode ...] [--ratio ...] [--area ...] [--over ...] [--focus ...]
   claude-browser shot FILE        前面タブのスクリーンショット（CDP）
   claude-browser url              前面タブの URL
@@ -10,6 +10,9 @@
   claude-browser profiles         プロファイル台帳（用途・最終利用・ログイン済みのメモ）
   claude-browser note TEXT        台帳にメモを残す（例: "github: passkey でログイン済み"）
   共通: --key NAME でプロファイル名を明示する
+
+mode self（既定）: 自分だけで確認する。自分のペイン全体（他のペインの邪魔をしない）。
+mode show: ユーザーに見せる。自分以外のペインの場所（左の列を除いた右側のうち、自分の横を避けた広い方）に縦 100%。
 
 kitty は縮めない（縮めると全ペインの claude-code が再描画で崩れることがある）。
 プロファイル名は起動し直しても変わらないもの（ペインの user var role > slot > セッション ID）。
@@ -29,9 +32,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
 from config import kitten_path, load_view_config  # noqa: E402
-from core import (choose_key, kitty_pid_from_socket, ledger_touch, merge_place_opts,  # noqa: E402
-                  parse_journal, profile_processes, resolve_pane)
-from geometry import fit_correction, right_area_fraction, tab_pane_fraction, target_rect  # noqa: E402
+from core import (choose_key, kitty_pid_from_socket, ledger_touch,  # noqa: E402
+                  parse_journal, profile_processes, resolve_pane, resolve_place_opts)
+from geometry import (fit_correction, others_area_fraction, right_area_fraction,  # noqa: E402
+                      tab_pane_fraction, target_rect)
 
 KITTEN = kitten_path(os.environ)
 CHROME = ["flatpak", "run", "com.google.Chrome"]
@@ -46,7 +50,7 @@ PROFILE_ROOT = Path.home() / ".var/app/com.google.Chrome/claude-profiles"
 STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "claude-browser"
 CDP = HERE / "lib" / "cdp.mjs"
 LEDGER = PROFILE_ROOT / "ledger.json"
-DEFAULTS = {"mode": "self", "ratio": 0.65, "over": None, "focus": "kitty", "area": "pane"}
+PLACE_KEYS = ("mode", "ratio", "over", "focus", "area")  # 既定と引き継ぎは core.resolve_place_opts
 SETTLE = 0.4  # 配置してから、窓の大きさが落ち着くまで待つ秒数（Chrome が自分で大きさを戻すことがある）
 
 
@@ -238,12 +242,9 @@ def main_browser_window(st):
 
 
 # ---------- commands ----------
-def prepare(args, st):
+def prepare(args, st, move=False):
     """起動の前に配置先を確定させる（失敗してから Chrome が残らないように）。"""
-    # focus と area は一回ごとの指定なので引き継がない（focus: 保護する窓が前面のときの none が以後ずっと残らないように。
-    # area: claude-show が右側全体に開いたあと、自分の作業用の open が他のペインまで覆わないように）
-    inherit = {k: v for k, v in (st or {}).items() if k not in ("focus", "area")}
-    opts = merge_place_opts({k: getattr(args, k, None) for k in DEFAULTS}, inherit, DEFAULTS)
+    opts = resolve_place_opts({k: getattr(args, k, None) for k in PLACE_KEYS}, st, move=move)
     if opts["over"] == "self":
         opts["over"] = None
     target_rect((0, 0, 1, 1), (0, 0, 1, 1), opts["mode"], float(opts["ratio"]))  # 値の検証だけ
@@ -277,17 +278,28 @@ def _off(want, got):
     return sum(abs(a - b) for a, b in zip(want, got))
 
 
-def area_fraction(opts, tab, pane):
-    """重ねる場所の割合。pane: そのペイン。right: 左の列（統括）を除いた右側全体。"""
-    if opts.get("area") == "right":
-        return right_area_fraction(tab, left_window_id(tab))
+def area_fraction(opts, tab, pane, own_id=None):
+    """重ねる場所の割合。pane: そのペイン。right: 左の列（統括）を除いた右側全体。
+    others: 右側のうち、自分（呼び出したペイン own_id。--over の先ではない）の横を避けた場所の全高。"""
+    area = opts.get("area")
+    if area in ("right", "others"):
+        right = right_area_fraction(tab, left_window_id(tab))
+        if area == "right":
+            return right
+        own = None  # 自分がこのタブにいない（--over で別のタブ）なら、避けるものが無い
+        if own_id is not None and any(w.get("id") == own_id for w in tab.get("windows", [])):
+            try:
+                own = tab_pane_fraction(tab, own_id)
+            except (KeyError, ValueError):
+                pass
+        return others_area_fraction(right, own)
     return tab_pane_fraction(tab, pane["id"])
 
 
 def placement(st, opts, kitty_win, tab, pane, settle=SETTLE):
     kitty_id, client = kitty_win
     try:
-        frac = area_fraction(opts, tab, pane)
+        frac = area_fraction(opts, tab, pane, own_window_id())
     except (KeyError, ValueError) as e:
         die(str(e))
     rect = target_rect(client, frac, opts["mode"], float(opts["ratio"]))
@@ -373,7 +385,7 @@ def cmd_open(args, key):
     rect = placement(st, *prep)
     save_state(key, st)
     print(json.dumps({"key": key, "port": port, "cdp": f"http://127.0.0.1:{port}",
-                      "rect": rect, "mode": st["mode"], "profile": str(profile)}), flush=True)
+                      "rect": rect, "mode": st["mode"], "area": st["area"], "profile": str(profile)}), flush=True)
     update_ledger(key, url=args.url, pane_vars=own_vars(kitty_ls(kitty_socket()), own_window_id()))
 
 
@@ -389,9 +401,9 @@ def need_running(key):
 
 def cmd_move(args, key):
     st = need_running(key)
-    rect = placement(st, *prepare(args, st))
+    rect = placement(st, *prepare(args, st, move=True))
     save_state(key, st)
-    print(json.dumps({"key": key, "rect": rect, "mode": st["mode"]}))
+    print(json.dumps({"key": key, "rect": rect, "mode": st["mode"], "area": st["area"]}))
 
 
 def cmd_close(args, key):
@@ -420,7 +432,7 @@ def cmd_list():
         pids, port = running(PROFILE_ROOT / key)
         st = load_state(key) or {}
         print(json.dumps({"key": key, "running": bool(pids), "port": port,
-                          "mode": st.get("mode"), "over": st.get("over")}))
+                          "mode": st.get("mode"), "area": st.get("area"), "over": st.get("over")}))
 
 
 def main(argv=None):
@@ -433,11 +445,15 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def place_opts(p):
-        p.add_argument("--mode", choices=["self", "show"])
-        p.add_argument("--ratio", type=float, help="show のとき上から何割をブラウザにするか（0.1〜1.0）")
+        p.add_argument("--mode", choices=["self", "show"],
+                       help="self: 自分だけで確認する（既定、自分のペイン）。show: ユーザーに見せる（既定で他のペインの場所に縦 100%%）")
+        p.add_argument("--ratio", type=float,
+                       help="show のとき範囲の上から何割をブラウザにするか（0.1〜1.0。既定 others は 1.0、pane / right は 0.65）")
         p.add_argument("--over", help="重ねるペイン（slot 名・role 名・kitty の window id、self で自分）。既定は前回の値か自分のペイン")
-        p.add_argument("--area", choices=["pane", "right"],
-                       help="重ねる場所。pane: ペイン（既定）、right: 左の列（統括）を除いた kitty の右側全体")
+        p.add_argument("--area", choices=["pane", "others", "right"],
+                       help="重ねる場所。既定は self なら pane、show なら others（--over を指定すれば pane、move で省くと前回の場所）。"
+                            "pane: ペイン、others: 左の列（統括）を除いた右側のうち自分の横を避けた広い方、"
+                            "right: 左の列を除いた kitty の右側全体")
         p.add_argument("--focus", choices=["kitty", "browser", "none"],
                        help="配置後の入力先。none は何も変えない（全画面のアプリを使っている最中など）")
 

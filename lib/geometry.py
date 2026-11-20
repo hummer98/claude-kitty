@@ -118,6 +118,38 @@ def right_area_fraction(tab, left_window_id=None):
     return (0.0, 0.0, 1.0, 1.0)
 
 
+
+MIN_GAP = 0.3  # others の隙間が右側の幅のこれ未満なら、右側を左右半分に分けて使う
+
+
+def others_area_fraction(right, own, min_gap=MIN_GAP):
+    """右側 right=(x, y, w, h) のうち、自分のペイン own=(x, y, w, h) を横に避けた矩形の割合を返す。
+
+    ユーザーに見せるときは、自分以外のペインの場所に縦 100% で開く（自分の会話は見せたまま、
+    小さなペインの上の一部だけでは小さすぎるので）。自分の横の範囲を除いた左右の隙間のうち広い方を、
+    right の全高で使う（同じ幅なら右）。広い方でも right の幅の min_gap 未満なら（自分が右側をほぼ横断している）、
+    right を左右半分に分け、自分の中心が無い方を使う。own が None か、right より左（左の列＝統括）なら right 全体。
+    """
+    rx, ry, rw, rh = right
+    if own is None or rw <= 0:
+        return right
+    px, _py, pw, _ph = own
+    eps = 1e-9
+    if px + pw <= rx + eps or px >= rx + rw - eps:
+        return right  # 自分は右側の外（左の列）にいる
+    left_w = max(0.0, px - rx)
+    right_x = min(rx + rw, px + pw)
+    right_w = max(0.0, rx + rw - right_x)
+    if max(left_w, right_w) >= min_gap * rw - eps:
+        if right_w >= left_w - eps:  # 同じ幅（浮動小数の誤差を含む）なら右
+            return (right_x, ry, right_w, rh)
+        return (rx, ry, left_w, rh)
+    mid = rx + rw / 2
+    if px + pw / 2 <= mid:
+        return (mid, ry, rx + rw - mid, rh)
+    return (rx, ry, mid - rx, rh)
+
+
 MAX_OFFSET = 64  # 一定のずれとして打ち消す上限（窓の装飾・影の大きさ）
 
 

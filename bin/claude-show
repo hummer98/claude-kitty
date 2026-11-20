@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""見てほしいもの（HTML・画像）を、自分のペインの上に開く。
+"""見てほしいもの（HTML・画像）を開く（HTML は他のペインの場所、画像は自分のペインの上）。
 
   claude-show FILE_OR_URL [--ratio 0.6]
 
-- HTML / URL: claude-browser open <file:// か URL> --area right --mode show --focus none（左の列（統括）を除いた
-  kitty の右側全体の上だけ覆い、会話は見せたまま。ユーザーに見せる用途なので広く）
+- HTML / URL: claude-browser open <file:// か URL> --area others --mode show --focus none（左の列（統括）を除いた
+  kitty の右側のうち、自分のペインの横を避けた広い方を縦 100% で覆う。ユーザーに見せる用途なので広く、
+  自分の会話は見せたまま）
 - 画像（png/jpg/jpeg/webp/gif/svg）: 自分のペインの上に kitty の overlay で kitten icat を出す。
   閉じるには、overlay をクリックしてからキーを押す。
 - 入力先は動かさない（HTML の Chrome も画像の overlay も、フォーカスを取らない。ユーザーが打っている途中の
@@ -81,7 +82,7 @@ def show(target, env, ratio, run=subprocess.run, active_pid=None):
         return (0 if r.returncode == 0 else 1), {"shown": "xdg-open", "target": str(val)}
     if kind in ("url", "html"):
         url = val if kind == "url" else val.as_uri()
-        cmd = [str(BROWSER), "open", url, "--area", "right", "--mode", "show", "--focus", "none"]
+        cmd = [str(BROWSER), "open", url, "--area", "others", "--mode", "show", "--focus", "none"]
         if ratio is not None:
             cmd += ["--ratio", str(ratio)]
         r = run(cmd, capture_output=True, text=True)
@@ -113,7 +114,7 @@ def main(argv=None):
         return 0
     ap = argparse.ArgumentParser(prog="claude-show")
     ap.add_argument("target", help="HTML・画像のファイル、または URL")
-    ap.add_argument("--ratio", type=float, help="HTML のとき、ペインの上から何割をブラウザにするか")
+    ap.add_argument("--ratio", type=float, help="HTML のとき、開く場所の上から何割をブラウザにするか（既定 1.0 = 縦 100%%）")
     args = ap.parse_args(argv)
     code, out = show(args.target, os.environ, args.ratio)
     print(json.dumps(out, ensure_ascii=False))

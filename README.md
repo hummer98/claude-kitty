@@ -36,7 +36,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | `bin/claude-wait` | 別の場所で動いている同じセッションの終了を待ってから resume する | `/proc` |
 | `bin/claude-browser` | ペインごとの Chrome を、そのペインに重ねる | KWin・Flatpak・`/proc` |
 | `bin/claude-state` | セッションの状態（作業中・待受中・完了（未読）・idle）をペインの背景色とステータス行の色で見せる（Claude Code の hook から呼ぶ）。`claude-state watch` は kitty の外の常駐で、見た完了のペインを idle に戻し、消えた色を塗り直す（[下の節](#claude-state状態の色)） | 入れ子の claude の判定に `/proc` |
-| `bin/claude-show` | 見てほしい HTML・画像を自分のペインの上に開く（[下の節](#claude-show見てほしいものを開く)） | 保護する窓の確認だけ KWin |
+| `bin/claude-show` | 見てほしい HTML（他のペインの場所に縦 100%）・画像（自分のペインの上）を開く（[下の節](#claude-show見てほしいものを開く)） | 保護する窓の確認だけ KWin |
 | `bin/claude-guard` | PreToolUse hook。名前の付いたガードが働いている間、決めたパスへの書き込みと決めたコマンドを止める（[docs/guard-hook.md](docs/guard-hook.md)） | 働く条件の `pgrep` |
 | `bin/claude-lang-check` | Stop hook で最後の返答の言語を調べ、設定の `lang.language` で決めた言語でなければ書き直させる（決めていなければ何もしない。[docs/lang-check.md](docs/lang-check.md)） | なし |
 | `bin/claude-session-stats` | 会話の記録から、言い直し・英語の返答・返答の長さなどを期間ごとに数えて Markdown に書く（[docs/session-stats.md](docs/session-stats.md)） | なし |
@@ -92,13 +92,17 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 - プロファイル名は起動し直しても変わらないもの: `--key` > ペインの user var `role` > `slot` > セッション ID。ログインが次回も残る。
 - 台帳 `~/.var/app/com.google.Chrome/claude-profiles/ledger.json`（`profiles` で表示、`note TEXT` でメモ）。
 - 既存の Chrome はプロセスの引数（`--user-data-dir` と `--remote-debugging-port`）から見つけるので、state が消えても引き継ぎ・close できる。
-- `open URL [--mode self|show] [--ratio 0.65] [--area pane|right] [--over SLOT|ID] [--focus kitty|browser|none]`
-  - self: 自分のペイン全体を覆う（自分の作業用）
-  - show: ペイン（または `--area` の範囲）の上 ratio だけ覆い、claude-code の最新出力と入力欄を見せたまま対話する
-  - `--area right`: ペインでなく、左の列（`view.left` の役割のペイン。いなければ分割の根の左側）を除いた kitty の右側全体を範囲にする（ユーザーに見せるとき。claude-show の HTML の既定）
-  - `--over`: 別のペイン（slot 名 left/right-top/right-bottom か window id）に重ねる
+- `open URL [--mode self|show] [--ratio R] [--area pane|others|right] [--over SLOT|ID] [--focus kitty|browser|none]`
+  - self（既定）: 自分だけで確認するとき。自分のペイン全体を覆う（他のペインの邪魔をしない）。既定の area は `pane`
+  - show: ユーザーに見せるとき。既定の area は `others` で、自分以外のペインの場所に縦 100% で開く（自分の会話は見せたまま）
+  - `--area others`（show の既定）: 左の列（`view.left` の役割のペイン。いなければ分割の根の左側。左右に分かれていなければタブ全体）を除いた右側のうち、自分のペインの横の範囲を除いた左右の隙間の広い方を、右側の全高で使う。広い方でも右側の幅の 30% 未満なら（自分が右側をほぼ横断している）、右側を左右半分に分けて自分の中心が無い方を使う。自分が左の列にいれば右側全体。避けるのは常に呼び出した自分のペインで、`--over` の先ではない
+  - `--area pane`: そのペイン（`--over` の先、既定は自分）。show と組み合わせると、前からのペインの上 ratio だけ覆う動き
+  - `--area right`: 左の列を除いた kitty の右側全体
+  - `--ratio`: show のとき、範囲の上から何割を覆うか（0.1〜1.0）。省いたときは others なら 1.0（全高）、pane・right なら 0.65
+  - `--over`: 別のペイン（slot 名 left/right-top/right-bottom か window id）に重ねる。`--over` を指定して area を省くと `pane`（show でもその先のペインの上）
   - `--focus none`: 入力先を変えない（全画面のアプリを使っている最中など）
-- `open` を呼び直しても、未指定の mode/ratio/over は前回の値を引き継ぐ。focus と area は一回ごとの指定で、引き継がない（claude-show が右側全体に開いたあと、自分の作業用の `open` が他のペインまで覆わないように）。
+- `open` を呼び直しても、未指定の mode/over は前回の値を引き継ぐ（ペインの上の show のあとの open で、会話を隠す self に戻らないように）。ただし前回が他のペインの場所（`others`・`right`。claude-show の HTML など）なら mode は引き継がず self に戻す（そのあとの自分の作業用の `open` が他のペインを覆わないように）。focus と area は一回ごとの指定で、引き継がない（area は mode の既定に戻る）。ratio は前回と同じ area になったときだけ引き継ぐ（area が違えば「上から何割」の基準が違う）。
+- `move` で mode も area も省けば、前回の area と ratio のまま置き直す。`--mode` を指定したときの area はその mode の既定。
 - `move …` / `close` / `shot FILE`（CDP）/ `url` / `status` / `list` / `profiles` / `note TEXT`
 - タブの切り替えや分割比の変更には追従しないので、そのときは `move` を呼ぶ。
 - 置いたあと 0.4 秒待って実際の窓の矩形を KWin から読み、指定とずれていれば直す（1 度目は同じ矩形を置き直す: 最大化の解除などで Chrome が後から前の大きさに戻すため。それでもずれていれば、各辺 64px 以内のずれだけを一定のずれ（窓の装飾の分など）として打ち消し、悪くなったら指定の矩形に戻す）。最大化の解除は、最大化しているときだけ行う。直らなければ stderr に指定と実際を出す。
@@ -183,9 +187,9 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 
 ## claude-show（見てほしいものを開く）
 
-`claude-show FILE_OR_URL [--ratio 0.6]` — 見てほしいものを自分のペインの上に開く。結果は 1 行の JSON。
+`claude-show FILE_OR_URL [--ratio 0.6]` — 見てほしいものを開く。結果は 1 行の JSON。
 
-- HTML（`.html`/`.htm`）と URL: `claude-browser open <file:// か URL> --area right --mode show --focus none`（左の列を除いた右側全体の上だけ覆い、会話は見せたまま。入力先は動かさない）。Flatpak の Chrome から見える場所に置くこと（claude-browser の項）。
+- HTML（`.html`/`.htm`）と URL: `claude-browser open <file:// か URL> --area others --mode show --focus none`（左の列を除いた右側のうち、自分のペインの横を避けた広い方を縦 100% で覆い、会話は見せたまま。入力先は動かさない。`--ratio` を付ければその場所の上から何割）。Flatpak の Chrome から見える場所に置くこと（claude-browser の項）。
 - 画像（png/jpg/jpeg/webp/gif/svg）: 自分のペインに kitty の overlay を重ねて `kitten icat --hold` で表示する。閉じるには、overlay をクリックしてからキーを押す。svg などは ImageMagick があれば表示できる。
 - 入力先は変えない（overlay も常に `--keep-focus`。ユーザーが打っている途中の文字が overlay に吸われないように）。自分のペインが表示されていないタブにあれば、その旨を `note` に書く。
 - 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確かめられないときも同じ）。

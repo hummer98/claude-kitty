@@ -62,18 +62,43 @@ def profile_processes(procs, profile):
     return out
 
 
-def merge_place_opts(given, state, defaults):
-    """未指定 (None) の配置オプションは前回の state、無ければ既定値を使う。
+AREA_FOR_MODE = {"self": "pane", "show": "others"}  # area を省いたときの既定（自分の確認は自分のペイン、見せるときは他のペイン）
+RATIO_FOR_AREA = {"others": 1.0}  # ratio を省いたときの既定。others は縦 100%、pane / right は前からの 0.65
+DEFAULT_RATIO = 0.65
 
-    open を呼び直しても show モードが self に戻ってペインを覆い隠さないようにするため。
+
+def resolve_place_opts(given, state, move=False):
+    """claude-browser の配置オプション {mode, ratio, over, focus, area} を決める。
+
+    - mode・over: 未指定なら前回の値（open を呼び直しても show が self に戻って会話を隠さないように）。
+      ただし open では、前回が他のペインの場所（others・right）なら mode を引き継がず self に戻す
+      （claude-show で見せたあとの、自分の作業用の open が他のペインを覆わないように）。
+    - focus: 一回ごとの指定（保護する窓が前面のときの none が以後ずっと残らないように）。
+    - area: 明示が最優先。move で mode も area も省いたときは前回の area（同じものを置き直すだけ）。
+      --over を明示したときは pane（その先に重ねる指定なので）。
+      それ以外（open、または mode を指定した move）は mode の既定（self → pane、show → others）。
+    - ratio: 明示が最優先。前回と同じ area になったときだけ前回の値（area が違えば「上から何割」の基準が違う）。
+      それ以外は area の既定（others は 1.0、pane / right は 0.65）。
     """
-    out = {}
-    for k, d in defaults.items():
-        v = given.get(k)
-        if v is None:
-            v = (state or {}).get(k)
-        out[k] = d if v is None else v
-    return out
+    state = state or {}
+    prev_mode = state.get("mode")
+    if not move and state.get("area") in ("others", "right"):
+        prev_mode = None
+    mode = given.get("mode") or prev_mode or "self"
+    over = given.get("over") if given.get("over") is not None else state.get("over")
+    area = given.get("area")
+    if area is None and move and given.get("mode") is None and state.get("area"):
+        area = state["area"]
+    if area is None and given.get("over") not in (None, "self"):
+        area = "pane"
+    if area is None:
+        area = AREA_FOR_MODE.get(mode, "pane")
+    ratio = given.get("ratio")
+    if ratio is None and state.get("ratio") is not None and (state.get("area") or "pane") == area:
+        ratio = state["ratio"]
+    if ratio is None:
+        ratio = RATIO_FOR_AREA.get(area, DEFAULT_RATIO)
+    return {"mode": mode, "ratio": ratio, "over": over, "focus": given.get("focus") or "kitty", "area": area}
 
 
 def parse_journal(text, token):

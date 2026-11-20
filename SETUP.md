@@ -136,7 +136,7 @@ kitten @ ls | head                      # 3. リモート操作が通る（読�
 claude-view status                      # 4. タブごとの役割の一覧
 claude-view --dry-run restore           # 5. 並べ替えの操作を表示するだけ（kitty には ls しかしない）
 claude-view restore                     # 6. 実際に並べる
-claude-browser open https://example.com --mode show --ratio 0.6   # 7. 自分のペインの上 6 割に Chrome
+claude-browser open https://example.com --mode show   # 7. 自分以外のペインの場所に縦 100% で Chrome
 claude-browser shot /tmp/shot.png && claude-browser close
 ```
 

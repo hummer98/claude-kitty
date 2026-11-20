@@ -5,12 +5,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
-from geometry import fit_correction, pane_fraction, right_area_fraction, split_rects, tab_pane_fraction, target_rect  # noqa: E402
+from geometry import (fit_correction, others_area_fraction, pane_fraction, right_area_fraction,  # noqa: E402
+                      split_rects, tab_pane_fraction, target_rect)
 from view import (add_role, current_rows, left_percent, parse_rows, plan, remove_role,  # noqa: E402
                   split_two, swap_roles, validate)
 ALLROWS = [["dev-a", "dev-c", "dev-d"], ["dev-b", "dev-e"]]
 import json  # noqa: E402
-from core import (check_layout, choose_key, kitty_pid_from_socket, merge_place_opts,  # noqa: E402
+from core import (check_layout, choose_key, kitty_pid_from_socket, resolve_place_opts,  # noqa: E402
                   ledger_touch, parse_journal, profile_processes, resolve_pane, sanitize)
 
 
@@ -74,7 +75,7 @@ class BrowserPlacement(unittest.TestCase):
         seq = list(results)
         self.b.place_browser = lambda cls, bid, kid, rect, focus: (self.placed.append((rect, focus)), seq.pop(0))[1]
         self.b.browser_rect = lambda bid: seq.pop(0)
-        o = dict(self.b.DEFAULTS, mode="show", ratio=0.6, area="right", focus="none")
+        o = {"mode": "show", "ratio": 0.6, "over": None, "area": "right", "focus": "none"}
         o.update(opts or {})
         st = {"class": "c"}
         rect = self.b.placement(st, o, ("K", (0, 40, 4000, 2000)), BrowserArea.TAB, {"id": 2}, settle=0)
@@ -107,15 +108,47 @@ class BrowserPlacement(unittest.TestCase):
         self.assertEqual([r for r, _ in self.placed], [(1000, 40, 3000, 1200), (1000, 40, 3000, 1200),
                                                          (1000, 40, 3000, 1160), (1000, 40, 3000, 1200)])
 
-    def test_area_is_not_inherited(self):
+    def _fake_kitty(self):
         self.b.kitty_socket = lambda: "s"
         self.b.kitty_ls = lambda sock: [{"tabs": [dict(BrowserArea.TAB, is_active=True)]}]
         self.b.resolve_pane = lambda ls, over, own: (ls[0], ls[0]["tabs"][0], {"id": 2})
         self.b.kitty_pid_from_socket = lambda sock: 1
         self.b.find_kitty = lambda pid, title: ("K", (0, 0, 100, 100))
+
+    def test_area_is_not_inherited_by_open(self):
+        self._fake_kitty()
         args = SimpleNamespace(mode=None, ratio=None, over=None, focus=None, area=None)
         opts = self.b.prepare(args, {"mode": "show", "ratio": 0.6, "area": "right", "focus": "none"})[0]
-        self.assertEqual((opts["mode"], opts["area"], opts["focus"]), ("show", "pane", "kitty"))
+        # 前回が他のペインの場所（right）なら、open は自分の作業用の self（自分のペイン）に戻る
+        self.assertEqual((opts["mode"], opts["area"], opts["ratio"], opts["focus"]), ("self", "pane", 0.65, "kitty"))
+
+    def test_move_keeps_previous_area(self):
+        self._fake_kitty()
+        args = SimpleNamespace(mode=None, ratio=None, over=None, focus=None, area=None)
+        opts = self.b.prepare(args, {"mode": "show", "ratio": 0.6, "area": "right", "focus": "none"}, move=True)[0]
+        self.assertEqual((opts["mode"], opts["area"], opts["ratio"], opts["focus"]), ("show", "right", 0.6, "kitty"))
+
+    def test_others_avoids_own_pane_not_over_target(self):
+        # 自分は 23（上段の右端）、--over の先は 31（下段の左）。others は「自分」を避ける（--over の先ではない）
+        self.b.own_window_id = lambda: 23
+        self.b.left_window_id = lambda tab: 10
+        seq = [(800, 40, 2133, 2000)] * 2
+        self.b.place_browser = lambda cls, bid, kid, rect, focus: (self.placed.append((rect, focus)), seq.pop(0))[1]
+        self.b.browser_rect = lambda bid: seq.pop(0)
+        st = {"class": "c"}
+        o = {"mode": "show", "ratio": 1.0, "over": "31", "area": "others", "focus": "none"}
+        rect = self.b.placement(st, o, ("K", (0, 40, 4000, 2000)), OthersArea.TAB, {"id": 31}, settle=0)
+        self.assertEqual((rect, st["area"]), ((800, 40, 2133, 2000), "others"))  # 23 の左の隙間（31 の上も覆う）
+        one = {"layout_state": {"class": "Splits", "pairs": 5}, "groups": [{"id": 5, "windows": [7]}],
+               "windows": [{"id": 7}]}
+        frac = self.b.area_fraction({"area": "others"}, one, {"id": 7}, own_id=3)
+        self.assertEqual(frac, (0.0, 0.0, 1.0, 1.0))  # 自分は別のタブ（ペイン 1 つのタブでも自分と取り違えない）
+        frac = self.b.area_fraction({"area": "others"}, BrowserArea.TAB, {"id": 2}, own_id=1)
+        self.assertEqual(frac, (0.25, 0.0, 0.75, 1.0))  # 自分が統括なら右側全体
+        frac = self.b.area_fraction({"area": "others"}, BrowserArea.TAB, {"id": 2}, own_id=99)
+        self.assertEqual(frac, (0.25, 0.0, 0.75, 1.0))  # 自分がこのタブにいない
+        frac = self.b.area_fraction({"area": "others"}, BrowserArea.TAB, {"id": 2}, own_id=None)
+        self.assertEqual(frac, (0.25, 0.0, 0.75, 1.0))
 
     def test_pane_area(self):
         rect, _ = self.run_([(1000, 40, 3000, 600), (1000, 40, 3000, 600)], {"area": "pane"})
@@ -263,19 +296,152 @@ class Procs(unittest.TestCase):
         self.assertEqual(profile_processes([], self.PROF), [])
 
 
-class Merge(unittest.TestCase):
-    D = {"mode": "self", "ratio": 0.65, "over": None}
+class PlaceOpts(unittest.TestCase):
+    """claude-browser の配置オプションの既定と引き継ぎ（resolve_place_opts）。"""
+    NONE = {"mode": None, "ratio": None, "over": None, "focus": None, "area": None}
 
-    def test_open_again_keeps_show_mode(self):
-        st = {"mode": "show", "ratio": 0.5, "over": None}
-        self.assertEqual(merge_place_opts({"mode": None, "ratio": None}, st, self.D),
-                         {"mode": "show", "ratio": 0.5, "over": None})
+    def r(self, state=None, move=False, **given):
+        return resolve_place_opts(dict(self.NONE, **given), state, move=move)
 
-    def test_given_wins(self):
-        self.assertEqual(merge_place_opts({"mode": "self"}, {"mode": "show"}, self.D)["mode"], "self")
+    def test_no_state_is_self_pane(self):
+        self.assertEqual(self.r(), {"mode": "self", "ratio": 0.65, "over": None, "focus": "kitty", "area": "pane"})
+        self.assertEqual(self.r(None, move=True)["area"], "pane")
+        self.assertEqual(resolve_place_opts({}, {}), self.r())
 
-    def test_no_state(self):
-        self.assertEqual(merge_place_opts({}, None, self.D), self.D)
+    def test_show_defaults_to_others_full_height(self):
+        o = self.r(mode="show")
+        self.assertEqual((o["area"], o["ratio"]), ("others", 1.0))
+        self.assertEqual(self.r(mode="show", ratio=0.6)["ratio"], 0.6)
+
+    def test_explicit_pane_show_is_the_old_behaviour(self):
+        o = self.r(mode="show", area="pane")
+        self.assertEqual((o["area"], o["ratio"]), ("pane", 0.65))
+        self.assertEqual(self.r(mode="show", area="right")["ratio"], 0.65)
+
+    def test_open_again_after_pane_show_keeps_show_mode(self):
+        st = {"mode": "show", "ratio": 0.6, "over": None, "area": "pane"}  # 前からの、ペインの上の show
+        o = self.r(st)
+        self.assertEqual((o["mode"], o["area"], o["ratio"]), ("show", "others", 1.0))  # 会話を隠す self に戻らない
+
+    def test_open_after_others_goes_back_to_own_pane(self):
+        # claude-show（show・others）のあとの、--mode なしの open は自分の作業用: 他のペインを覆わない
+        for area in ("others", "right"):
+            o = self.r({"mode": "show", "ratio": 1.0, "area": area})
+            self.assertEqual((o["mode"], o["area"], o["ratio"]), ("self", "pane", 0.65), area)
+        o = self.r({"mode": "show", "ratio": 0.8, "area": "others"}, mode="show")
+        self.assertEqual((o["area"], o["ratio"]), ("others", 0.8))  # show を明示すれば前回の ratio
+        st = {"mode": "self", "ratio": 1.0, "area": "others"}  # self で others を明示したあと
+        self.assertEqual((self.r(st)["area"], self.r(st)["ratio"]), ("pane", 0.65))
+        o = self.r({"mode": "show", "ratio": 0.6, "area": "others"}, move=True)
+        self.assertEqual((o["mode"], o["area"]), ("show", "others"))  # move は置き直すだけ
+
+    def test_over_defaults_to_pane(self):
+        self.assertEqual(self.r(mode="show", over="dev-a")["area"], "pane")  # その先に重ねる指定
+        self.assertEqual(self.r(mode="show", over="dev-a", area="others")["area"], "others")
+        self.assertEqual(self.r(mode="show", over="self")["area"], "others")
+        self.assertEqual(self.r({"mode": "show", "area": "pane", "over": "dev-a"}, mode="show")["area"], "others")
+
+    def test_move_keeps_area_and_ratio(self):
+        st = {"mode": "show", "ratio": 0.6, "area": "pane", "over": "dev-a"}
+        self.assertEqual(self.r(st, move=True), {"mode": "show", "ratio": 0.6, "over": "dev-a", "focus": "kitty",
+                                                 "area": "pane"})
+
+    def test_move_with_mode_uses_that_modes_area(self):
+        st = {"mode": "show", "ratio": 1.0, "area": "others"}
+        self.assertEqual(self.r(st, move=True, mode="self")["area"], "pane")
+        o = self.r(st, move=True, area="pane")  # area を変えたら ratio はその area の既定
+        self.assertEqual((o["mode"], o["area"], o["ratio"]), ("show", "pane", 0.65))
+
+    def test_old_state_without_area(self):
+        st = {"mode": "show", "ratio": 0.5}  # area が無かったころの state（ペインの上 5 割）
+        self.assertEqual((self.r(st)["area"], self.r(st)["ratio"]), ("others", 1.0))
+        o = self.r({"class": "c", "profile": "p"}, move=True)  # need_running が作る最小の state
+        self.assertEqual((o["mode"], o["area"], o["ratio"]), ("self", "pane", 0.65))
+
+    def test_focus_is_not_inherited_over_is(self):
+        st = {"mode": "self", "focus": "none", "over": "dev-a"}
+        self.assertEqual((self.r(st)["focus"], self.r(st)["over"]), ("kitty", "dev-a"))
+        self.assertEqual(self.r(st, over="self")["over"], "self")  # self は prepare で None にする
+        self.assertEqual(self.r(st, mode="show", focus="none")["mode"], "show")
+
+
+def _near(test, got, want):
+    test.assertEqual(len(got), len(want))
+    for g, w in zip(got, want):
+        test.assertAlmostEqual(g, w, places=6, msg=f"{got} != {want}")
+
+
+class OthersArea(unittest.TestCase):
+    """show の既定 others: 自分以外のペインの場所に縦 100%。"""
+    # 左 2 割の統括（1）。右は上下に分かれ、上段は 3 列（21, 22, 23）、下段は 2 列（31, 32）
+    TAB = {"layout_state": {"class": "Splits", "pairs": {
+        "horizontal": True, "bias": 0.2, "one": 10,
+        "two": {"horizontal": False, "bias": 0.5,
+                "one": {"horizontal": True, "bias": 1 / 3, "one": 21, "two": {"horizontal": True, "one": 22, "two": 23}},
+                "two": {"horizontal": True, "bias": 0.5, "one": 31, "two": 32}}}},
+        "groups": [{"id": g, "windows": [g]} for g in (10, 21, 22, 23, 31, 32)],
+        "windows": [{"id": 10, "user_vars": {"role": "main"}}] + [{"id": g} for g in (21, 22, 23, 31, 32)]}
+
+    def area(self, tab, own):
+        right = right_area_fraction(tab, 10)
+        return others_area_fraction(right, tab_pane_fraction(tab, own) if own is not None else None)
+
+    def test_top_row_third_column_uses_left_gap(self):
+        _near(self, self.area(self.TAB, 23), (0.2, 0.0, 0.8 * 2 / 3, 1.0))  # 右端に接する: 左の隙間を全高で
+
+    def test_bottom_row_first_column_uses_right_gap(self):
+        _near(self, self.area(self.TAB, 31), (0.6, 0.0, 0.4, 1.0))  # 左の列に接する: 右の隙間
+
+    def test_middle_column_tie_goes_right(self):
+        _near(self, self.area(self.TAB, 22), (0.2 + 0.8 * 2 / 3, 0.0, 0.8 / 3, 1.0))
+
+    def test_main_column_gets_whole_right(self):
+        _near(self, self.area(self.TAB, 10), (0.2, 0.0, 0.8, 1.0))
+        _near(self, self.area(self.TAB, None), (0.2, 0.0, 0.8, 1.0))
+        self.assertEqual(target_rect((0, 40, 4000, 2000), self.area(self.TAB, 31), "show", 1.0),
+                         (2400, 40, 1600, 2000))
+        self.assertEqual(target_rect((0, 40, 4000, 2000), self.area(self.TAB, 31), "show", 0.5),
+                         (2400, 40, 1600, 1000))  # ratio を明示すれば、その矩形の上から
+
+    def test_pane_across_right_side_takes_the_other_half(self):
+        tab = json.loads(json.dumps(self.TAB))
+        tab["layout_state"]["pairs"]["two"]["two"]["bias"] = 0.85  # 下段の 31 が右側の 85% を占める
+        _near(self, self.area(tab, 31), (0.6, 0.0, 0.4, 1.0))  # 隙間 15% < 30%: 中心が左なので右半分
+        _near(self, self.area(tab, 32), (0.2, 0.0, 0.8 * 0.85, 1.0))  # 細い 32 は左の広い隙間
+        tab["layout_state"]["pairs"]["two"]["two"]["bias"] = 0.15  # 32 が 85%: 中心が右なので左半分
+        _near(self, self.area(tab, 32), (0.2, 0.0, 0.4, 1.0))
+
+    def test_gap_threshold(self):
+        right = (0.0, 0.0, 1.0, 1.0)
+        _near(self, others_area_fraction(right, (0.0, 0.0, 0.7, 0.5)), (0.7, 0.0, 0.3, 1.0))  # ちょうど 30% は使う
+        _near(self, others_area_fraction(right, (0.0, 0.0, 0.71, 0.5)), (0.5, 0.0, 0.5, 1.0))
+        _near(self, others_area_fraction(right, (0.25, 0.0, 0.7, 0.5)), (0.0, 0.0, 0.5, 1.0))  # 中心 0.6 → 左半分
+        self.assertEqual(others_area_fraction(right, None), right)
+        self.assertEqual(others_area_fraction((0.3, 0.0, 0.0, 1.0), (0.0, 0.0, 0.3, 1.0)), (0.3, 0.0, 0.0, 1.0))
+
+    def test_single_pane_tab(self):
+        one = {"layout_state": {"class": "Splits", "pairs": 5}, "groups": [{"id": 5, "windows": [7]}],
+               "windows": [{"id": 7}]}
+        right = right_area_fraction(one, None)
+        _near(self, others_area_fraction(right, tab_pane_fraction(one, 7)), (0.5, 0.0, 0.5, 1.0))
+
+    def test_unsplit_root_uses_whole_tab(self):
+        # 根が上下の分割（左の列が無い）: 右側 = タブ全体。上のペインが全幅なので半分に分ける
+        tab = {"layout_state": {"class": "Splits", "pairs": {"horizontal": False, "one": 1,
+                                                             "two": {"horizontal": True, "one": 2, "two": 3}}},
+               "groups": [{"id": i, "windows": [i]} for i in (1, 2, 3)], "windows": [{"id": i} for i in (1, 2, 3)]}
+        _near(self, others_area_fraction(right_area_fraction(tab, None), tab_pane_fraction(tab, 1)),
+              (0.5, 0.0, 0.5, 1.0))
+        _near(self, others_area_fraction(right_area_fraction(tab, None), tab_pane_fraction(tab, 2)),
+              (0.5, 0.0, 0.5, 1.0))  # 左下の 2 は右の隙間（50%）
+
+    def test_not_splits_layout_uses_neighbors(self):
+        tab = {"layout_state": {"class": "Tall"}, "windows": THREE}
+        right = right_area_fraction(tab, 1)
+        _near(self, right, (98 / 393, 0.0, 295 / 393, 1.0))
+        _near(self, others_area_fraction(right, tab_pane_fraction(tab, 1)), right)  # 統括
+        mid = 98 / 393 + 295 / 393 / 2
+        _near(self, others_area_fraction(right, tab_pane_fraction(tab, 2)), (mid, 0.0, 1.0 - mid, 1.0))
 
 
 class Journal(unittest.TestCase):
@@ -2237,13 +2403,13 @@ class ClaudeShow(unittest.TestCase):
         self.assertEqual(code, 0)
         argv = self.runs[-1]
         self.assertTrue(argv[0].endswith("claude-browser"))
-        self.assertEqual(argv[1:], ["open", self.html.as_uri(), "--area", "right", "--mode", "show", "--focus", "none",
+        self.assertEqual(argv[1:], ["open", self.html.as_uri(), "--area", "others", "--mode", "show", "--focus", "none",
                                     "--ratio", "0.6"])
         self.assertEqual(read_calls(self.calls), [])
 
     def test_url(self):
         self.show.show("https://example.com/", self.env, None, run=self.run_)
-        self.assertEqual(self.runs[-1][1:], ["open", "https://example.com/", "--area", "right", "--mode", "show",
+        self.assertEqual(self.runs[-1][1:], ["open", "https://example.com/", "--area", "others", "--mode", "show",
                                              "--focus", "none"])
 
     def test_outside_kitty_uses_xdg_open(self):
