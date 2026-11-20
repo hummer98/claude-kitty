@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-20
+
 ### 追加
 
 - `tools/install.sh`: clone したあと 1 行で入れる（Linux と macOS。POSIX sh と python3 だけ）。部品は `--links`（`bin/` のコマンドを `~/.local/bin` へ）・`--hooks[=state,lang,guard]`（`~/.claude/settings.json` に hook）・`--kitty`（kitty.conf に include の 1 行と watcher のリンク）・`--systemd`（ユーザーユニットを写して enable、Linux だけ。macOS は launchd の案内）・`--all`。
@@ -113,6 +115,7 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/hummer98/claude-kitty/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hummer98/claude-kitty/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hummer98/claude-kitty/releases/tag/v0.1.0
