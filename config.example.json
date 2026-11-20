@@ -14,12 +14,16 @@
     },
     "done_dwell_seconds": 2,
     "watch_sockets": null,
-    "notice": {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]},
+    "notice": {"contains": [], "prefix": []},
     "subagent_colors": {"running": 110, "ended": 245}
   },
   "kitty": {
     "desktop": null,
     "maximize": false
+  },
+  "browser": {
+    "command": null,
+    "profile_root": null
   },
   "lang": {
     "enabled": true,

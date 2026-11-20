@@ -35,8 +35,9 @@ BG_FINISHED = ("completed", "failed", "killed", "stopped", "cancelled")
 # 許可を待っている同じエージェントが、これより後に別のツールを呼び始めたら、その許可は片付いた（断られた）と見なす。
 # 並行するツール呼び出しの PreToolUse は 1 秒以内に続けて来るので、それより長くとる
 STALE_WAIT = 2.0
-# 他のセッションからの「通知」（返事も作業も要らない知らせ）の印。そのターンは色を変えない（設定 state.notice で変える）
-DEFAULT_NOTICE = {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]}
+# 他のセッションからの「通知」（返事も作業も要らない知らせ）の印。そのターンは色を変えない（設定 state.notice で決める）。
+# 印の言い回しはチームの約束ごとなので、既定は空（何も通知とみなさない）。例は docs/config.md
+DEFAULT_NOTICE = {"contains": [], "prefix": []}
 _PEER = re.compile(r"<cross-session-message\b[^>]*>(.*?)</cross-session-message>", re.S)
 # 待ちの理由の強さ（list と waiting の reason に出すのは、いちばん強いもの）
 KIND_ORDER = ("manual", "ask", "permission", "notify")

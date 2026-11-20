@@ -106,6 +106,8 @@ def load_state_config(env, path=None):
                  "base_background": "#232627",
                  "notice": {"contains": ["返事は不要"], "prefix": ["【通知】"]}}}
 
+    notice の既定は空（上は例）。
+
     base_background を書かなければ kitty.conf の background（ペインの元の色）を使う。
     設定ファイルが壊れていれば ValueError（呼ぶ側が既定に戻すか決める）。
     """
@@ -170,6 +172,37 @@ def load_roster_config(env, path=None):
     if isinstance(h, bool) or not isinstance(h, (int, float)) or h < 0:
         raise ValueError(f"{path} の roster.keep_absent_hours は 0 以上の数")
     out.update(models=r.get("models", {}), ignore=r.get("ignore", []), generations=g, keep_absent_hours=h)
+    return out
+
+
+DEFAULT_BROWSER = {"command": None, "profile_root": None}
+
+
+def load_browser_config(env, path=None):
+    """claude-browser の設定 {"command", "profile_root"} を返す（無ければ既定: どちらも null で自動で探す）。
+
+      {"browser": {"command": ["flatpak", "run", "com.google.Chrome"], "profile_root": "~/chrome-profiles"}}
+
+    command は起動のコマンド（文字列のリスト。引数を足してもよい）。探す順と置き場の既定は lib/browser.py。
+    壊れていれば ValueError（別のブラウザ・別のプロファイルで黙って開かないよう、呼ぶ側は止める）。"""
+    path = Path(path) if path else config_path(env)
+    out = dict(DEFAULT_BROWSER)
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return out
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    b = data.get("browser", {}) if isinstance(data, dict) else {}
+    if not isinstance(b, dict):
+        raise ValueError(f"{path} の browser がオブジェクトでない")
+    c = b.get("command")
+    if c is not None and not (isinstance(c, list) and c and all(isinstance(x, str) and x for x in c)):
+        raise ValueError(f"{path} の browser.command は空でない文字列のリスト（[\"google-chrome\"] など）か null: {c!r}")
+    r = b.get("profile_root")
+    if r is not None and not (isinstance(r, str) and r):
+        raise ValueError(f"{path} の browser.profile_root はフォルダのパスの文字列か null: {r!r}")
+    out.update(command=list(c) if c else None, profile_root=r)
     return out
 
 

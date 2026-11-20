@@ -117,5 +117,68 @@ class KittyLaunch(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+    def run_bare(self, args=(), drop_kitty=True, **extra):
+        """CLAUDE_KITTY_KITTY を渡さずに起動する（kitty は PATH・HOME の偽物だけから探させる）。"""
+        env = {"PATH": f"{self.fake}:{self.tools}", "HOME": str(self.root), "XDG_RUNTIME_DIR": str(self.root),
+               "CLAUDE_KITTY_CONFIG": str(self.cfg), "FAKE_LOG": str(self.log)}
+        env.update(extra)
+        if drop_kitty:
+            env.pop("CLAUDE_KITTY_KITTY", None)
+        for name in ("kitty", "qdbus", "qdbus6", "qdbus-qt6"):  # 本物に届かない
+            q = shutil.which(name, path=env["PATH"])
+            assert q is None or q.startswith(str(self.root)), f"本物の {name} に届く PATH: {q}"
+        r = subprocess.run([str(ROOT / "bin/claude-kitty"), *args], env=env, capture_output=True, text=True, timeout=30)
+        p = self.log / "kitty.args"
+        return r, (p.read_text().splitlines() if p.exists() else None)
+
+    def test_kitty_found_on_path_without_env(self):
+        # 公式インストーラ以外（ディストリビューションの kitty など）でも、PATH の kitty で起動する
+        r, args = self.run_bare(["/x/my.session"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(args[-2:], ["--session", "/x/my.session"])
+
+    def test_official_installer_kitty_comes_first(self):
+        k = self.root / ".local/kitty.app/bin"
+        k.mkdir(parents=True)
+        (k / "kitty").write_text('#!/bin/sh\necho official > "$FAKE_LOG/which"\nprintf \'%s\\n\' "$@" > "$FAKE_LOG/kitty.args"\n')
+        (k / "kitty").chmod(0o755)
+        r, _args = self.run_bare(["/x/my.session"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.log / "which").read_text().strip(), "official")
+
+    def test_no_kitty_says_so(self):
+        (self.fake / "kitty").unlink()
+        r, args = self.run_bare(["/x/my.session"])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("kitty が見つからない", r.stderr)
+        self.assertIsNone(args)
+
+    def test_session_falls_back_to_repo_copy(self):
+        # install.sh --kitty のリンクが無くても、リポジトリの claude3.session で起動する
+        r, args = self.run_bare()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.path.realpath(args[-1]), str(ROOT / "kitty/claude3.session"))
+        mine = self.root / ".config/kitty"
+        mine.mkdir(parents=True)
+        (mine / "claude3.session").write_text("layout splits\n")
+        _r, args = self.run_bare()
+        self.assertEqual(args[-1], str(mine / "claude3.session"))
+        _r, args = self.run_bare(XDG_CONFIG_HOME=str(self.root / "elsewhere"))
+        self.assertEqual(os.path.realpath(args[-1]), str(ROOT / "kitty/claude3.session"))
+
+    def test_qdbus6_is_used_when_qdbus_is_missing(self):
+        (self.fake / "qdbus").rename(self.fake / "qdbus6")
+        r, args, calls = self.launch({"kitty": {"desktop": 2}})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(calls[0].startswith("org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "))
+        self.assertNotIn("qdbus が無い", r.stderr)
+
+    def test_qdbus_from_env(self):
+        (self.fake / "qdbus").rename(self.root / "my-qdbus")
+        r, _args, calls = self.launch({"kitty": {"desktop": 2}}, CLAUDE_KITTY_QDBUS=str(self.root / "my-qdbus"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(calls)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

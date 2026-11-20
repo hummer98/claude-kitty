@@ -7,7 +7,7 @@
 運用の約束（体制・注意の守り方・安全・レビュー・略号）は [PRACTICES.md](PRACTICES.md)。
 複数の [Claude Code](https://docs.claude.com/en/docs/claude-code) セッションを、[kitty](https://sw.kovidgoyal.net/kitty/) の 1 つの窓にペインとして並べて動かすための小さな道具の集まり。
 
-- 1 つの「統括」セッション（左の列）が、ほかの「担当」セッションのペインを `kitten @`（kitty のリモート操作）で並べ替える。人がマウスで直さなくても、「この 2 人を右に出して」「全員を等分に」ができる。
+- 1 つのセッション（たとえば左の列の「統括」）が、ほかのセッションのペインを `kitten @`（kitty のリモート操作）で並べ替える。人がマウスで直さなくても、「この 2 人を右に出して」「全員を等分に」ができる。1 人で使う・並べるだけでもよい（体制の例は [PRACTICES.md](PRACTICES.md)）。
 - ほかの端末で動いているセッションを、kitty のペインへ安全に移す（同じセッションを 2 か所で同時に開かない）。
 - 各セッションが自分専用の Chrome を自分のペインの上に重ね、Web アプリの動作を確かめる（プロファイルが残るのでログインは一度だけ）。
 
@@ -34,7 +34,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | `bin/claude-kitty` | kitty を `CLAUDE_*` 環境変数なしで起動し、セッションファイルどおりにペインを開く | 仮想デスクトップへの移動だけ KWin |
 | `bin/claude-view` | 統括用。ペインを役割名で並べ替える（等分割にそろえる） | 「保護する窓が前面か」の確認だけ KWin、kitty の生存確認に `/proc` |
 | `bin/claude-wait` | 別の場所で動いている同じセッションの終了を待ってから resume する | `/proc` |
-| `bin/claude-browser` | ペインごとの Chrome を、そのペインに重ねる | KWin・Flatpak・`/proc` |
+| `bin/claude-browser` | ペインごとの Chrome を、そのペインに重ねる | KWin・`/proc`（Chrome はネイティブでも Flatpak でもよい） |
 | `bin/claude-state` | セッションの状態（作業中・待受中・完了（未読）・idle）をペインの背景色とステータス行の色で見せる（Claude Code の hook から呼ぶ）。`claude-state watch` は kitty の外の常駐で、見た完了のペインを idle に戻し、消えた色を塗り直す（[下の節](#claude-state状態の色)） | 入れ子の claude の判定に `/proc` |
 | `bin/claude-show` | 見てほしい HTML（他のペインの場所に縦 100%）・画像（自分のペインの上）を開く（[下の節](#claude-show見てほしいものを開く)） | 保護する窓の確認だけ KWin |
 | `bin/claude-guard` | PreToolUse hook。名前の付いたガードが働いている間、決めたパスへの書き込みと決めたコマンドを止める（[docs/guard-hook.md](docs/guard-hook.md)） | 働く条件の `pgrep` |
@@ -87,10 +87,11 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 
 ## claude-browser
 
-ペインごとに独立した Chrome（Flatpak、専用プロファイル・専用 CDP ポート）を kitty のペインに「常に最前面」で重ねる。kitty は縮めない（縮めると全ペインの claude-code が再描画で崩れることがある）。
+ペインごとに独立した Chrome（専用プロファイル・専用 CDP ポート）を kitty のペインに「常に最前面」で重ねる。kitty は縮めない（縮めると全ペインの claude-code が再描画で崩れることがある）。
 
 - プロファイル名は起動し直しても変わらないもの: `--key` > ペインの user var `role` > `slot` > セッション ID。ログインが次回も残る。
-- 台帳 `~/.var/app/com.google.Chrome/claude-profiles/ledger.json`（`profiles` で表示、`note TEXT` でメモ）。
+- 起動する Chrome は設定の `browser.command`、無ければ自動で探す: プロファイルの置き場が既にあるもの > ネイティブの Chrome（`google-chrome-stable`・`google-chrome`）> Flatpak の Chrome（`com.google.Chrome`）> ネイティブの Chromium（`chromium`・`chromium-browser`）> Flatpak の Chromium。どれを使うかは `status` と `claude-kitty doctor` に出る（[docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)）。
+- プロファイルと台帳 `ledger.json`（`profiles` で表示、`note TEXT` でメモ）の置き場: Flatpak なら `~/.var/app/<アプリ ID>/claude-profiles`、それ以外は `~/.local/share/claude-kitty/browser-profiles`（`browser.profile_root` で変える）。
 - 既存の Chrome はプロセスの引数（`--user-data-dir` と `--remote-debugging-port`）から見つけるので、state が消えても引き継ぎ・close できる。
 - `open URL [--mode self|show] [--ratio R] [--area pane|others|right] [--over SLOT|ID] [--focus kitty|browser|none]`
   - self（既定）: 自分だけで確認するとき。自分のペイン全体を覆う（他のペインの邪魔をしない）。既定の area は `pane`
@@ -108,7 +109,8 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 - 置いたあと 0.4 秒待って実際の窓の矩形を KWin から読み、指定とずれていれば直す（1 度目は同じ矩形を置き直す: 最大化の解除などで Chrome が後から前の大きさに戻すため。それでもずれていれば、各辺 64px 以内のずれだけを一定のずれ（窓の装飾の分など）として打ち消し、悪くなったら指定の矩形に戻す）。最大化の解除は、最大化しているときだけ行う。直らなければ stderr に指定と実際を出す。
 - Flatpak の Chrome はホームの任意の場所を読めない。file:// で手元の資料を開くなら `flatpak override --user --filesystem=~/docs:ro com.google.Chrome` のように許可する。
 - 返り値の `cdp` URL に Playwright の `connectOverCDP` などで接続して操作できる。
-- プロファイルは `~/.var/app/com.google.Chrome/claude-profiles/<key>` に残るので、パスキー等のログインは一度人が済ませれば以後使える。
+- プロファイルは置き場の `<key>` に残るので、パスキー等のログインは一度人が済ませれば以後使える。
+- 窓の配置は KDE Plasma の KWin だけ（`qdbus`・`qdbus6`・`qdbus-qt6` のどれか）。KWin が無ければ、何が足りないかを出して止まる。
 
 ## claude-state（状態の色）
 
@@ -129,7 +131,7 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - 待ち: 許可は PermissionRequest で足し、同じエージェント・同じツール名・同じ入力の PostToolUse / PostToolUseFailure で外す（PermissionRequest には tool_use_id が無いため）。質問は tool_use_id で照合する。手の `claude-state waiting` は次の UserPromptSubmit まで残る。UserPromptSubmit では本体の待ちを外す（手の待ちは、人が打ったときだけ。背景の作業の完了の通知や他のセッションからのメッセージでも UserPromptSubmit は来るため）。サブエージェントの待ちは、そのエージェントの hook で外す。本体の Stop は本体の待ちと、もう動いていないサブエージェントの待ちを、SubagentStop はそのサブエージェントの待ちを外す。
 - サブエージェント: SubagentStart で足し、SubagentStop で外す（入力の `agent_id`）。本体の Stop の `background_tasks` に合わせ直すので、SubagentStop を取りこぼしても残らない。数えるのは subagent・workflow・teammate・cloud session で、shell と monitor は数えない（`tail -f` などがずっと作業中に見えてしまうため）。
 - 本体: UserPromptSubmit で動き、Stop / StopFailure で止まる。Stop のあとにツールの hook が来たら（背景の作業の完了で本体が自分で再開したときなど）また動いているとする。自動の compact（SessionStart の `source` が `compact`）では状態を変えない。
-- 他のセッションからのメッセージで、本文に「通知」の印（既定は「返事は不要」「返事不要」を含む、または「【通知】」で始まる。設定 `state.notice`）があるターンは、色を変えない（作業中にも見せず、終わっても done にしない）。UserPromptSubmit の `prompt` の `<cross-session-message>` で見分け、分からなければ Stop のときに会話記録（`transcript_path`）の、そのターンを始めた記録（`turnOrigin` が `peer` で、`origin.body` が本文）で確かめて、ターンの前の状態に戻す。印の無い依頼は、ふつうどおり終われば done。通知のターンの中で始まったサブエージェントは、ふつうどおり作業中に見せる（動いているものは見せる）。
+- 他のセッションからのメッセージで、本文に「通知」の印（設定 `state.notice`。既定は空で、何も通知とみなさない。例は「返事は不要」を含む・「【通知】」で始まる。[docs/config.md](docs/config.md)）があるターンは、色を変えない（作業中にも見せず、終わっても done にしない）。UserPromptSubmit の `prompt` の `<cross-session-message>` で見分け、分からなければ Stop のときに会話記録（`transcript_path`）の、そのターンを始めた記録（`turnOrigin` が `peer` で、`origin.body` が本文）で確かめて、ターンの前の状態に戻す。印の無い依頼は、ふつうどおり終われば done。通知のターンの中で始まったサブエージェントは、ふつうどおり作業中に見せる（動いているものは見せる）。
 
 既知の制限:
 
@@ -182,6 +184,7 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
   }
 }
 ```
+（`notice` は例。既定は空）
 
 `base_background` を省くと kitty.conf（`$KITTY_CONFIG_DIRECTORY` か `~/.config/kitty/kitty.conf`）の `background`、それも無ければ kitty の既定の `#000000`。`background: null` は元の色、`name: null` は色を付けない。hook とステータス行の設定は [SETUP.md](SETUP.md#5-状態の色claude-state)。
 

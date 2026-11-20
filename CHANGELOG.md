@@ -6,6 +6,40 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-20
+
+### 追加
+
+- `claude-browser`: 起動する Chrome を自動で探す。順は、設定の `browser.command` > 下のうちプロファイルの置き場が既にあるもの > ネイティブの Chrome（`google-chrome-stable`・`google-chrome`、macOS は Google Chrome.app）> Flatpak の Chrome（`com.google.Chrome`）> ネイティブの Chromium（`chromium`・`chromium-browser`）> Flatpak の Chromium（`org.chromium.Chromium`）。前は Flatpak の `com.google.Chrome` に決め打ちで、ほかの入れ方の Chrome では動かなかった。探し方は `lib/browser.py`（doctor と共通）。
+  - 設定の `browser.command`（文字列のリスト。引数も足せる）で起動のコマンドを決め、`browser.profile_root` でプロファイルと台帳の置き場を決められる（[docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)）。
+  - プロファイルの置き場の既定: Flatpak は `~/.var/app/<アプリ ID>/claude-profiles`（Chrome は前と同じ）、Snap は `~/snap/<名前>/common/claude-kitty-profiles`、それ以外は `$XDG_DATA_HOME/claude-kitty/browser-profiles`（ネイティブの Chromium は `chromium-profiles`。Chrome とは cookie の鍵が違うため）。
+  - Flatpak の Chrome を使っていた人は、プロファイル（ログイン）と台帳が前と同じ場所のまま使われる。後から別の Chrome を入れても、置き場が既にある方を選ぶ（Flatpak の Chromium などでも同じ）。
+  - 設定ファイルが壊れていても、止まるのは `open` と `move` だけ（`close`・`list`・`status`・`profiles` は既定の探し方で続け、動いている Chrome を止められる）。
+  - `flatpak run --branch beta <アプリ ID>` のような、値を次の語に取るオプションを読み違えない。
+  - `status` に、使う Chrome のコマンド（`browser`）と置き場（`profile_root`）を出す。Chrome が見つからなければ、kitty や KWin を呼ぶ前に、探したものと設定の書き方を出して止まる。
+- 設定の節 `browser`（`config.example.json` にも）。
+
+### 変更
+
+- `claude-state`: 通知の印 `state.notice` の既定を空にした（他のセッションからのメッセージを、どれも普通の依頼と同じに色を変える）。前の既定（「返事は不要」「返事不要」を含む、「【通知】」で始まる）は作者のチームの約束ごとだったので、docs/config.md の例に移した。
+- `claude-kitty doctor`: 「Chrome」の行を claude-browser と同じ探し方で出す（どれを使うかとプロファイルの置き場）。設定の `browser.command` が見つからなければ NG。「設定: browser」の行を足した。「KWin」の行は `qdbus6`・`qdbus-qt6` も数え、使えないときは理由（qdbus が無い / KWin が応答しない）を出す。
+- `claude-kitty`: kitty を公式インストーラの場所（`~/.local/kitty.app`）に決め打ちせず、無ければ PATH の kitty、macOS の kitty.app を使う。見つからなければそう言って止まる。セッションを省いたとき、`~/.config/kitty/claude3.session`（`install.sh --kitty` のリンク）が無ければリポジトリの `kitty/claude3.session` を使う。
+- KWin を呼ぶ所（`claude-browser`・`claude-view` と `claude-show` の保護する窓の確認・`claude-kitty` のデスクトップ移動）: `qdbus` が無ければ `qdbus6`・`qdbus-qt6` を使う（ディストリビューションによって Plasma 6 の qdbus の名前が違う）。`$CLAUDE_KITTY_QDBUS` で場所を指せる。
+- PRACTICES.md: 「統括 + 担当」の体制は一例で、1 人で使う・並べるだけでもよいと書いた。どの体制でも効く決まりと、作者の体制・チームに固有の決まり（略号・言い回し・担当は実装しない など）を分け、CLAUDE.md の例も 2 つに分けた。
+- README・SETUP.md: Chrome は Flatpak に限らないこと、プロファイルの置き場、qdbus の別名を書いた。
+
+### 修正
+
+- KWin が無い環境（KDE 以外のデスクトップ・qdbus や journalctl が無い）で KWin を呼ぶと、Python の traceback や「KWin スクリプトを読み込めない: ''」だけで止まっていた。何が足りないかと「窓の配置は KDE Plasma の KWin だけ」を出して止まる。
+
+### 上げるときに手で行うこと
+
+0.4.0 から上げるとき。**前の動きのままにしたいとき**は、`~/.config/claude-kitty/config.json` に書き足す（無い節は足す）。
+
+- 他のセッションからの「【通知】」「返事は不要」のメッセージで色を変えない: `"state": {"notice": {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]}}`（書かないと、そのターンも作業中・完了の色になる）。常駐の `claude-state watch` は起動時に設定を読むので、書いたら `systemctl --user restart claude-state-watch`。
+- Chrome: Flatpak の `com.google.Chrome` を使っていて前のプロファイルがあるなら、何もしなくても前と同じ Chrome と置き場を使う。ネイティブの Chrome などを入れたあとも必ず Flatpak の Chrome にしたいなら `"browser": {"command": ["flatpak", "run", "com.google.Chrome"]}`（置き場は前と同じ `~/.var/app/com.google.Chrome/claude-profiles`）。
+- `claude-kitty doctor` で「Chrome」の行が使いたい Chrome と置き場を指していることを確かめる。
+
 ## [0.4.0] - 2026-11-20
 
 ### 変更
@@ -130,7 +164,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/hummer98/claude-kitty/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hummer98/claude-kitty/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hummer98/claude-kitty/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hummer98/claude-kitty/compare/v0.1.0...v0.2.0

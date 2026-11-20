@@ -238,7 +238,12 @@ class Doctor(unittest.TestCase):
 
     def test_cli_entry(self):
         # claude-kitty doctor が lib/doctor.py を呼ぶ（偽の HOME。kitty が無いので NG で 1）
-        env = {"HOME": str(self.w.root / "empty"), "PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": str(self.w.run_dir),
+        # 本物の qdbus・flatpak・Chrome に届かないよう、PATH は起動に要るものへのリンクだけにする
+        tools = self.w.root / "cli-tools"
+        tools.mkdir()
+        for name in ("python3", "dirname", "readlink"):
+            (tools / name).symlink_to(shutil.which(name))
+        env = {"HOME": str(self.w.root / "empty"), "PATH": str(tools), "XDG_RUNTIME_DIR": str(self.w.run_dir),
                "CLAUDE_KITTY_CONFIG": str(self.w.root / "none.json")}
         r = subprocess.run([str(ROOT / "bin/claude-kitty"), "doctor", "--json"], env=env, capture_output=True,
                            text=True, timeout=60)
@@ -260,7 +265,7 @@ class ConfigExample(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_every_section_present(self):
-        self.assertEqual(set(self.data), {"view", "kitty", "state", "lang", "guard_hook", "session_stats", "roster"})
+        self.assertEqual(set(self.data), {"view", "kitty", "browser", "state", "lang", "guard_hook", "session_stats", "roster"})
 
     def test_loaders_read_example(self):
         from config import load_roster_config, load_state_config, load_view_config
@@ -272,7 +277,9 @@ class ConfigExample(unittest.TestCase):
         s = load_state_config(self.env, self.PATH)
         self.assertEqual(s["base"], "#232627")
         self.assertEqual(s["colors"]["waiting"], {"background": "#2e2a22", "name": 208})
-        self.assertEqual(s["notice"]["prefix"], ["【通知】"])
+        self.assertEqual(s["notice"], {"contains": [], "prefix": []})  # 既定と同じ（印は例として docs/config.md に）
+        from config import load_browser_config
+        self.assertEqual(load_browser_config(self.env, self.PATH), {"command": None, "profile_root": None})
         lang, problems = load_lang_config(self.env, self.PATH)
         self.assertEqual(problems, [])
         self.assertEqual(lang, self.data["lang"])

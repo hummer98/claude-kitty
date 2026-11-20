@@ -2,7 +2,9 @@
 # claude-code を並べた kitty を起動する。設定の kitty.maximize で最大化し、kitty.desktop で仮想デスクトップへ移す
 # （移動は KDE Plasma の KWin 用。どちらも既定はしない）。
 # claude-kitty doctor [--json] は、入っているもの・動くものを調べて直し方を出す。
-# kitty の場所は $CLAUDE_KITTY_KITTY で変えられる（既定は公式インストーラの ~/.local/kitty.app）。
+# kitty の場所は $CLAUDE_KITTY_KITTY で変えられる（既定は公式インストーラの ~/.local/kitty.app、無ければ PATH の kitty、
+# macOS の kitty.app）。セッションを省くと ~/.config/kitty/claude3.session（install.sh --kitty のリンク）、
+# 無ければリポジトリの kitty/claude3.session。
 # claude-code の中から起動すると CLAUDE_* の環境変数を引き継ぎ、子の claude が
 # 「子セッション」扱いになって会話記録を保存しなくなるので、それらを消してから起動する。
 # 窓のクラスは $CLAUDE_KITTY_CLASS（既定 kitty-claude）、起動の形は $CLAUDE_KITTY_START_AS（既定は kitty.maximize が
@@ -16,8 +18,15 @@ if [ "${1:-}" = doctor ]; then  # 入っているもの・動くものを調べ�
 	exec python3 "$(dirname "$(readlink -f "$0")")/../lib/doctor.py" "$@"
 fi
 here=$(dirname "$(readlink -f "$0")")
-session=${1:-$HOME/.config/kitty/claude3.session}
-kitty=${CLAUDE_KITTY_KITTY:-$HOME/.local/kitty.app/bin/kitty}
+session=${1:-${KITTY_CONFIG_DIRECTORY:-${XDG_CONFIG_HOME:-$HOME/.config}/kitty}/claude3.session}
+[ -n "${1:-}" ] || [ -e "$session" ] || session=$here/../kitty/claude3.session
+kitty=${CLAUDE_KITTY_KITTY:-}
+if [ -z "$kitty" ]; then
+	for k in "$HOME/.local/kitty.app/bin/kitty" "$(command -v kitty 2>/dev/null)" /Applications/kitty.app/Contents/MacOS/kitty; do
+		[ -n "$k" ] && [ -x "$k" ] && { kitty=$k; break; }
+	done
+	[ -n "$kitty" ] || { echo "claude-kitty: kitty が見つからない（~/.local/kitty.app・PATH・/Applications を探した。\$CLAUDE_KITTY_KITTY で場所を指す）" >&2; exit 1; }
+fi
 class=${CLAUDE_KITTY_CLASS:-kitty-claude}
 read -r desktop maximize < <(python3 "$here/../lib/config.py" kitty-launch)
 if [ "${maximize:-0}" = 1 ]; then start_as=${CLAUDE_KITTY_START_AS:-maximized}; else start_as=${CLAUDE_KITTY_START_AS:-normal}; fi
@@ -27,14 +36,19 @@ cd ~ || exit 1
 "$kitty" --detach --class "$class" --start-as "$start_as" --session "$session"
 [ "$class" = kitty-claude ] || exit 0
 case "$desktop" in ''|-|*[!0-9]*) exit 0 ;; esac   # kitty.desktop を設定していなければ、窓を動かさない
-command -v qdbus >/dev/null 2>&1 || { echo "claude-kitty: qdbus が無いので kitty.desktop（デスクトップ $desktop）へ移せない" >&2; exit 0; }
+# Plasma 6 の qdbus は qdbus6・qdbus-qt6 の名前のこともある（lib/kwin.py と同じ順）
+qdbus=${CLAUDE_KITTY_QDBUS:-}
+if [ -z "$qdbus" ]; then
+	for q in qdbus qdbus6 qdbus-qt6; do command -v "$q" >/dev/null 2>&1 && { qdbus=$q; break; }; done
+fi
+[ -n "$qdbus" ] || { echo "claude-kitty: qdbus が無いので kitty.desktop（デスクトップ $desktop）へ移せない（KDE Plasma の KWin だけ）" >&2; exit 0; }
 js="${XDG_RUNTIME_DIR:-/tmp}/claude-kitty-desktop.$$.js"
 max=false
 [ "$maximize" = 1 ] && max=true
 trap 'rm -f "$js"' EXIT
 sed -e "s/@@DESKTOP@@/$desktop/" -e "s/@@MAXIMIZE@@/$max/" "$here/../lib/kitty_to_desktop.js" >"$js" || exit 1
 sleep 2
-id=$(qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$js" claude_kitty_to_desktop) &&
-qdbus org.kde.KWin /Scripting/Script"$id" org.kde.kwin.Script.run >/dev/null
+id=$("$qdbus" org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$js" claude_kitty_to_desktop) &&
+"$qdbus" org.kde.KWin /Scripting/Script"$id" org.kde.kwin.Script.run >/dev/null
 sleep 1
-qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript claude_kitty_to_desktop >/dev/null
+"$qdbus" org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript claude_kitty_to_desktop >/dev/null

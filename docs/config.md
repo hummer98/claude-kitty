@@ -1,6 +1,6 @@
 # 設定ファイル（config.json）
 
-claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`）から読みます。
+claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`）から読みます。
 **どの節も、どの項目も省けます。** ファイルが無ければ、すべて下の表の既定値で動きます。
 
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
@@ -30,6 +30,32 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 
 環境変数 `CLAUDE_KITTY_START_AS` が `maximize` より優先します。
 
+## browser（claude-browser・claude-show: 重ねる Chrome）
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `command` | `null`（自動で探す） | Chrome（Chromium）の起動のコマンド。文字列のリストで、引数も足せる（`["google-chrome", "--ozone-platform=wayland"]`、`["flatpak", "run", "com.google.Chrome"]` など）。プロファイル・CDP のポート・`--class` などの引数は claude-browser が後ろに足す |
+| `profile_root` | `null`（下の置き場） | プロファイルと台帳（`ledger.json`）を置くフォルダ。`~` を使える |
+
+`command` が `null` のときに探す順（最初に見つかったもの）:
+
+1. 下の 2〜5 のうち、入っていて、その置き場（下の表）が既にあるもの（後から別の Chrome を入れても、ログイン済みのプロファイルから黙って移らない。0.4 までの Flatpak の Chrome の `~/.var/app/com.google.Chrome/claude-profiles` もこれで引き継ぐ）。複数あれば下の順
+2. ネイティブの Chrome: `google-chrome-stable`・`google-chrome`（PATH から。macOS は `/Applications/Google Chrome.app`）
+3. Flatpak の Chrome（`com.google.Chrome`）
+4. ネイティブの Chromium: `chromium`・`chromium-browser`
+5. Flatpak の Chromium（`org.chromium.Chromium`）
+
+`profile_root` が `null` のときの置き場:
+
+| 起動のしかた | 置き場 |
+|---|---|
+| Flatpak（`flatpak run <アプリ ID>`。`command` に書いたときも） | `~/.var/app/<アプリ ID>/claude-profiles`（サンドボックスから書ける場所。Chrome は 0.4 までと同じ） |
+| Snap（`/snap/bin/…`） | `~/snap/<名前>/common/claude-kitty-profiles`（隠しフォルダはサンドボックスから書けない） |
+| それ以外 | `$XDG_DATA_HOME/claude-kitty/browser-profiles`（既定 `~/.local/share/claude-kitty/browser-profiles`）。ネイティブの Chromium は同じ所の `chromium-profiles`（Chrome とは cookie の鍵が違うので共有しない） |
+
+どれを使っているかは `claude-browser status`（`browser` と `profile_root`）と `claude-kitty doctor`（「Chrome」の行）で分かります。
+置き場を変えると、前のプロファイル（ログイン）と台帳は引き継がれません。窓の配置は KDE Plasma の KWin だけで、Chrome の窓は `--class=claude-browser-<名前>`（X11 では WM_CLASS、Wayland では app_id になる）で見分けます。
+
 ## state（claude-state: 状態の色）
 
 | 項目 | 既定 | 意味 |
@@ -39,11 +65,15 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 | `colors.<状態>.name` | 下の表 | ステータス行の名前の色（256 色の番号 0〜255）。`null` は色を付けない |
 | `done_dwell_seconds` | `2` | 完了（未読）のペインに、これだけ続けてフォーカスしたら idle に戻す（0〜3600 秒） |
 | `watch_sockets` | `null` | `claude-state watch` が見る kitty のソケット（`"unix:/…"` のリスト）。`null` なら `$XDG_RUNTIME_DIR/kitty-*` の動いているもの全部 |
-| `notice.contains` | `["返事は不要", "返事不要"]` | 他のセッションからのメッセージの本文にこれのどれかがあれば「通知」とみて、色を変えない |
-| `notice.prefix` | `["【通知】"]` | 本文がこれのどれかで始まれば「通知」 |
+| `notice.contains` | `[]` | 他のセッションからのメッセージの本文にこれのどれかがあれば「通知」とみて、色を変えない |
+| `notice.prefix` | `[]` | 本文がこれのどれかで始まれば「通知」 |
 | `subagent_colors.running` / `.ended` | `110` / `245` | `claude-state subagents`（ステータス行のサブエージェントの要約）の色。`null` は色なし |
 
-`notice` の既定は、日本語でセッション同士が連絡するときの運用の例です。自分の決まり（使う言い回し）に合わせて変えてください。
+`notice` の既定は空で、他のセッションからのメッセージはどれも普通の依頼と同じに色を変えます。セッション同士で「返事も作業も要らない知らせ」の決まった言い回しを使うなら、それを書きます。日本語で連絡するチームの例（0.4 までの既定）:
+
+```json
+{"state": {"notice": {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]}}}
+```
 
 状態の色の既定（`colors`）:
 
@@ -120,6 +150,7 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | 環境変数 | 意味 |
 |---|---|
 | `CLAUDE_KITTY_KITTY` / `CLAUDE_KITTY_KITTEN` | kitty / kitten の場所（既定は公式インストーラの `~/.local/kitty.app/bin/`、無ければ PATH） |
+| `CLAUDE_KITTY_QDBUS` | KWin を呼ぶ qdbus の場所（既定は PATH の `qdbus`・`qdbus6`・`qdbus-qt6` の最初のもの） |
 | `CLAUDE_KITTY_CLASS` / `CLAUDE_KITTY_START_AS` | `claude-kitty` が起動する kitty の窓のクラス（既定 `kitty-claude`）と起動の形（既定は `kitty.maximize` で `maximized` か `normal`） |
 | `CLAUDE_KITTY_BIN_DIR` | `tools/install.sh` と `claude-kitty doctor` が見るコマンドのリンクの場所（既定 `~/.local/bin`） |
 | `CLAUDE_CONFIG_DIR` | Claude Code の設定のフォルダ（既定 `~/.claude`。`settings.json` の hook をここで探す） |

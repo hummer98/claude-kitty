@@ -344,7 +344,8 @@ def check_systemd(ctx, rep):
 # ---- 設定 ---------------------------------------------------------------------
 
 def check_config(ctx, rep):
-    from config import config_path, load_kitty_config, load_roster_config, load_state_config, load_view_config
+    from config import (config_path, load_browser_config, load_kitty_config, load_roster_config, load_state_config,
+                        load_view_config)
     path = config_path(ctx.env)
     if not path.exists():
         rep.ok("設定ファイル", f"無い（既定値で動く。例は config.example.json、説明は docs/config.md）: {path}")
@@ -374,25 +375,56 @@ def check_config(ctx, rep):
     strict("session_stats", lambda: load_settings(ctx.env, path))
     strict("roster", lambda: load_roster_config(ctx.env, path))
     strict("kitty", lambda: load_kitty_config(ctx.env, path))
+    strict("browser", lambda: load_browser_config(ctx.env, path))
 
 
 # ---- デスクトップ・Chrome ------------------------------------------------------
 
+def check_browser(ctx, rep):
+    """claude-browser と同じ探し方（lib/browser.py）で、起動する Chrome とプロファイルの置き場を出す。"""
+    from browser import FLATPAK_CHROME, SEARCHED, find_browser
+    from config import load_browser_config
+    try:
+        conf = load_browser_config(ctx.env)
+    except ValueError:
+        conf = {"command": None, "profile_root": None}  # 壊れた設定は「設定: browser」の行で NG にする
+
+    def flatpak_has(app):
+        fp = ctx.which("flatpak")
+        return bool(fp) and ctx.run([fp, "info", app], timeout=5)[0] == 0
+
+    b = find_browser(conf, ctx.env, ctx.home, ctx.which, os.path.exists, flatpak_has, ctx.os_name)
+    if b["command"] is None:
+        rep.warn("Chrome", f"見つからない（探したもの: {SEARCHED}）",
+                 "claude-browser を使うなら Chrome か Chromium を入れる（Flatpak なら flatpak install flathub "
+                 f"{FLATPAK_CHROME}）。別の場所・別の名前なら設定の browser.command（docs/config.md）")
+        return
+    cmd = b["command"]
+    if b["configured"] and not (ctx.which(cmd[0]) or os.path.exists(cmd[0])):
+        rep.ng("Chrome", f"設定の browser.command の {cmd[0]} が見つからない", "browser.command を直す（docs/config.md）")
+        return
+    if b["kind"] == "flatpak":
+        how = f"Flatpak の {b['name']}"
+    elif b["kind"] == "snap":
+        how = f"Snap の {b['name']}"
+    else:
+        how = cmd[0]
+    rep.ok("Chrome", f"{how}{'（設定の browser.command）' if b['configured'] else ''}、プロファイル {b['profile_root']}")
+
+
 def check_desktop(ctx, rep):
     if ctx.os_name == "Linux":
-        q = ctx.which("qdbus")
+        from kwin import QDBUS_NAMES, qdbus_path
+        q = qdbus_path(ctx.env, which=lambda n, path=None: ctx.which(n))
         rc = ctx.run([q, "org.kde.KWin", "/Scripting"], timeout=3)[0] if q else None
         if rc == 0:
-            rep.ok("KWin", "qdbus で KWin のスクリプトを呼べる")
+            rep.ok("KWin", f"{os.path.basename(q)} で KWin のスクリプトを呼べる")
         else:
-            rep.warn("KWin", "無い（qdbus か KDE Plasma の KWin が無い）",
-                     "claude-browser の重ね置きと claude-kitty のデスクトップ移動だけが使えない（ほかは動く）")
-        fp = ctx.which("flatpak")
-        rc = ctx.run([fp, "info", "com.google.Chrome"], timeout=5)[0] if fp else None
-        if rc == 0:
-            rep.ok("Chrome", "Flatpak の com.google.Chrome")
-        else:
-            rep.warn("Chrome", "Flatpak の com.google.Chrome が無い", "claude-browser を使うなら flatpak install flathub com.google.Chrome")
+            why = "KDE Plasma の KWin が応答しない" if q else f"qdbus（{'・'.join(QDBUS_NAMES)}）が無い"
+            rep.warn("KWin", f"使えない（{why}）",
+                     "claude-browser の重ね置き・claude-kitty のデスクトップ移動・保護する窓（view.guard）の確認だけが"
+                     "使えない（ほかは動く。窓の操作は KDE Plasma 専用）")
+        check_browser(ctx, rep)
     elif ctx.os_name == "Darwin":
         rep.skip("KWin", "macOS では使わない")
         app = "/Applications/Google Chrome.app"

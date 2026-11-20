@@ -1401,20 +1401,44 @@ def peer_prompt(body):
 
 class StateNotice(unittest.TestCase):
     """他のセッションからの「通知」で始まったターンは、色を変えない。"""
+    JA = {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]}  # docs/config.md の例（0.4 までの既定）
 
     def test_is_notice(self):
-        self.assertTrue(is_notice(peer_prompt("【通知】ビルドが通りました")))
-        self.assertTrue(is_notice(peer_prompt("決まりました。返事は不要です。")))
-        self.assertTrue(is_notice(peer_prompt("念のため。返事不要")))
-        self.assertFalse(is_notice(peer_prompt("この件を直してください")))  # 印の無い依頼
-        self.assertFalse(is_notice(peer_prompt("前置き【通知】")))  # 【通知】は頭だけ
-        self.assertFalse(is_notice("【通知】返事は不要"))  # 人が打ったもの（cross-session-message でない）
-        self.assertFalse(is_notice(None))
-        self.assertTrue(is_notice(None, body="  【通知】x"))
+        m = merge_notice(self.JA)
+        self.assertTrue(is_notice(peer_prompt("【通知】ビルドが通りました"), m))
+        self.assertTrue(is_notice(peer_prompt("決まりました。返事は不要です。"), m))
+        self.assertTrue(is_notice(peer_prompt("念のため。返事不要"), m))
+        self.assertFalse(is_notice(peer_prompt("この件を直してください"), m))  # 印の無い依頼
+        self.assertFalse(is_notice(peer_prompt("前置き【通知】"), m))  # 【通知】は頭だけ
+        self.assertFalse(is_notice("【通知】返事は不要", m))  # 人が打ったもの（cross-session-message でない）
+        self.assertFalse(is_notice(None, m))
+        self.assertTrue(is_notice(None, m, body="  【通知】x"))
         m = merge_notice({"contains": ["FYI"]})
-        self.assertEqual(m["prefix"], ["【通知】"])
+        self.assertEqual(m["prefix"], [])  # 書かなかった方は既定（空）のまま
         self.assertTrue(is_notice(peer_prompt("FYI: done"), m))
         self.assertFalse(is_notice(peer_prompt("返事は不要"), m))
+
+    def test_default_has_no_markers(self):
+        # 印の言い回しはチームの約束ごとなので、既定では何も通知とみなさない
+        self.assertEqual(merge_notice(None), {"contains": [], "prefix": []})
+        for text in ("【通知】ビルドが通りました", "返事は不要です", "FYI", ""):
+            self.assertFalse(is_notice(peer_prompt(text)), text)
+            self.assertFalse(is_notice(peer_prompt(text), merge_notice(None)), text)
+            self.assertFalse(is_notice(None, body=text), text)
+        self.assertEqual(merge_notice({}), {"contains": [], "prefix": []})
+        self.assertEqual(merge_notice({"contains": [], "prefix": []}), {"contains": [], "prefix": []})
+
+    def test_config_restores_previous_markers(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "c.json"
+            p.write_text(json.dumps({"state": {"notice": self.JA}}))
+            from config import load_state_config
+            n = load_state_config({"CLAUDE_KITTY_CONFIG": str(p), "XDG_CONFIG_HOME": d})["notice"]
+            self.assertEqual(n, self.JA)
+            self.assertTrue(is_notice(peer_prompt("【通知】x"), n))
+            p.write_text("{}")
+            n = load_state_config({"CLAUDE_KITTY_CONFIG": str(p), "XDG_CONFIG_HOME": d})["notice"]
+            self.assertFalse(is_notice(peer_prompt("【通知】x"), n))
 
     def test_merge_notice_refuses_bad_shapes(self):
         for bad in ([], {"contains": "x"}, {"contains": [""]}, {"other": ["x"]}, {"prefix": [1]}):
@@ -2173,7 +2197,10 @@ class ClaudeStateCli(unittest.TestCase):
         st = self.state()
         self.assertEqual((st["background"], st["idle_background"]), ("#22282e", "#232627"))
 
+    NOTICE_JA = {"state": {"notice": {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]}}}
+
     def test_notice_from_other_session_keeps_color(self):
+        (self.d / "none.json").write_text(json.dumps(self.NOTICE_JA))
         self.hook("UserPromptSubmit")
         self.hook("Stop")
         n = len(self.colors())
@@ -2192,7 +2219,18 @@ class ClaudeStateCli(unittest.TestCase):
         self.hook("UserPromptSubmit", {"prompt": peer_prompt("FYI")}, CLAUDE_KITTY_CONFIG=str(self.d / "c.json"))
         self.assertEqual(self.state()["state"], "idle")
 
+    def test_notice_without_markers_colors_as_usual(self):
+        # 既定（印なし）では、他のセッションからの「【通知】」も普通の依頼と同じに色を変える
+        self.hook("UserPromptSubmit")
+        self.hook("Stop")
+        n = len(self.colors())
+        self.hook("UserPromptSubmit", {"prompt": peer_prompt("【通知】ビルドが通りました")})
+        self.hook("Stop")
+        self.assertEqual(self.state()["state"], "done")
+        self.assertEqual([c[-1] for c in self.colors()[n:]], ["background=#22282e", "background=#222b25"])
+
     def test_notice_found_in_transcript_at_stop(self):
+        (self.d / "none.json").write_text(json.dumps(self.NOTICE_JA))
         t = self.d / "t.jsonl"
         t.write_text(json.dumps({"type": "user", "turnOrigin": "peer", "origin": {"kind": "peer", "body": "返事は不要"}}) + "\n")
         self.hook("SessionStart")
@@ -2881,6 +2919,7 @@ SIDE_TESTS = {
     "install_test": "Install",
     "doctor_test": "Doctor",
     "launch_test": "Launch",
+    "browser_test": "Browser",
 }
 
 

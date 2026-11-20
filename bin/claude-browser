@@ -17,6 +17,8 @@ mode show: ユーザーに見せる。自分以外のペインの場所（左の
 kitty は縮めない（縮めると全ペインの claude-code が再描画で崩れることがある）。
 プロファイル名は起動し直しても変わらないもの（ペインの user var role > slot > セッション ID）。
 プロファイルは残すので、パスキー等のログインは一度人が済ませれば以後そのまま使える。
+起動する Chrome（Chromium）は設定の browser.command、無ければ自動で探す（順は lib/browser.py。status に出る）。
+窓の配置は KDE Plasma の KWin だけ。
 """
 import argparse
 import json
@@ -31,25 +33,29 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
-from config import kitten_path, load_view_config  # noqa: E402
+from browser import SEARCHED, find_browser  # noqa: E402
+from config import kitten_path, load_browser_config, load_view_config  # noqa: E402
 from core import (choose_key, kitty_pid_from_socket, ledger_touch,  # noqa: E402
                   parse_journal, profile_processes, resolve_pane, resolve_place_opts)
 from geometry import (fit_correction, others_area_fraction, right_area_fraction,  # noqa: E402
                       tab_pane_fraction, target_rect)
 
 KITTEN = kitten_path(os.environ)
-CHROME = ["flatpak", "run", "com.google.Chrome"]
 CHROME_FLAGS = [
     "--no-first-run", "--no-default-browser-check",
     # 別デスクトップや他の窓の下にあっても描画を止めない（shot がタイムアウトしないように）
     "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
     "--disable-background-timer-throttling",
 ]
-# Flatpak の Chrome が書き込める場所に置く（ホームの任意の場所はサンドボックスから見えない）
-PROFILE_ROOT = Path.home() / ".var/app/com.google.Chrome/claude-profiles"
+# 起動する Chrome とプロファイルの置き場は setup_browser() が決める（探す順と置き場は lib/browser.py）。
+# Flatpak なら ~/.var/app/<アプリ ID>/claude-profiles（サンドボックスから書ける場所）、ほかは
+# $XDG_DATA_HOME/claude-kitty/browser-profiles。設定の browser.command / browser.profile_root で変える
+CHROME = None
+BROWSER = None
+PROFILE_ROOT = None
+LEDGER = None
 STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "claude-browser"
 CDP = HERE / "lib" / "cdp.mjs"
-LEDGER = PROFILE_ROOT / "ledger.json"
 PLACE_KEYS = ("mode", "ratio", "over", "focus", "area")  # 既定と引き継ぎは core.resolve_place_opts
 SETTLE = 0.4  # 配置してから、窓の大きさが落ち着くまで待つ秒数（Chrome が自分で大きさを戻すことがある）
 
@@ -57,6 +63,42 @@ SETTLE = 0.4  # 配置してから、窓の大きさが落ち着くまで待つ�
 def die(msg):
     print(f"claude-browser: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+# ---------- browser ----------
+def flatpak_has(app):
+    try:
+        return subprocess.run(["flatpak", "info", app], stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+NO_BROWSER = (f"Chrome / Chromium が見つからない（探したもの: {SEARCHED}）。"
+              "入れるか、設定の browser.command で起動のコマンドを書く（docs/config.md）")
+
+
+def setup_browser(env=None, strict=True):
+    """起動する Chrome とプロファイルの置き場を決め、CHROME / PROFILE_ROOT / LEDGER に入れる。
+
+    見つからなくても止めない（list・profiles・close はプロファイルの置き場だけで動く）。止めるのは open。
+    設定が壊れていれば、strict（open / move）なら止め、ほかは既定の探し方で続ける（close できなくならないように）。"""
+    global BROWSER, CHROME, PROFILE_ROOT, LEDGER
+    env = os.environ if env is None else env
+    try:
+        conf = load_browser_config(env)
+    except ValueError as e:
+        if strict:
+            die(str(e))  # 壊れた設定のまま、別のブラウザ・別のプロファイルで開かない
+        print(f"claude-browser: {e}（既定で続ける）", file=sys.stderr)
+        conf = {"command": None, "profile_root": None}
+    import shutil
+    BROWSER = find_browser(conf, env, Path.home(), lambda n: shutil.which(n, path=env.get("PATH")),
+                           os.path.exists, flatpak_has, os.uname().sysname)
+    CHROME = BROWSER["command"]
+    PROFILE_ROOT = BROWSER["profile_root"]
+    LEDGER = PROFILE_ROOT / "ledger.json"
+    return BROWSER
 
 
 # ---------- state / process ----------
@@ -355,10 +397,19 @@ def wait_ready(port, cls, seconds):
     return False
 
 
+def launch_argv(command, profile, port, cls, url):
+    """Chrome の起動の引数。--class は X11 では WM_CLASS、Wayland では app_id になり、KWin はそれで窓を探す
+    （ネイティブでも Flatpak でも同じ Chrome の引数なので、どちらでも効く）。"""
+    return list(command) + [f"--user-data-dir={profile}", f"--remote-debugging-port={port}",
+                            f"--class={cls}", *CHROME_FLAGS, "--new-window", url]
+
+
 def cmd_open(args, key):
     st = load_state(key) or {}
-    prep = prepare(args, st)
     profile = PROFILE_ROOT / key
+    if not CHROME and not running(profile)[0]:  # kitty や KWin を呼ぶ前に止める
+        die(NO_BROWSER)
+    prep = prepare(args, st)
     cls = f"claude-browser-{key}"
     pids, port = running(profile)
     if pids:
@@ -371,13 +422,17 @@ def cmd_open(args, key):
         if not wait_window(cls, 10):
             die("Chrome の窓が出てこない")
     else:
+        if not CHROME:
+            die(NO_BROWSER)
         port = free_port()
         profile.mkdir(parents=True, exist_ok=True)
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         with open(STATE_DIR / f"{key}.log", "wb") as log:  # 毎回作り直す（溜め込まない）
-            subprocess.Popen(CHROME + [f"--user-data-dir={profile}", f"--remote-debugging-port={port}",
-                                       f"--class={cls}", *CHROME_FLAGS, "--new-window", args.url],
-                             stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+            try:
+                subprocess.Popen(launch_argv(CHROME, profile, port, cls, args.url),
+                                 stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+            except OSError as e:
+                die(f"Chrome を起動できない（{' '.join(CHROME)}: {e}）。設定の browser.command を確認する")
         st.update(port=port, **{"class": cls, "profile": str(profile)})
         save_state(key, st)  # 配置に失敗しても後で close / 再 open できるよう、起動直後に残す
         if not wait_ready(port, cls, 20):
@@ -464,6 +519,7 @@ def main(argv=None):
     p = sub.add_parser("note"); p.add_argument("text")
     p = sub.add_parser("shot"); p.add_argument("file")
     args = ap.parse_args(argv)
+    setup_browser(strict=args.cmd in ("open", "move"))
 
     if args.cmd == "list":
         return cmd_list()
@@ -494,7 +550,8 @@ def main(argv=None):
         print(node(need_running(key)["port"], "url").stdout.strip())
     elif args.cmd == "status":
         pids, port = running(PROFILE_ROOT / key)
-        print(json.dumps({"key": key, "running": bool(pids), "port": port, **(load_state(key) or {})}))
+        print(json.dumps({"key": key, "running": bool(pids), "port": port, "browser": CHROME,
+                          "profile_root": str(PROFILE_ROOT), **(load_state(key) or {})}))
 
 
 if __name__ == "__main__":

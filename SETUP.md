@@ -11,11 +11,11 @@
 | Python 3（3.10 以降を推奨、作者は 3.14） | `bin/` の道具とテスト。標準ライブラリだけを使う | `python3 --version` |
 | Node.js 22 以降 | `lib/cdp.mjs`（組み込みの `WebSocket` と `fetch` を使う CDP クライアント） | `node --version` |
 | Claude Code（`claude`） | 並べる中身 | `claude --version` |
-| Google Chrome（Linux は Flatpak の `com.google.Chrome`） | `claude-browser` | `flatpak info com.google.Chrome` |
-| KDE Plasma 6（Wayland）の `qdbus`・`journalctl --user` | KWin スクリプトで窓を動かし、結果を journal から受け取る | `qdbus org.kde.KWin /Scripting` |
+| Google Chrome か Chromium（ネイティブでも Flatpak でもよい。探す順と `browser.command` は [docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)） | `claude-browser` | `claude-kitty doctor` の「Chrome」の行 |
+| KDE Plasma 6（Wayland）の `qdbus`（`qdbus6`・`qdbus-qt6` の名前でもよい）・`journalctl --user` | KWin スクリプトで窓を動かし、結果を journal から受け取る | `qdbus org.kde.KWin /Scripting` |
 | `pgrep`・`notify-send` | `claude-view` の「保護する窓」の確認と通知 | `command -v pgrep notify-send` |
 
-kitty は公式のインストーラ（`curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin`）で `~/.local/kitty.app` に入れる想定。別の場所なら `CLAUDE_KITTY_KITTY`（kitty）と `CLAUDE_KITTY_KITTEN`（kitten）で指す。kitten は PATH からも探す。
+kitty は公式のインストーラ（`curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin`）で `~/.local/kitty.app` に入れる想定（無ければ PATH の kitty を使う）。別の場所なら `CLAUDE_KITTY_KITTY`（kitty）と `CLAUDE_KITTY_KITTEN`（kitten）で指す。kitten は PATH からも探す。
 
 `claude-view` と `claude-wait` だけなら、KDE・Chrome・Node は要らない（`claude-view` は `view.guard` を設定しなければ KWin を呼ばない）。
 
@@ -215,7 +215,7 @@ kitty と `kitten @` の部分（ペインの一覧・移動・分割比・フ�
 | `bin/claude-wait` | `start_time()` | `/proc/<pid>/stat` の 22 番目（起動時刻）で pid の再利用を見分ける | `ps -o lstart= -p <pid>`（無ければ空）。Claude Code の sessions JSON の `procStart` が macOS で何を入れるかを確かめて比較方法を合わせる（Linux では `/proc/<pid>/stat` の値と同じ文字列） |
 | `bin/claude-browser` | `kitty_socket()` | `/proc` で kitty の生存確認 | `os.kill(pid, 0)` |
 | `bin/claude-browser` | `scan_procs()` / `running()` | `/proc/*/cmdline` で Chrome のプロセスと引数を読む | `ps -axww -o pid=,args=`（引数の区切りが空白になるので、`--user-data-dir=` と `--remote-debugging-port=` は正規表現で取り出す。プロファイルのパスに空白を入れないこと）か `psutil`（引数をリストで返す） |
-| `bin/claude-browser` | `CHROME`・`PROFILE_ROOT`・`LEDGER` | `flatpak run com.google.Chrome`、`~/.var/app/com.google.Chrome/claude-profiles`（Flatpak の Chrome が書ける場所） | `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` を直接起動する（`open -a` だと既存の Chrome に吸収されるので、`--user-data-dir` 付きで実行ファイルを呼ぶ）。プロファイルは `~/.claude-browser/profiles/<key>` など空白の無い場所に置く（`ps` の出力から引数を取り出すとき、`Application Support` の空白で切れるため）。サンドボックスが無いので file:// の許可は要らない |
+| `bin/claude-browser` | `CHROME`・`PROFILE_ROOT`・`LEDGER`（`lib/browser.py` が決める） | 設定の `browser.command` か自動で探した Chrome、Flatpak なら `~/.var/app/<アプリ ID>/claude-profiles`、それ以外は `~/.local/share/claude-kitty/browser-profiles` | `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` を直接起動する（`open -a` だと既存の Chrome に吸収されるので、`--user-data-dir` 付きで実行ファイルを呼ぶ）。プロファイルは `~/.claude-browser/profiles/<key>` など空白の無い場所に置く（`ps` の出力から引数を取り出すとき、`Application Support` の空白で切れるため）。サンドボックスが無いので file:// の許可は要らない |
 | `bin/claude-state` | `ancestors()` / `read_environ()` | `/proc/<pid>/stat`・`cmdline`・`environ` で、入れ子の claude かを見分ける | `ps -o ppid=,args= -p <pid>` で親をたどる。起動時の環境は `ps -E` などで読めないことがあるので、読めなければ「入れ子でない」と見なす（既定の動き） |
 | `bin/claude-browser` | `cmd_open()` の `--class=claude-browser-<key>` | X11/Wayland の窓のクラスで Chrome の窓を見分ける | macOS では効かない。窓は pid（`running()` で分かる）で見分ける |
 | `bin/claude-browser` | `find_kitty()` | KWin で kitty の窓（pid とタイトル）とクライアント領域を取る | Hammerspoon: `hs.application.applicationForPID(pid):allWindows()` と `win:frame()`。AppleScript: `System Events` の `position` / `size`（タイトルバーを含むので、kitty の `hide_window_decorations` か高さの差し引きが要る） |
