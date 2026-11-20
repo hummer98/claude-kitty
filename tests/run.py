@@ -1014,6 +1014,9 @@ class ClaudeViewCli(unittest.TestCase):
         try:
             (d / "qdbus").write_text("#!/bin/sh\necho qdbus >> %s\necho -1\n" % self.calls)
             (d / "qdbus").chmod(0o755)
+            # journalctl の無い環境（コンテナ）でも qdbus まで進むよう、偽物を置く
+            (d / "journalctl").write_text("#!/bin/sh\nexit 0\n")
+            (d / "journalctl").chmod(0o755)
             self.conf.write_text(json.dumps({"view": {"guard": ["^sleep 30$"]}}))
             r = self.run_view("restore", PATH=f"{d}:/usr/bin:/bin")
         finally:
