@@ -80,7 +80,6 @@ SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 PYTHON = re.compile(r"^(python|pypy)[0-9.]*$")
 ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 VAR = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
-HEREDOC = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z0-9_.-]+))")
 OPCHARS = ";&|()<>\n"
 
 
@@ -317,24 +316,216 @@ def resolve(word, cwd, home):
 
 # ---- Bash のコマンドを読む ----------------------------------------------------
 
+# 二重引用符の中とヒアドキュメントの本文から取り出したコマンド置換（$(...) と `...`）の目印。
+# 二重引用符の中の置換は語の中に \x01番号\x01 で残し（その語を見るときに中身を読み、元の字に戻す）、
+# ヒアドキュメントの本文の置換は、そのコマンドの次の行に \x02番号\x02 の語として置く（読んだあと捨てる）
+SUB_IN_WORD = re.compile("\x01(\\d+)\x01")
+SUB_LINE = re.compile("\x02(\\d+)\x02")
+# ヒアドキュメントの本文そのもの。区切りの語に \x03番号\x03 を付けて残し、受け取るコマンドが
+# シェル（bash <<'EOF' など、-c の無いもの）か ssh なら、本文をコマンドとして読む
+HEREDOC_BODY = re.compile("\x03(\\d+)\x03")
+# 本文を stdin から読んでコマンドとして動かすもの
+STDIN_SHELLS = {"ssh"}
+
+
+class _Scan:
+    """bash の引用とヒアドキュメントを読み分ける。shlex に渡す前の文字列と、取り出したコマンド置換を作る。
+
+    - ヒアドキュメントの本文は除く（入力の文字で、コマンドではない）。区切りを引用した <<'EOF' の本文は全部捨て、
+      引用しない <<EOF の本文は、bash が実際に動かす $(...) と `...` だけを読む。
+    - 二重引用符の中は文字列（echo や git commit -m の値）なのでコマンドとして見ないが、$(...) と `...` は読む。
+    - 一重引用符と $'...' の中は何も読まない。注釈（語の頭の #）の中の引用符で読み違えない。
+    bash -c の中身は二重引用符の文字列として残り、Analyzer が別に読む。
+    """
+
+    def __init__(self, text):
+        self.t = text
+        self.subs = []          # [(中身, 元の字)]
+        self.pending = []       # [(タブを外すか, 区切り, 引用したか)]
+
+    def run(self):
+        out = []
+        self.shell(0, len(self.t), None, out)
+        return "".join(out), self.subs
+
+    def shell(self, i, end, closer, out):
+        """引用の外。closer が ")" なら $( の中で、対の ) の次の位置で返る。(位置, 閉じたか)"""
+        t = self.t
+        depth = 0
+        while i < end:
+            c = t[i]
+            prev = t[i - 1] if i else "\n"
+            if c == "\\" and i + 1 < end:
+                out.append(t[i:i + 2])
+                i += 2
+            elif c == "'":
+                j = t.find("'", i + 1, end)
+                j = end if j < 0 else j + 1
+                out.append(t[i:j])
+                i = j
+            elif c == "$" and t.startswith("$'", i):
+                j = self._ansi_end(i + 2, end)
+                out.append(t[i:j])
+                i = j
+            elif t.startswith("$((", i) or (t.startswith("((", i) and prev in " \t\r\n;&|()"):
+                j = self._arith_end(i + (3 if c == "$" else 2), end)    # 算術式の << はヒアドキュメントでない
+                out.append(t[i:j])
+                i = j
+            elif c == '"':
+                out.append('"')
+                i = self.dq(i + 1, end, '"', out)
+            elif c == "#" and prev in " \t\r\n;&|()":
+                j = t.find("\n", i, end)
+                j = end if j < 0 else j
+                out.append(t[i:j])
+                i = j
+            elif t.startswith("<<", i) and not t.startswith("<<<", i):
+                i = self.heredoc(i, end, out)
+            elif c == "\n":
+                out.append(c)
+                i += 1
+                if self.pending:
+                    i = self.bodies(i, end, out)
+            else:
+                if closer:
+                    if c == "(":
+                        depth += 1
+                    elif c == ")":
+                        if depth == 0:
+                            return i + 1, True
+                        depth -= 1
+                out.append(c)
+                i += 1
+        return i, False
+
+    def _arith_end(self, i, end):
+        """$(( / (( の後から、対の )) の次の位置。"""
+        t, depth = self.t, 2
+        while i < end:
+            if t[i] == "(":
+                depth += 1
+            elif t[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        return end
+
+    def _ansi_end(self, i, end):
+        t = self.t
+        while i < end:
+            if t[i] == "\\":
+                i += 2
+            elif t[i] == "'":
+                return i + 1
+            else:
+                i += 1
+        return end
+
+    def dq(self, i, end, quote, out):
+        """二重引用符の中（quote が None ならヒアドキュメントの本文）。閉じた次の位置を返す。"""
+        t = self.t
+        while i < end:
+            c = t[i]
+            if c == "\\" and i + 1 < end:
+                out.append(t[i:i + 2])
+                i += 2
+            elif quote and c == quote:
+                out.append(c)
+                return i + 1
+            elif t.startswith("$((", i):
+                j = self._arith_end(i + 3, end)
+                out.append(t[i:j])
+                i = j
+            elif t.startswith("$(", i):
+                j, closed = self.shell(i + 2, end, ")", [])
+                self._sub(t[i + 2:j - 1] if closed else t[i + 2:j], t[i:j], out)
+                i = j
+            elif c == "`":
+                j = i + 1
+                while j < end and t[j] != "`":
+                    j += 2 if t[j] == "\\" else 1
+                j = min(j, end)
+                self._sub(t[i + 1:j], t[i:j + 1], out)
+                i = j + 1
+            else:
+                out.append(c)
+                i += 1
+        return end
+
+    def _sub(self, inner, orig, out):
+        out.append(f"\x01{len(self.subs)}\x01")
+        self.subs.append((inner, orig))
+
+    def heredoc(self, i, end, out):
+        """<<[-] 区切り。区切りを覚え（本文は次の改行の後）、字はそのまま残す（segments が << と区切りを飛ばす）。"""
+        t = self.t
+        j = i + 2
+        strip = j < end and t[j] == "-"
+        j += strip
+        while j < end and t[j] in " \t":
+            j += 1
+        delim, quoted = [], False
+        while j < end and t[j] not in " \t\r\n;&|()<>":
+            c = t[j]
+            if c in "'\"":
+                k = t.find(c, j + 1, end)
+                k = end if k < 0 else k
+                delim.append(t[j + 1:k])
+                quoted = True
+                j = k + 1
+            elif c == "\\" and j + 1 < end:
+                delim.append(t[j + 1])
+                quoted = True
+                j += 2
+            else:
+                delim.append(c)
+                j += 1
+        out.append(t[i:j])
+        if delim:
+            out.append(f"\x03{len(self.subs)}\x03")
+            self.subs.append(("", ""))        # 本文は bodies で入れる
+            self.pending.append((strip, "".join(delim), quoted, len(self.subs) - 1))
+        return j
+
+    def bodies(self, i, end, out):
+        """改行の後: 待っているヒアドキュメントの本文を順に読み飛ばす。"""
+        t = self.t
+        pending, self.pending = self.pending, []
+        lines = []
+        for strip, delim, quoted, slot in pending:
+            start = i
+            stop = end
+            while i < end:
+                j = t.find("\n", i, end)
+                j = end if j < 0 else j
+                line = t[i:j]
+                if (line.lstrip("\t") if strip else line) == delim:
+                    stop = i
+                    i = min(j + 1, end)
+                    break
+                i = min(j + 1, end)
+            else:
+                stop = end
+            self.subs[slot] = (t[start:stop], "")
+            if not quoted:
+                found = []
+                before = len(self.subs)
+                self.dq(start, stop, None, found)
+                lines.extend(f"\x02{n}\x02" for n in range(before, len(self.subs)))
+        if lines:
+            out.append(" ".join(lines) + "\n")
+        return i
+
+
+def scan(text):
+    """(shlex に渡す字, コマンド置換の [(中身, 元の字)])。"""
+    return _Scan(text).run()
+
+
 def strip_heredocs(text):
-    """ヒアドキュメントの本文を除く（中身は入力の文字で、コマンドではない。中の ' で字句の解析が壊れないように）。"""
-    out = []
-    pending = []
-    for line in text.split("\n"):
-        if pending:
-            strip_tabs, delim = pending[0]
-            if (line.lstrip("\t") if strip_tabs else line) == delim:
-                pending.pop(0)
-            continue
-        out.append(line)
-        # 引用の中の << はヒアドキュメントでない。正確でなくてよいので、引用を外した行で探す
-        bare = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "", line)
-        for m in HEREDOC.finditer(bare):
-            if bare[m.start():m.start() + 3] == "<<<":
-                continue
-            pending.append((m.group(1) == "-", m.group(2) or m.group(3) or m.group(4)))
-    return "\n".join(out)
+    """ヒアドキュメントの本文を除いた字（前の版の名前。中身は scan）。"""
+    return scan(text)[0]
 
 
 def prepare(text):
@@ -384,10 +575,15 @@ def prepare(text):
     return "".join(out)
 
 
-def tokenize(text):
-    """語と演算子に分ける。引用が閉じていないなど shlex で読めないときは、空白と演算子で粗く分ける。"""
+def tokenize(text, subs=None):
+    """語と演算子に分ける。引用が閉じていないなど shlex で読めないときは、空白と演算子で粗く分ける。
+
+    subs にリストを渡すと、二重引用符の中とヒアドキュメントの本文のコマンド置換を足す（語の中の目印の番号で引く）。"""
     import shlex
-    text = prepare(strip_heredocs(text).replace("\\\n", " "))
+    text, found = scan(text)
+    if subs is not None:
+        subs.extend(found)
+    text = prepare(text.replace("\\\n", " "))
     try:
         lex = shlex.shlex(text, posix=True, punctuation_chars=OPCHARS)
         lex.whitespace = " \t\r"
@@ -430,7 +626,11 @@ def segments(tokens):
             else:
                 i += 1
         elif "<" in t:
-            i += 2 if (nxt is not None and not is_op(nxt)) else 1
+            if nxt is not None and not is_op(nxt):
+                words.extend(m.group(0) for m in HEREDOC_BODY.finditer(nxt))   # ヒアドキュメントの本文の目印
+                i += 2
+            else:
+                i += 1
         else:
             flush()
             for c in t:
@@ -638,7 +838,8 @@ class Analyzer:
 
     def run(self, command):
         stack = []
-        for item in segments(tokenize(command)):
+        self.subs = []
+        for item in segments(tokenize(command, self.subs)):
             if item[0] == "push":
                 stack.append((self.cwd, dict(self.vars), set(self.allowed)))
             elif item[0] == "pop":
@@ -648,7 +849,35 @@ class Analyzer:
                 self.segment(item[1], item[2])
         return self.reasons
 
+    def substitutions(self, words):
+        """語の中のコマンド置換（二重引用符の中・ヒアドキュメントの本文から取り出したもの）を、いまの cwd で読む。
+
+        置換は、そのコマンドより先に、同じシェルで動く（中の cd は外に持ち出さない）。読んだあと、語は元の字に戻し、
+        ヒアドキュメントの目印だけの語は捨てる。"""
+        out = []
+        for w in words:
+            for m in list(SUB_IN_WORD.finditer(w)) + list(SUB_LINE.finditer(w)):
+                n = int(m.group(1))
+                if n < len(self.subs) and self.depth < 4:
+                    sub = Analyzer(self.guard, self.cwd, {}, self.depth + 1)
+                    sub.vars, sub.home, sub.allowed = dict(self.vars), self.home, set(self.allowed)
+                    for r in sub.run(self.subs[n][0]):
+                        if r not in self.reasons:
+                            self.reasons.append(r)
+            if SUB_LINE.fullmatch(w) or (SUB_LINE.search(w) and not SUB_LINE.sub("", w).strip()):
+                continue
+            out.append(SUB_IN_WORD.sub(lambda m: self.subs[int(m.group(1))][1] if int(m.group(1)) < len(self.subs)
+                                       else m.group(0), w))
+        return out
+
     def segment(self, words, redirs):
+        bodies = [int(m.group(1)) for w in words for m in HEREDOC_BODY.finditer(w)]
+        if bodies:
+            words = [w for w in words if not HEREDOC_BODY.fullmatch(w)]
+        if any("\x01" in w or "\x02" in w for w in words + redirs):
+            words, redirs = self.substitutions(words), self.substitutions(redirs)
+            if not words and not redirs:
+                return
         words = [_expand(w, self.vars) for w in words]
         assigns, rest = _split_assignments(words)
         if not rest:
@@ -663,6 +892,7 @@ class Analyzer:
                 self.add(f"保護したパスへのリダイレクト（> {r}）")
         if rest:
             self.command(rest, assigns)
+            self.stdin_bodies(rest, bodies)
         if self.lets_through(self.allowed | allow_names(assigns.get(ALLOW_ENV))):
             return
         # allow_commands はコマンドの形の理由だけを消す（git push --dry-run > <保護したパス> は止める）
@@ -671,6 +901,20 @@ class Analyzer:
         for r in self._paths + self._cmds:
             if r not in self.reasons:
                 self.reasons.append(r)
+
+    def stdin_bodies(self, words, bodies):
+        """bash <<'EOF' … や ssh host <<'EOF' … は、本文をコマンドとして動かす。本文を bash -c の中身と同じに読む。"""
+        if not bodies or self.depth >= 3:
+            return
+        name = os.path.basename(words[0])
+        if not ((name in SHELLS and _shell_c(words[1:]) is None) or name in STDIN_SHELLS):
+            return
+        for n in bodies:
+            if n < len(self.subs) and self.subs[n][0].strip():
+                sub = Analyzer(self.guard, self.cwd, {}, self.depth + 1)
+                sub.vars, sub.home, sub.allowed = dict(self.vars), self.home, set(self.allowed)
+                for r in sub.run(self.subs[n][0]):
+                    self.add(r)
 
     def command(self, words, assigns):
         name = os.path.basename(words[0])

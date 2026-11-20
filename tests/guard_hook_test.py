@@ -276,6 +276,80 @@ class ShellForms(Base):
         self.assertIsNone(self.bash("curl -o ~/dev/x.zip http://e/x"))
 
 
+class QuotedText(Base):
+    """引用符の中とヒアドキュメントの本文は文字列。止める対象の名前が入っていただけで止めない（回帰: README に
+    <<'EOF' で使い方を追記したら、本文の `svcctl deploy` で止められた）。bash が実際に動かすもの（bash -c の中身、
+    二重引用符の中と引用しない <<EOF の本文の $(...) と `...`）は今までどおり読む。"""
+
+    def test_quoted_heredoc_body_with_backticks_and_apostrophe(self):
+        # 実際に起きた形: 区切りを引用したヒアドキュメント、本文の行頭のバッククォートとアポストロフィ
+        cmd = "cd ~/dev && cat >> README.md <<'EOF'\n## 使い方\n`svcctl.py deploy v1` で出す。it's\nEOF\ngit status"
+        self.assertIsNone(self.bash(cmd))
+        for delim in ("'EOF'", '"EOF"', "\\EOF", "E'O'F"):
+            self.assertIsNone(self.bash(f"cat > ~/dev/x <<{delim}\n$(svcctl deploy a)\n`svcctl deploy b`\nEOF"), delim)
+        self.assertIsNone(self.bash(f"cat <<'EOF'\nrm -rf {self.shared_dir}\nEOF"))
+
+    def test_strings_are_not_commands(self):
+        for c in ('echo "svcctl deploy a"', "printf '%s\\n' 'svcctl deploy a; git push'",
+                  'git commit -m "fix: svcctl deploy a; svcctl scale 2"', "echo '$(svcctl deploy a)'",
+                  "echo 'it''s'  # don't svcctl deploy a", f'echo "rm -rf {self.shared_dir}"',
+                  'git commit -m "$(cat <<\'EOF\'\nrun `svcctl deploy a`\n1) step\nEOF\n)"'):
+            self.assertIsNone(self.bash(c), c)
+
+    def test_multiline_string_with_heredoc_marker_hides_nothing(self):
+        # 二重引用符の中の << はヒアドキュメントでない。後ろの行のコマンドを本文と取り違えて見逃さない
+        self.assertIsNotNone(self.bash('git commit -m "a\nsee <<EOF\n"\nsvcctl deploy a'))
+        self.assertIsNone(self.bash('git commit -m "a\nsee <<EOF\n"\necho ok'))
+
+    def test_commands_after_heredoc_still_read(self):
+        self.assertIsNotNone(self.bash("cat <<'EOF' > ~/dev/x\nhello\nEOF\nsvcctl deploy a"))
+        self.assertIsNotNone(self.bash(f"cat <<'A' <<B\na\nA\nb\nB\nrm -rf {self.shared_dir}/m1"))
+        self.assertIsNotNone(self.bash(f"cat <<-EOF\n\tx\n\tEOF\nrm -rf {self.shared_dir}/m1"))
+
+    def test_shell_c_is_still_read(self):
+        for c in ('bash -c "svcctl deploy a"', "sh -c 'cd ~ && svcctl deploy a'", 'bash -lc "echo x; svcctl deploy a"',
+                  f'bash -c "cat <<\'EOF\'\nx\nEOF\nrm -rf {self.shared_dir}/m1"'):
+            self.assertIsNotNone(self.bash(c), c)
+
+    def test_substitutions_inside_strings_are_read(self):
+        m = self.shared_dir
+        for c in ('echo "$(svcctl deploy a)"', 'echo "`svcctl deploy a`"', 'git commit -m "x $(svcctl deploy a) y"',
+                  'echo "$(echo "$(svcctl deploy a)")"', "cat <<EOF\n$(svcctl deploy a)\nEOF",
+                  "cat <<EOF\n`svcctl deploy a`\nEOF", "cat <<'A' <<B\na\nA\n$(svcctl deploy a)\nB",
+                  "x=$(svcctl deploy a)", f'echo "$(cd {m} && git pull)"'):
+            self.assertIsNotNone(self.bash(c), c)
+        # 置換の中の cd は外に持ち出さない。置換の後の語は元の字に戻る（パスの判定は前と同じ）
+        self.assertIsNone(self.bash(f'echo "$(cd {m}; ls)" && mkdir ~/dev/x'))
+        self.assertIsNotNone(self.bash(f'echo x > "{m}/$(date +%s)"'))
+        # 引用しない本文の置換は、そのコマンドの cwd で読む
+        self.assertIsNotNone(self.bash(f"cd {m}/m1 && cat <<EOF\n$(git pull)\nEOF"))
+
+    def test_heredoc_fed_to_a_shell_is_read(self):
+        # 本文を stdin から動かすもの（-c の無いシェル、ssh）は、本文をコマンドとして読む（レビューの指摘）
+        m = self.shared_dir
+        for c in ("bash <<'EOF'\nsvcctl deploy a\nEOF", "bash -s <<'EOF'\nsvcctl deploy a\nEOF",
+                  "sh <<EOF\nsvcctl deploy a\nEOF", "ssh host <<'EOF'\nsvcctl deploy a\nEOF",
+                  f"cd {m} && bash <<'EOF'\ngit pull\nEOF", "timeout 5 bash <<'EOF'\nsvcctl deploy a\nEOF"):
+            self.assertIsNotNone(self.bash(c), c)
+        for c in ("cat <<'EOF'\nsvcctl deploy a\nEOF", "bash -c 'echo hi' <<'EOF'\nsvcctl deploy a\nEOF",
+                  "python3 - <<'EOF'\nprint('svcctl deploy a')\nEOF"):
+            self.assertIsNone(self.bash(c), c)
+
+    def test_arithmetic_shift_is_not_a_heredoc(self):
+        # $((1<<2)) の << をヒアドキュメントとみて、後ろの行を読み飛ばさない（レビューの指摘）
+        for c in ('echo "$((1<<2))"\nsvcctl deploy a', "echo $((1<<2))\nsvcctl deploy a",
+                  "((x = 1 << 2))\nsvcctl deploy a", 'echo "$(( (1+2) << 1 ))"; svcctl deploy a'):
+            self.assertIsNotNone(self.bash(c), c)
+        self.assertIsNone(self.bash("echo $((1<<2))"))
+
+    def test_scan_keeps_text_outside_strings(self):
+        text, subs = gh.scan("a \"b $(c) d\" <<'E' && f\nbody\nE\ng")
+        self.assertEqual(subs, [("c", "$(c)"), ("body\n", "")])      # 置換と、ヒアドキュメントの本文
+        self.assertNotIn("body", text)
+        self.assertIn("&& f", text)
+        self.assertTrue(text.endswith("\ng"))
+
+
 class Commands(Base):
     def test_program_rule(self):
         for c in ("svcctl.py --owner me deploy v1", "python3 ~/x/tools/svcctl.py --owner=me scale 4",
