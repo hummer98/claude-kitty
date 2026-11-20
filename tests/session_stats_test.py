@@ -11,10 +11,11 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,7 +69,7 @@ EN_LONG = "This is an English reply that keeps going. " * 6  # 258 字
 
 def settings(**over):
     base = {"master": MASTER, "roles": ROLES, "role_dir_prefix": PREFIX, "rephrase": REPHRASE,
-            "home_project": HOME_PROJ}
+            "home_project": HOME_PROJ, "timezone": "Asia/Tokyo"}
     base.update(over)
     return ss.make_settings(base, env={})
 
@@ -509,6 +510,24 @@ class TestFiles(Base):
         self.assertEqual(dict(res[MASTER].users), {date(2026, 3, 14): 1, date(2026, 3, 20): 1})
 
 
+class TestTimezone(unittest.TestCase):
+    """日付の区切り: 既定はこのマシンのローカルの時刻、session_stats.timezone で固定できる。"""
+
+    def test_default_is_local_and_setting_fixes_zone(self):
+        cfg = ss.make_settings({}, env={})
+        self.assertEqual((cfg["timezone"], cfg["tz"]), ("", None))
+        dt = datetime(2026, 3, 13, 15, 30, tzinfo=timezone.utc)
+        self.assertEqual(ss.local_day(dt, None), dt.astimezone().date())
+        tokyo = ss.make_settings({"timezone": "Asia/Tokyo"}, env={})
+        self.assertEqual(ss.local_day(dt, tokyo["tz"]), date(2026, 3, 14))
+        utc = ss.make_settings({"timezone": "UTC"}, env={})
+        self.assertEqual(ss.local_day(dt, utc["tz"]), date(2026, 3, 13))
+        with self.assertRaises(ValueError):
+            ss.make_settings({"timezone": "Mars/Base"}, env={})
+        with self.assertRaises(ValueError):
+            ss.make_settings({"timezone": 9}, env={})
+
+
 class TestDiscovery(Base):
     def test_no_roles_means_every_named_session(self):
         cfg = settings(projects=self.root, master="", roles=[], role_dir_prefix="")
@@ -659,7 +678,7 @@ class TestCli(Base):
         if not os.path.exists(conf):
             Path(conf).write_text(json.dumps({"session_stats": {
                 "master": MASTER, "roles": ROLES, "role_dir_prefix": PREFIX, "rephrase": REPHRASE,
-                "redact": ["tester"], "home_project": HOME_PROJ, "projects": self.root,
+                "redact": ["tester"], "home_project": HOME_PROJ, "projects": self.root, "timezone": "Asia/Tokyo",
                 "glossary": {"module": self.tool, "file": self.words}}}))
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -732,7 +751,7 @@ class TestCli(Base):
     def test_runs_as_a_command(self):
         import subprocess
         conf = os.path.join(self.root, "c.json")
-        Path(conf).write_text(json.dumps({"session_stats": {"projects": self.root, "home_project": HOME_PROJ}}))
+        Path(conf).write_text(json.dumps({"session_stats": {"timezone": "Asia/Tokyo", "projects": self.root, "home_project": HOME_PROJ}}))
         p = subprocess.run([sys.executable, str(BIN), "--end", "2026-03-20", "--stdout"], capture_output=True, text=True,
                            env=dict(os.environ, CLAUDE_KITTY_CONFIG=conf))
         self.assertEqual(p.returncode, 0, p.stderr)
@@ -755,7 +774,7 @@ class TestReviewFixes(TestCli):
         w = Writer(os.path.join(other, "-p", "n.jsonl"), session_id="n", name="dev-a", day="2026-03-20")
         w.user("別の場所の発言")
         w.save()
-        Path(self.root, "config.json").write_text(json.dumps({"session_stats": {
+        Path(self.root, "config.json").write_text(json.dumps({"session_stats": {"timezone": "Asia/Tokyo",
             "master": MASTER, "roles": ROLES, "projects": self.root, "home_project": HOME_PROJ,
             "out_dir": os.path.join(self.root, "from-config")}}))
         rc, out, _ = self.run_cli(["--projects", other, "--home-project=-p", "--end", "2026-03-20"])
@@ -763,8 +782,38 @@ class TestReviewFixes(TestCli):
         self.assertEqual(out.strip(), os.path.join(self.root, "from-config", "session_stats_2026-03-20.md"))
         self.assertIn("| dev-a | 03-20 | 1 |", Path(out.strip()).read_text())
 
+    def test_cli_default_is_local_time_with_dst(self):
+        # timezone を書かなければ、このマシンのローカルの時刻（TZ）で日を区切る。夏時間の切り替わりも含める
+        w = Writer(os.path.join(self.home, "d.jsonl"), session_id="d", name="dev-a")
+        for ts in ("2026-03-08T03:00:00.000Z",    # NY 03-07 22:00 / UTC 03-08
+                   "2026-03-08T04:59:00.000Z",    # NY 03-07 23:59
+                   "2026-03-08T05:00:00.000Z",    # NY 03-08 00:00（EST）
+                   "2026-03-09T03:30:00.000Z",    # NY 03-08 23:30（EDT）/ UTC 03-09
+                   "2026-03-09T04:30:00.000Z"):   # NY 03-09 00:30（EDT。EST のままなら 03-08 と数え違える）
+            w.user_at(ts, "発言")
+        w.save()
+        conf = Path(self.root, "local.json")
+
+        def run(tz, setting=None):
+            sec = {"master": MASTER, "roles": ROLES, "projects": self.root, "home_project": HOME_PROJ}
+            if setting:
+                sec["timezone"] = setting
+            conf.write_text(json.dumps({"session_stats": sec}))
+            env = {"PATH": "/usr/bin:/bin", "HOME": self.root, "TZ": tz, "CLAUDE_KITTY_CONFIG": str(conf)}
+            r = subprocess.run([sys.executable, str(ROOT / "bin" / "claude-session-stats"), "--end", "2026-03-08",
+                                "--days", "1", "--stdout", "--no-glossary"], env=env, capture_output=True, text=True,
+                               timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout
+        ny = run("America/New_York")
+        self.assertIn("| dev-a | 03-08 | 2 |", ny)
+        self.assertIn("このマシンのローカルの時刻 E", ny)          # EST / EDT とずれを添える
+        self.assertIn("| dev-a | 03-08 | 3 |", run("UTC"))
+        self.assertIn("| dev-a | 03-08 | 3 |", run("America/New_York", "UTC"))   # 設定がローカルより優先
+        self.assertIn("日付はすべて UTC", run("America/New_York", "UTC"))
+
     def test_glossary_flag_without_tool_warns(self):
-        Path(self.root, "config.json").write_text(json.dumps({"session_stats": {
+        Path(self.root, "config.json").write_text(json.dumps({"session_stats": {"timezone": "Asia/Tokyo",
             "master": MASTER, "projects": self.root, "home_project": HOME_PROJ}}))
         rc, _, err = self.run_cli(["--stdout", "--glossary", self.words])
         self.assertEqual(rc, 0)
@@ -774,7 +823,7 @@ class TestReviewFixes(TestCli):
         marker = os.path.join(self.root, "ran")
         tool = os.path.join(self.root, "tool", "marking.py")
         Path(tool).write_text(f"open({marker!r}, 'w').close()\n" + FAKE_GLOSSARY_TOOL)
-        Path(self.root, "config.json").write_text(json.dumps({"session_stats": {
+        Path(self.root, "config.json").write_text(json.dumps({"session_stats": {"timezone": "Asia/Tokyo",
             "projects": self.root, "home_project": HOME_PROJ, "glossary": {"module": tool, "file": self.words}}}))
         rc, out, _ = self.run_cli(["--stdout"])
         self.assertEqual(rc, 0)
@@ -787,7 +836,7 @@ class TestReviewFixes(TestCli):
                               "def check_text(text, rules, scene='all'):\n"
                               "    if 'こわす' in text:\n        raise KeyError('x')\n"
                               "    return _orig(text, rules, scene)\n")
-        Path(self.root, "config.json").write_text(json.dumps({"session_stats": {
+        Path(self.root, "config.json").write_text(json.dumps({"session_stats": {"timezone": "Asia/Tokyo",
             "master": MASTER, "projects": self.root, "home_project": HOME_PROJ,
             "glossary": {"module": tool, "file": self.words}}}))
         w = self.writer("m.jsonl", name=MASTER, day="2026-03-20")

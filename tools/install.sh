@@ -5,8 +5,9 @@
 #
 # 部品（何も書かなければ --all）:
 #   --links            bin/ の全コマンドを ~/.local/bin にリンクする（既にある別のファイルは上書きしない）
-#   --hooks[=LIST]     ~/.claude/settings.json に hook を足す。LIST は state,lang,guard から選ぶ（既定は全部）
-#                      state = claude-state（状態の色）、lang = claude-lang-check、guard = claude-guard
+#   --hooks[=LIST]     ~/.claude/settings.json に hook を足す。LIST は state,lang,guard から選ぶ（既定は state,guard）
+#                      state = claude-state（状態の色）、guard = claude-guard、lang = claude-lang-check
+#                      （返答の言語を調べる。--hooks=lang と明示したときだけ入れる。言語は設定の lang.language で決める）
 #   --kitty            kitty.conf の末尾に「include <リポジトリ>/kitty/claude-kitty.conf」を足し、
 #                      watcher と claude3.session のリンクを ~/.config/kitty に張る
 #   --systemd          contrib/systemd のユニットを ~/.config/systemd/user に写して enable --now（Linux だけ）
@@ -40,14 +41,14 @@ KITTY_MARK="# claude-kitty: tools/install.sh が足した行（tools/install.sh 
 UNIT_MARK="# claude-kitty: tools/install.sh が contrib/systemd から作った（手で直すなら、この行を消すと install.sh は触らない）"
 
 do_links=0 do_hooks=0 do_kitty=0 do_systemd=0 any=0
-hook_parts=state,lang,guard
+hook_parts="" hooks_named=0
 yes=0 dry=0 uninstall=0
 for a in "$@"; do
 	case "$a" in
 	--all) do_links=1 do_hooks=1 do_kitty=1 do_systemd=1 any=1 ;;
 	--links) do_links=1 any=1 ;;
 	--hooks) do_hooks=1 any=1 ;;
-	--hooks=*) do_hooks=1 any=1 hook_parts=${a#--hooks=} ;;
+	--hooks=*) do_hooks=1 any=1 hook_parts=${a#--hooks=} hooks_named=1 ;;
 	--kitty) do_kitty=1 any=1 ;;
 	--systemd) do_systemd=1 any=1 ;;
 	--yes|-y) yes=1 ;;
@@ -58,6 +59,10 @@ for a in "$@"; do
 	esac
 done
 [ "$any" = 1 ] || { do_links=1 do_hooks=1 do_kitty=1 do_systemd=1; }
+# lang（返答の言語の検査）は使う人だけが --hooks=lang で入れる。外すときは、--all で全部の hook を外す
+if [ -z "$hook_parts" ] && [ "$hooks_named" = 0 ]; then
+	if [ "$uninstall" = 1 ]; then hook_parts=state,lang,guard; else hook_parts=state,guard; fi
+fi
 
 command -v python3 >/dev/null 2>&1 || { echo "install.sh: python3 が要る（3.10 以降）" >&2; exit 1; }
 # 部品の名前は先に確かめる（見せたあとで知らない名前で止まらないように）
@@ -145,6 +150,14 @@ step_hooks() {
 	n=$(printf '%s\n' "$out" | grep -c '^[-+~] ')
 	CHANGES=$((CHANGES + n))
 	[ "$rc" = 0 ] || { FAILED=1; echo "! settings.json を直してから流し直す（何も書いていない）"; }
+	case ",$hook_parts," in
+	*,lang,*)
+		# 言語を決めるまで claude-lang-check は何もしないので、入れるときに気づけるよう知らせる
+		if [ "$uninstall" = 0 ] && [ "$DRY" = 1 ] && ! PYTHONPATH="$REPO/lib" python3 -c \
+			'import os, sys, langcheck; c = langcheck.load_lang_config(os.environ)[0]; sys.exit(0 if c["language"] or not c["enabled"] else 1)'; then
+			note "! 設定の lang.language が無いので、claude-lang-check は何もしない（ja などを書く。docs/config.md）"
+		fi ;;
+	esac
 }
 
 # ---- kitty ------------------------------------------------------------------

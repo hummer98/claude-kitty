@@ -2714,6 +2714,7 @@ SIDE_TESTS = {
     "release_test": "Release",
     "install_test": "Install",
     "doctor_test": "Doctor",
+    "launch_test": "Launch",
 }
 
 

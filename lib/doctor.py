@@ -304,6 +304,14 @@ def check_hooks(ctx, rep):
             rep.ng(name, f"一部だけ（無い: {', '.join(missing)}）", f"tools/install.sh --hooks={part}")
         else:
             rep.warn(name, "入っていない", f"使うなら tools/install.sh --hooks={part}")
+            continue
+        if part == "lang" and state != "none":
+            from langcheck import load_lang_config
+            cfg, _problems = load_lang_config(ctx.env)
+            if cfg["enabled"] and not cfg["language"]:
+                rep.warn(f"{name} の言語", "lang.language が決まっていない（または読めない）ので、hook は何もしない"
+                         "（hook は Claude Code の環境で動くので、CLAUDE_LANG_CHECK_LANGUAGE で決めているならそちらが効く）",
+                         "設定の lang.language に ja・zh・ko のどれかを書く（docs/config.md）")
 
 
 # ---- systemd ------------------------------------------------------------------
@@ -336,7 +344,7 @@ def check_systemd(ctx, rep):
 # ---- 設定 ---------------------------------------------------------------------
 
 def check_config(ctx, rep):
-    from config import config_path, load_roster_config, load_state_config, load_view_config
+    from config import config_path, load_kitty_config, load_roster_config, load_state_config, load_view_config
     path = config_path(ctx.env)
     if not path.exists():
         rep.ok("設定ファイル", f"無い（既定値で動く。例は config.example.json、説明は docs/config.md）: {path}")
@@ -365,6 +373,7 @@ def check_config(ctx, rep):
     from sessionstats import load_settings
     strict("session_stats", lambda: load_settings(ctx.env, path))
     strict("roster", lambda: load_roster_config(ctx.env, path))
+    strict("kitty", lambda: load_kitty_config(ctx.env, path))
 
 
 # ---- デスクトップ・Chrome ------------------------------------------------------

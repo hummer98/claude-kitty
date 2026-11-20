@@ -1,10 +1,12 @@
 #!/bin/bash
-# claude-code を並べた kitty を起動し、仮想デスクトップ2に置く（デスクトップの移動は KDE Plasma の KWin 用）。
+# claude-code を並べた kitty を起動する。設定の kitty.maximize で最大化し、kitty.desktop で仮想デスクトップへ移す
+# （移動は KDE Plasma の KWin 用。どちらも既定はしない）。
 # claude-kitty doctor [--json] は、入っているもの・動くものを調べて直し方を出す。
 # kitty の場所は $CLAUDE_KITTY_KITTY で変えられる（既定は公式インストーラの ~/.local/kitty.app）。
 # claude-code の中から起動すると CLAUDE_* の環境変数を引き継ぎ、子の claude が
 # 「子セッション」扱いになって会話記録を保存しなくなるので、それらを消してから起動する。
-# 窓のクラスは $CLAUDE_KITTY_CLASS（既定 kitty-claude）、起動の形は $CLAUDE_KITTY_START_AS（既定 maximized）。
+# 窓のクラスは $CLAUDE_KITTY_CLASS（既定 kitty-claude）、起動の形は $CLAUDE_KITTY_START_AS（既定は kitty.maximize が
+# true なら maximized、そうでなければ normal）。
 # 試験用の kitty を別のクラスで起動したときは、本物の窓を動かさないよう KWin の移動をしない。
 if [ "$*" = --version ]; then  # 版は lib/version.py が VERSION から読む（ほかのコマンドと同じ所）
 	exec python3 "$(dirname "$(readlink -f "$0")")/../lib/version.py" claude-kitty
@@ -13,17 +15,26 @@ if [ "${1:-}" = doctor ]; then  # 入っているもの・動くものを調べ�
 	shift
 	exec python3 "$(dirname "$(readlink -f "$0")")/../lib/doctor.py" "$@"
 fi
+here=$(dirname "$(readlink -f "$0")")
 session=${1:-$HOME/.config/kitty/claude3.session}
 kitty=${CLAUDE_KITTY_KITTY:-$HOME/.local/kitty.app/bin/kitty}
 class=${CLAUDE_KITTY_CLASS:-kitty-claude}
-start_as=${CLAUDE_KITTY_START_AS:-maximized}
+read -r desktop maximize < <(python3 "$here/../lib/config.py" kitty-launch)
+if [ "${maximize:-0}" = 1 ]; then start_as=${CLAUDE_KITTY_START_AS:-maximized}; else start_as=${CLAUDE_KITTY_START_AS:-normal}; fi
 # この道具自身の設定（CLAUDE_KITTY_* / CLAUDE_VIEW_*）は残し、中の claude-view に届ける
 for v in $(env | grep -oE '^(CLAUDE[A-Z_]*|CLAUDECODE)=' | grep -vE '^CLAUDE_(KITTY|VIEW)_'); do unset "${v%=}"; done
 cd ~ || exit 1
 "$kitty" --detach --class "$class" --start-as "$start_as" --session "$session"
 [ "$class" = kitty-claude ] || exit 0
+case "$desktop" in ''|-|*[!0-9]*) exit 0 ;; esac   # kitty.desktop を設定していなければ、窓を動かさない
+command -v qdbus >/dev/null 2>&1 || { echo "claude-kitty: qdbus が無いので kitty.desktop（デスクトップ $desktop）へ移せない" >&2; exit 0; }
+js="${XDG_RUNTIME_DIR:-/tmp}/claude-kitty-desktop.$$.js"
+max=false
+[ "$maximize" = 1 ] && max=true
+trap 'rm -f "$js"' EXIT
+sed -e "s/@@DESKTOP@@/$desktop/" -e "s/@@MAXIMIZE@@/$max/" "$here/../lib/kitty_to_desktop.js" >"$js" || exit 1
 sleep 2
-id=$(qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$(dirname "$(readlink -f "$0")")/../lib/kitty_to_d2.js" claude_kitty_to_d2) &&
+id=$(qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$js" claude_kitty_to_desktop) &&
 qdbus org.kde.KWin /Scripting/Script"$id" org.kde.kwin.Script.run >/dev/null
 sleep 1
-qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript claude_kitty_to_d2 >/dev/null
+qdbus org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript claude_kitty_to_desktop >/dev/null

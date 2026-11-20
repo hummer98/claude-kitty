@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude Code の会話の記録（~/.claude/projects の jsonl）から、期間ごとの数字を Markdown で出す。
 
-  claude-session-stats                          今日（JST）までの 7 日と、その前の 7 日
+  claude-session-stats                          今日までの 7 日と、その前の 7 日（日付は設定の session_stats.timezone、既定はローカルの時刻）
   claude-session-stats --end yesterday          昨日までの 7 日（今日の分は途中までになるため）
   claude-session-stats --end last-sunday        今日より前の直近の日曜までの 7 日（週 1 回のタイマー用）
   claude-session-stats --end 2026-01-31 --days 14
@@ -17,7 +17,7 @@ import argparse
 import getpass
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -26,7 +26,7 @@ import sessionstats as ss  # noqa: E402
 
 def parse_args(argv):
     ap = argparse.ArgumentParser(prog="claude-session-stats", description="Claude Code の記録から期間ごとの数字を出す")
-    ap.add_argument("--end", help="直近の期間の最後の日（YYYY-MM-DD か today / yesterday / last-sunday、含む）。既定は今日（JST）")
+    ap.add_argument("--end", help="直近の期間の最後の日（YYYY-MM-DD か today / yesterday / last-sunday、含む）。既定は今日（session_stats.timezone、既定はローカルの時刻）")
     ap.add_argument("--start", help="直近の期間の最初の日（YYYY-MM-DD）。指定すると --days より優先")
     ap.add_argument("--days", type=int, default=7, help="直近の期間の日数（既定 7）。前の期間も同じ日数")
     ap.add_argument("--config", help="設定ファイル（既定 $CLAUDE_KITTY_CONFIG か ~/.config/claude-kitty/config.json）")
@@ -60,7 +60,15 @@ def main(argv=None, env=None, now=None):
         handle_version((sys.argv[1:] if argv is None else argv), "claude-session-stats")
         return 0
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    now = now or datetime.now(ss.JST)
+    try:
+        cfg = ss.load_settings(env, args.config, required=bool(args.config))
+    except ValueError as e:
+        print(f"claude-session-stats: {e}", file=sys.stderr)
+        return 2
+    # 日付の区切りは設定の session_stats.timezone（空ならこのマシンのローカルの時刻）
+    now = (now or datetime.now(timezone.utc)).astimezone(cfg["tz"])
+    if not cfg["timezone"]:
+        cfg["tz_label"] = f"このマシンのローカルの時刻 {now.strftime('%Z, UTC%z')}"
     today = now.date()
     try:
         end = _day(args.end, today) if args.end else today
@@ -75,11 +83,6 @@ def main(argv=None, env=None, now=None):
         return 2
     if ndays < 1:
         print("claude-session-stats: 期間が 1 日より短い", file=sys.stderr)
-        return 2
-    try:
-        cfg = ss.load_settings(env, args.config, required=bool(args.config))
-    except ValueError as e:
-        print(f"claude-session-stats: {e}", file=sys.stderr)
         return 2
     if args.projects:
         cfg["projects"] = os.path.expanduser(args.projects)

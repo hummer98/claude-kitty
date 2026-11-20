@@ -1,4 +1,4 @@
-"""claude-lang-check の中身。最後の返答が決めた言語（既定は日本語）で書かれているかを、AI を使わずに判定する。
+"""claude-lang-check の中身。最後の返答が決めた言語（lang.language。決めていなければ何もしない）で書かれているかを、AI を使わずに判定する。
 
 副作用は、設定と transcript を読むことと、「この返答ではもう止めた」の記録を書くことだけ。
 判定は誤って止めない方に倒す: 読めないもの・短いもの・コードや表だけのものは通す。
@@ -17,7 +17,9 @@ import tempfile
 import time
 from pathlib import Path
 
-DEFAULTS = {"enabled": True, "language": "ja", "threshold": 0.3, "head": 200, "min": 20}
+# language の既定は無し: 設定（lang.language か CLAUDE_LANG_CHECK_LANGUAGE）で言語を決めるまでは何もしない
+# （hook を入れただけで、日本語を使わない人の返答を書き直させないため）
+DEFAULTS = {"enabled": True, "language": None, "threshold": 0.3, "head": 200, "min": 20}
 
 # 対象の言語の字。日本語は漢字も含める（漢字だけの語句も日本語の文として数えるため）
 SCRIPTS = {
@@ -80,6 +82,9 @@ def load_lang_config(env, path=None):
         if key == "enabled":
             v = value if isinstance(value, bool) else None
         elif key == "language":
+            if value is None or value == "":
+                out[key] = None           # 決めていない（既定と同じ）。誤りではない
+                return
             v = value if isinstance(value, str) and value in SCRIPTS else None
         elif key == "threshold":
             v = _num(value, 0.0, 1.0, float)
@@ -184,6 +189,8 @@ def judge(text, cfg):
     min の 2 倍の字分（既定で英語の約 20 語）続いたときも止める。(2) (3) は英語の前置き＋日本語の本文を
     捕まえるため（前置きが段落を分けずに続くと (1) (2) の割合が閾値を超えることがある）。
     """
+    if not cfg.get("language"):
+        return False, "言語が決まっていない（lang.language か CLAUDE_LANG_CHECK_LANGUAGE）。何もしない"
     if not isinstance(text, str) or not text.strip():
         return False, "空"
     lang = cfg["language"]
@@ -350,8 +357,8 @@ def decide(stdin_text, env):
     cfg, problems = load_lang_config(env)
     for p in problems:
         log_error(env, p)
-    if not cfg["enabled"]:
-        return None
+    if not cfg["enabled"] or not cfg["language"]:
+        return None                       # 言語を決めていなければ何もしない
     sid = data.get("session_id")
     tpath = data.get("transcript_path")
     if not (isinstance(sid, str) and SESSION_ID.match(sid) and isinstance(tpath, str) and tpath):

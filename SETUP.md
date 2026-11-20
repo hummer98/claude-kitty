@@ -34,7 +34,7 @@ claude-kitty doctor                        # 足りないものと直し方
 | 部品 | 行うこと | 外す（`--uninstall`） |
 |---|---|---|
 | `--links` | `bin/` の全コマンドを `~/.local/bin`（`$CLAUDE_KITTY_BIN_DIR`）にリンク。既にある別のファイルは上書きしない | このリポジトリを指すリンクだけ消す |
-| `--hooks[=state,lang,guard]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既存のキーと hook は残し、同じ道具・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じ道具の hook を外す（手で入れたものも） |
+| `--hooks[=state,lang,guard]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。既存のキーと hook は残し、同じ道具・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じ道具の hook を外す（手で入れたものも）。`--all --uninstall` は lang も外す |
 | `--kitty` | kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）を足し（末尾なので、自分の `listen_on`・`enabled_layouts`・`allow_remote_control`・`filter_notification` は上書きされる。あれば先に「!」で見せる）、`claude_state_watcher.py` と `claude3.session` のリンクを張る。kitty.conf がこのリポジトリの `kitty/kitty.conf` へのリンクなら触らない | 足した行とリンクだけ外す |
 | `--systemd` | `contrib/systemd/` のユニットを `~/.config/systemd/user/` に、パスを置き換えて写し、`daemon-reload` と `enable --now`（Linux だけ）。手で入れた中身の違うユニットは上書きしない | 自分が入れたユニットを止めて消す |
 
@@ -203,10 +203,10 @@ kitty と `kitten @` の部分（ペインの一覧・移動・分割比・フ�
 
 | ファイル | 関数・箇所 | Linux で使っているもの | macOS での置き換え案 |
 |---|---|---|---|
-| `bin/claude-kitty` | 末尾の `qdbus ... loadScript lib/kitty_to_d2.js` | KWin スクリプトで仮想デスクトップ 2 へ移して最大化 | 省く（Space の指定は公式 API が無い）か、Hammerspoon で最大化。`--detach` は macOS では使えないので `open -n -a kitty --args --session "$session"` などで起動する |
+| `bin/claude-kitty` | 末尾の `qdbus ... loadScript`（`lib/kitty_to_desktop.js`） | 設定の `kitty.desktop` があれば、KWin スクリプトでその仮想デスクトップへ移す（既定は移さない） | 省く（Space の指定は公式 API が無い）か、Hammerspoon で最大化。`--detach` は macOS では使えないので `open -n -a kitty --args --session "$session"` などで起動する |
 | `bin/claude-kitty` | `kitty=${CLAUDE_KITTY_KITTY:-~/.local/kitty.app/bin/kitty}` | 公式インストーラの場所 | `CLAUDE_KITTY_KITTY=/Applications/kitty.app/Contents/MacOS/kitty` |
 | `bin/claude-kitty` | `readlink -f "$0"` | GNU coreutils | macOS 12.3 より前には `-f` が無い。`python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$0"` などに置き換える |
-| `lib/kitty_to_d2.js` | 全体 | KWin スクリプト | 不要（上と同じ） |
+| `lib/kitty_to_desktop.js` | 全体 | KWin スクリプト | 不要（上と同じ） |
 | `lib/kwin.py` | `kwin()` | `qdbus` で KWin スクリプトを読み込み、`journalctl --user` から `console.info` の出力を受け取る | Hammerspoon の `hs` コマンド（`hs -c 'lua'`、`hs.ipc` を有効にする）か `osascript`（AppleScript / JXA）。どちらも結果を標準出力で直接返せるので、journal を読む仕組み（`core.parse_journal`）は要らなくなる |
 | `lib/kwin.py` | `active_window_pid()` | `workspace.activeWindow.pid` | `hs -c 'print(hs.window.frontmostWindow():application():pid())'`、または `osascript -e 'tell application "System Events" to unix id of first process whose frontmost is true'` |
 | `bin/claude-view` | `guarded_in_front()` | `pgrep -f` + `kwin.active_window_pid()` | `pgrep -f` はそのまま。前面の pid だけ上の置き換え |

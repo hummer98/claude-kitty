@@ -23,7 +23,7 @@ git clone https://github.com/hummer98/claude-kitty ~/claude-kitty
 claude-kitty doctor                       # 足りないものと直し方を 1 行ずつ出す（NG が無ければ終了コード 0）
 ```
 
-- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-lang-check`・`claude-guard`）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf` の 1 行を足す、systemd のユーザーユニットを入れる（Linux だけ。macOS は launchd の案内を出す）。部品ごとに `--links` `--hooks[=state,lang,guard]` `--kitty` `--systemd` で選べる。
+- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-guard`。返答の言語を調べる `claude-lang-check` は `--hooks=lang` と明示したときだけ）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf` の 1 行を足す、systemd のユーザーユニットを入れる（Linux だけ。macOS は launchd の案内を出す）。部品ごとに `--links` `--hooks[=state,lang,guard]` `--kitty` `--systemd` で選べる。
 - 既にあるものは壊さない: 別のファイルは上書きせず、既存の hook とキーは残し、同じ hook は二重に足さない。書き換える設定は `<名前>.bak-<日時>` に残す。何度流しても同じで、`--uninstall` で同じ部品を外せる。
 - kitty の設定（リモート操作とソケット）は kitty を起動し直してから効く。そのあと `claude-kitty` で kitty を開き、`claude-kitty doctor` をもう一度。
 - 役割名などの設定は `~/.config/claude-kitty/config.json`（無くても既定値で動く）。全項目の例は [config.example.json](config.example.json)、意味と既定値は [docs/config.md](docs/config.md)。
@@ -38,7 +38,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | `bin/claude-state` | セッションの状態（作業中・待受中・完了（未読）・idle）をペインの背景色とステータス行の色で見せる（Claude Code の hook から呼ぶ）。`claude-state watch` は kitty の外の常駐で、見た完了のペインを idle に戻し、消えた色を塗り直す（[下の節](#claude-state状態の色)） | 入れ子の claude の判定に `/proc` |
 | `bin/claude-show` | 見てほしい HTML・画像を自分のペインの上に開く（[下の節](#claude-show見てほしいものを開く)） | 保護する窓の確認だけ KWin |
 | `bin/claude-guard` | PreToolUse hook。名前の付いたガードが働いている間、決めたパスへの書き込みと決めたコマンドを止める（[docs/guard-hook.md](docs/guard-hook.md)） | 働く条件の `pgrep` |
-| `bin/claude-lang-check` | Stop hook で最後の返答の言語を調べ、決めた言語（既定は日本語）でなければ書き直させる（[docs/lang-check.md](docs/lang-check.md)） | なし |
+| `bin/claude-lang-check` | Stop hook で最後の返答の言語を調べ、設定の `lang.language` で決めた言語でなければ書き直させる（決めていなければ何もしない。[docs/lang-check.md](docs/lang-check.md)） | なし |
 | `bin/claude-session-stats` | 会話の記録から、言い直し・英語の返答・返答の長さなどを期間ごとに数えて Markdown に書く（[docs/session-stats.md](docs/session-stats.md)） | なし |
 | `bin/claude-roster` | kitty の中のセッションの名簿を保ち、kitty を起動し直したあとに元の配置・フォルダ・モデル・会話へ戻す（[docs/roster.md](docs/roster.md)） | `/proc`、保護する窓の確認だけ KWin |
 
@@ -46,7 +46,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 
 ## claude-kitty
 
-`claude-kitty [session]` — kitty を CLAUDE_* 環境変数なしで起動し（Claude Code の中から起動すると、中の claude が子セッション扱いになり会話記録が残らなくなるのを避ける）、仮想デスクトップ 2 に最大化する。既定の配置は `kitty/claude3.session`（左 1/4 + 右上下）。
+`claude-kitty [session]` — kitty を CLAUDE_* 環境変数なしで起動し（Claude Code の中から起動すると、中の claude が子セッション扱いになり会話記録が残らなくなるのを避ける）。設定の `kitty.maximize` で最大化し、`kitty.desktop` で KDE Plasma の仮想デスクトップへ移す（どちらも既定はしない。[docs/config.md](docs/config.md#kittyclaude-kitty-kitty-の起動)）。既定の配置は `kitty/claude3.session`（左 1/4 + 右上下）。
 
 - `claude-kitty doctor [--json]`: 入っているもの・動くもの（kitty の版とリモート操作、`layout_state.pairs`、python3・node、コマンドのリンク、hook、kitty.conf の watcher、systemd、設定ファイル、KWin、Chrome）を 1 行ずつ調べ、足りなければ直し方を出す。読むだけ。NG があれば終了コード 1。
 - `kitty/example.session`: 統括 1 + 担当 5 の例（各ペインが `claude-wait` で待ってから resume する）。手元の版は `kitty/<名前>.session` に置けば git に入らない（`.gitignore`）。

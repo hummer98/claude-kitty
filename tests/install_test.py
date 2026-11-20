@@ -242,8 +242,9 @@ class Install(unittest.TestCase):
         self.assertEqual(data["statusLine"], {"type": "command", "command": "x"})
         self.assertEqual(data["hooks"]["PreToolUse"][0], {"matcher": "Bash", "hooks": [{"type": "command", "command": "my-check"}]})
         stops = [h["command"] for g in data["hooks"]["Stop"] for h in g["hooks"]]
-        self.assertEqual(stops, ["~/.local/bin/claude-state hook Stop", f"{REPO}/bin/claude-lang-check"])
-        self.assertEqual(M.status(data), {p: ("all", []) for p in M.PARTS})
+        self.assertEqual(stops, ["~/.local/bin/claude-state hook Stop"])      # lang は --all に入らない
+        st = M.status(data)
+        self.assertEqual((st["state"][0], st["guard"][0], st["lang"][0]), ("all", "all", "none"))
         self.assertEqual(len(list(self.settings.parent.glob("settings.json.bak-*"))), 1)
         # kitty: 自分の設定の後ろに include の 1 行
         conf = (self.kdir / "kitty.conf").read_text()
@@ -316,6 +317,23 @@ class Install(unittest.TestCase):
         self.assertEqual(self.settings.read_text(), "{broken")
         self.assertFalse(self.bin.exists())           # ほかの部品も行わない
         self.assertFalse((self.kdir / "kitty.conf").exists())
+
+    def test_lang_only_when_named_and_uninstall_all_removes_it(self):
+        r = self.run_install("--hooks", "--yes")
+        self.assertEqual(M.status(json.loads(self.settings.read_text()))["lang"][0], "none")
+        self.assertNotIn("claude-lang-check", r.stdout)
+        r = self.run_install("--hooks=lang", "--yes")
+        self.assertEqual(M.status(json.loads(self.settings.read_text()))["lang"][0], "all")
+        self.assertIn("lang.language が無いので、claude-lang-check は何もしない", r.stdout)   # 入れるときに気づける
+        cfg = self.home / ".config/claude-kitty/config.json"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text('{"lang": {"language": "ja"}}')
+        self.run_install("--hooks=lang", "--uninstall", "--yes")
+        r = self.run_install("--hooks=lang", "--yes")
+        self.assertNotIn("lang.language が無い", r.stdout)
+        self.assertEqual(self.run_install("--hooks=", "--yes").returncode, 2)       # 空の指定は誤り
+        self.run_install("--all", "--uninstall", "--yes")                 # 外すときの --all は lang も外す
+        self.assertEqual(json.loads(self.settings.read_text()), {})
 
     def test_select_parts(self):
         r = self.run_install("--hooks=state,guard", "--yes")

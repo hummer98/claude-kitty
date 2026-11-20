@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 from langcheck import (DEFAULTS, TAG, decide, judge, load_lang_config, read_transcript,  # noqa: E402
                        reverse_lines, strip_noise)
 
-CFG = dict(DEFAULTS)
+CFG = dict(DEFAULTS, language="ja")   # 既定は言語なし（何もしない）なので、テストは日本語を決めて試す
 BIN = ROOT / "bin" / "claude-lang-check"
 
 JA = "実装を終えました。単体テストはすべて通っています。レビューの結果は、届いたらまとめて報告します。"
@@ -134,7 +134,8 @@ class Hook(unittest.TestCase):
         self.runtime = d / "run"
         self.runtime.mkdir()
         self.transcript = d / "s.jsonl"
-        self.env = {"XDG_RUNTIME_DIR": str(self.runtime), "CLAUDE_KITTY_CONFIG": str(d / "none.json")}
+        self.env = {"XDG_RUNTIME_DIR": str(self.runtime), "CLAUDE_KITTY_CONFIG": str(d / "none.json"),
+                    "CLAUDE_LANG_CHECK_LANGUAGE": "ja"}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -262,10 +263,31 @@ class Config(unittest.TestCase):
             self.assertEqual(load_lang_config({"CLAUDE_KITTY_CONFIG": str(p)})[0], DEFAULTS)
 
 
+class NoLanguage(unittest.TestCase):
+    """既定（言語を決めていない）では、hook を入れても何もしない（日本語を使わない人の返答を書き直させない）。"""
+
+    def test_default_language_is_unset_and_does_nothing(self):
+        self.assertIsNone(DEFAULTS["language"])
+        with tempfile.TemporaryDirectory() as d:     # 既定と同じ null・空文字を書いても、誤りと数えない
+            for v in (None, ""):
+                p = Path(d) / "c.json"
+                p.write_text(json.dumps({"lang": {"language": v}}))
+                self.assertEqual(load_lang_config({"CLAUDE_KITTY_CONFIG": str(p)}), (DEFAULTS, []), v)
+        self.assertEqual(judge(EN, dict(DEFAULTS))[0], False)
+        with tempfile.TemporaryDirectory() as d:
+            env = {"XDG_RUNTIME_DIR": d, "CLAUDE_KITTY_CONFIG": str(Path(d) / "none.json")}
+            t = Path(d) / "s.jsonl"
+            t.write_text("")
+            payload = json.dumps({"hook_event_name": "Stop", "session_id": "abc", "transcript_path": str(t),
+                                  "last_assistant_message": EN})
+            self.assertIsNone(decide(payload, env))
+
+
 class Command(unittest.TestCase):
     def judge_bin(self, args, stdin=""):
+        env = dict(os.environ, CLAUDE_KITTY_CONFIG="/nonexistent/config.json", CLAUDE_LANG_CHECK_LANGUAGE="ja")
         return subprocess.run([sys.executable, str(BIN), "judge", *args], input=stdin, capture_output=True,
-                              text=True, timeout=30)
+                              text=True, timeout=30, env=env)
 
     def test_judge_subcommand(self):
         r = self.judge_bin([], EN)
@@ -279,7 +301,8 @@ class Command(unittest.TestCase):
 
 
     def run_bin(self, stdin, env=None):
-        e = dict(os.environ, **(env or {}))
+        e = dict(os.environ, CLAUDE_KITTY_CONFIG="/nonexistent/config.json", CLAUDE_LANG_CHECK_LANGUAGE="ja")
+        e.update(env or {})
         return subprocess.run([sys.executable, str(BIN)], input=stdin, capture_output=True, text=True,
                               env=e, timeout=30)
 

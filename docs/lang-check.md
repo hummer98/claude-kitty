@@ -1,6 +1,6 @@
 # claude-lang-check（返答の言語の確認）
 
-Claude Code の返答が、ときどき決めた言語（既定は日本語）でなく英語になる。英語のシステムの促し（"The task tools haven't been used recently…" など）の後に起きやすい。
+Claude Code の返答が、ときどき決めた言語（日本語など）でなく英語になる。英語のシステムの促し（"The task tools haven't been used recently…" など）の後に起きやすい。
 `bin/claude-lang-check` は Stop hook で最後の返答を調べ、決めた言語でなければ、書き直す理由を返して書き直させる。
 
 - 判定はコマンド型の hook の中だけで行う（Python 3 の標準ライブラリ）。prompt / agent 型の hook（AI に判定させるもの）はトークンを使うので使わない。
@@ -61,7 +61,8 @@ stdout に次の JSON を出して exit 0（Stop の decision control）。
 
 ## 設定
 
-`~/.config/claude-kitty/config.json`（`$CLAUDE_KITTY_CONFIG` か `$XDG_CONFIG_HOME` で場所を変えられる）の `lang`。どれも省ける。
+`~/.config/claude-kitty/config.json`（`$CLAUDE_KITTY_CONFIG` か `$XDG_CONFIG_HOME` で場所を変えられる）の `lang`。
+**`language` を決めるまでは何もしない**（既定は無し。hook を入れただけで、ほかの言語を使う人の返答を書き直させないため）。ほかの項目は省ける。`tools/install.sh` は `--hooks=lang` と明示したときだけ、この hook を入れる。
 
 ```json
 {"lang": {"enabled": true, "language": "ja", "threshold": 0.3, "head": 200, "min": 20}}

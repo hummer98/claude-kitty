@@ -1,11 +1,11 @@
 # 設定ファイル（config.json）
 
-claude-kitty の道具は、1 つの設定ファイルの節（`view`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`）から読みます。
+claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`）から読みます。
 **どの節も、どの項目も省けます。** ファイルが無ければ、すべて下の表の既定値で動きます。
 
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
 - 全項目の例: リポジトリの [config.example.json](../config.example.json)。JSON はコメントを書けないので、意味はこのファイルに書きます。
-  - 使う節だけを写して、値を自分のものに変えてください。例をまるごと写しても動きますが、例のガード（`guard_hook.guards.presenting`）は `enabled: false` にしてあるので何も止めません。
+  - 使う節だけを写して、値を自分のものに変えてください。例をまるごと写しても動きますが、例のガード（`guard_hook.guards.presenting`）は `enabled: false` にしてあるので何も止めません。例の `lang.language` は `null`（何もしない）なので、使うなら `"ja"` などに変えます。
 - 書いたあとは `claude-kitty doctor` で、各道具がその設定を読めるかを確かめられます（「設定: <節>」の行）。
 - 読み直すのは道具を呼ぶたび（hook は毎回）。常駐の `claude-state watch` だけは起動時に読むので、`state` を変えたら `systemctl --user restart claude-state-watch`。
 
@@ -21,6 +21,15 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`state`�
 
 環境変数が設定より優先します: `CLAUDE_VIEW_LEFT`、`CLAUDE_VIEW_RESTORE`（`"a,b/c"`）、`CLAUDE_VIEW_GUARD`（`none` で止める）。空文字は未設定と同じです。
 
+## kitty（claude-kitty: kitty の起動）
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `desktop` | `null` | 起動した kitty の窓を移す仮想デスクトップの番号（1 から。KDE Plasma の KWin だけ）。`null` なら移さない |
+| `maximize` | `false` | `true` なら最大化して起動する（`--start-as maximized`。`desktop` があれば KWin でも最大化する） |
+
+環境変数 `CLAUDE_KITTY_START_AS` が `maximize` より優先します。
+
 ## state（claude-state: 状態の色）
 
 | 項目 | 既定 | 意味 |
@@ -33,6 +42,8 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`state`�
 | `notice.contains` | `["返事は不要", "返事不要"]` | 他のセッションからのメッセージの本文にこれのどれかがあれば「通知」とみて、色を変えない |
 | `notice.prefix` | `["【通知】"]` | 本文がこれのどれかで始まれば「通知」 |
 | `subagent_colors.running` / `.ended` | `110` / `245` | `claude-state subagents`（ステータス行のサブエージェントの要約）の色。`null` は色なし |
+
+`notice` の既定は、日本語でセッション同士が連絡するときの運用の例です。自分の決まり（使う言い回し）に合わせて変えてください。
 
 状態の色の既定（`colors`）:
 
@@ -50,12 +61,12 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`state`�
 | 項目 | 既定 | 意味 |
 |---|---|---|
 | `enabled` | `true` | `false` で調べない |
-| `language` | `"ja"` | 返答に求める言語: `ja`・`zh`・`ko` |
+| `language` | `null` | 返答に求める言語: `ja`・`zh`・`ko`。**決めていなければ何もしない**（hook を入れただけでは書き直させない） |
 | `threshold` | `0.3` | 返答の頭の部分で、その言語の字の割合がこれ未満なら書き直させる（0〜1） |
 | `head` | `200` | 割合を数える頭の字数 |
 | `min` | `20` | これより短い返答は調べない |
 
-環境変数が優先します: `CLAUDE_LANG_CHECK=off`、`CLAUDE_LANG_CHECK_LANGUAGE`、`CLAUDE_LANG_CHECK_THRESHOLD`、`CLAUDE_LANG_CHECK_HEAD`、`CLAUDE_LANG_CHECK_MIN`。判定の詳細は [lang-check.md](lang-check.md)。
+hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります（`--all` には入りません）。環境変数が優先します: `CLAUDE_LANG_CHECK=off`、`CLAUDE_LANG_CHECK_LANGUAGE`、`CLAUDE_LANG_CHECK_THRESHOLD`、`CLAUDE_LANG_CHECK_HEAD`、`CLAUDE_LANG_CHECK_MIN`。判定の詳細は [lang-check.md](lang-check.md)。
 
 ## guard_hook（claude-guard: 状態で働く安全装置）
 
@@ -89,6 +100,7 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`state`�
 | `home_project` | `""`（ホームのパスから作る） | 統括の記録があるフォルダの名前 |
 | `out_dir` | `""`（`~/.local/share/claude-kitty/stats`） | 書き出すフォルダ |
 | `notes` | `[]` | 書き出しの「数え方」の頭に足す文 |
+| `timezone` | `""`（このマシンのローカルの時刻） | 日付の区切りのタイムゾーン（`"Asia/Tokyo"` など、IANA の名前） |
 
 知らない項目があると読み込みで止まります（打ち間違いに気づくため）。詳細は [session-stats.md](session-stats.md)。
 
@@ -108,7 +120,7 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`state`�
 | 環境変数 | 意味 |
 |---|---|
 | `CLAUDE_KITTY_KITTY` / `CLAUDE_KITTY_KITTEN` | kitty / kitten の場所（既定は公式インストーラの `~/.local/kitty.app/bin/`、無ければ PATH） |
-| `CLAUDE_KITTY_CLASS` / `CLAUDE_KITTY_START_AS` | `claude-kitty` が起動する kitty の窓のクラス（既定 `kitty-claude`）と起動の形（既定 `maximized`） |
+| `CLAUDE_KITTY_CLASS` / `CLAUDE_KITTY_START_AS` | `claude-kitty` が起動する kitty の窓のクラス（既定 `kitty-claude`）と起動の形（既定は `kitty.maximize` で `maximized` か `normal`） |
 | `CLAUDE_KITTY_BIN_DIR` | `tools/install.sh` と `claude-kitty doctor` が見るコマンドのリンクの場所（既定 `~/.local/bin`） |
 | `CLAUDE_CONFIG_DIR` | Claude Code の設定のフォルダ（既定 `~/.claude`。`settings.json` の hook をここで探す） |
 | `CLAUDE_GUARD_ALLOW` | claude-guard のガードを名前で通す（[guard-hook.md](guard-hook.md#通す道)） |

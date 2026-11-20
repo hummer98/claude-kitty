@@ -17,9 +17,13 @@
     "notice": {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]},
     "subagent_colors": {"running": 110, "ended": 245}
   },
+  "kitty": {
+    "desktop": null,
+    "maximize": false
+  },
   "lang": {
     "enabled": true,
-    "language": "ja",
+    "language": null,
     "threshold": 0.3,
     "head": 200,
     "min": 20
@@ -54,7 +58,8 @@
     "projects": "~/.claude/projects",
     "home_project": "",
     "out_dir": "",
-    "notes": []
+    "notes": [],
+    "timezone": ""
   },
   "roster": {
     "models": {"dev-a": "opus"},

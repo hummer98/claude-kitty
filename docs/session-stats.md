@@ -11,7 +11,7 @@ Claude Code の会話の記録（`~/.claude/projects/*/*.jsonl`）を読み、�
 ## 使い方
 
 ```
-claude-session-stats                              # 今日（JST）までの 7 日と、その前の 7 日
+claude-session-stats                              # 今日までの 7 日と、その前の 7 日
 claude-session-stats --end yesterday              # 昨日までの 7 日（今日の分は途中までになるため）
 claude-session-stats --end last-sunday            # 今日より前の直近の日曜まで（月〜日の週。タイマー用）
 claude-session-stats --end 2026-01-31 --days 14
@@ -40,7 +40,7 @@ claude-session-stats --stdout
 | 他のセッションへのメッセージ | SendMessage のうち、宛先がサブエージェントでないもの |
 | 用語集 | 設定の用語集の道具を、統括の返答ごとにかけた件数（設定したときだけ） |
 
-日付はすべて JST。更新が前の期間より前のファイルは読まない。
+日付の区切りは設定の `timezone`（`"Asia/Tokyo"` など。既定はこのマシンのローカルの時刻）。更新が前の期間より前のファイルは読まない。
 
 ## 設定
 
@@ -77,6 +77,7 @@ claude-session-stats --stdout
 | `redact` | `[]` | 伏せる語（ユーザー名とホームのフォルダ名は必ず伏せる） |
 | `glossary` | なし | 用語集の道具。`module` は `parse_glossary(text)` と `check_text(text, rules, scene=...)`（見つけたもののリストを返す）を持つ .py、`file` はその用語集、`scene` は既定 `reply` |
 | `notes` | `[]` | 「数え方」の頭に足す文 |
+| `timezone` | `""`（ローカルの時刻） | 日付の区切りのタイムゾーン（`"Asia/Tokyo"` など、IANA の名前） |
 | `projects` | `~/.claude/projects` | 記録のフォルダ |
 | `home_project` | ホームから作る | 統括の記録があるフォルダの名前 |
 | `out_dir` | `~/.local/share/claude-kitty/stats` | 書くフォルダ |

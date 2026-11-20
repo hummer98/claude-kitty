@@ -171,3 +171,46 @@ def load_roster_config(env, path=None):
         raise ValueError(f"{path} の roster.keep_absent_hours は 0 以上の数")
     out.update(models=r.get("models", {}), ignore=r.get("ignore", []), generations=g, keep_absent_hours=h)
     return out
+
+
+DEFAULT_KITTY = {"desktop": None, "maximize": False}
+
+
+def load_kitty_config(env, path=None):
+    """claude-kitty の起動の設定 {"desktop", "maximize"} を返す（無ければ既定: 移さない・最大化しない）。
+
+      {"kitty": {"desktop": 2, "maximize": true}}
+
+    desktop は KDE Plasma の仮想デスクトップの番号（1 から）。壊れていれば ValueError。"""
+    path = Path(path) if path else config_path(env)
+    out = dict(DEFAULT_KITTY)
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return out
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    k = data.get("kitty", {}) if isinstance(data, dict) else {}
+    if not isinstance(k, dict):
+        raise ValueError(f"{path} の kitty がオブジェクトでない")
+    d = k.get("desktop")
+    if d is not None and (isinstance(d, bool) or not isinstance(d, int) or not 1 <= d <= 64):
+        raise ValueError(f"{path} の kitty.desktop は 1〜64 の番号か null: {d!r}")
+    m = k.get("maximize", False)
+    if not isinstance(m, bool):
+        raise ValueError(f"{path} の kitty.maximize は true / false: {m!r}")
+    out.update(desktop=d, maximize=m)
+    return out
+
+
+if __name__ == "__main__":
+    # bin/claude-kitty（bash）用: "kitty-launch" で「デスクトップの番号（無ければ -） 最大化（1/0）」を 1 行出す。
+    # 設定が壊れていれば stderr に理由を出し、既定（移さない・最大化しない）を出す（起動は止めない）
+    import sys
+    if sys.argv[1:] == ["kitty-launch"]:
+        try:
+            c = load_kitty_config(os.environ)
+        except ValueError as e:
+            print(f"claude-kitty: {e}（既定で起動する）", file=sys.stderr)
+            c = dict(DEFAULT_KITTY)
+        print(f"{c['desktop'] or '-'} {1 if c['maximize'] else 0}")

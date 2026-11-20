@@ -19,6 +19,12 @@
 
 ### 変更
 
+他のプロジェクトで初めて使う人に合わせて、特定の運用に寄っていた既定を外した（どれも設定で前と同じにできる）。
+
+- `claude-lang-check`: `lang.language` の既定を無しにした。言語を決めるまでは何もしない（hook を入れただけで、ほかの言語を使う人の返答を書き直させない）。`tools/install.sh` は `--hooks=lang` と明示したときだけ入れる（`--all` には入らない。外すときの `--all --uninstall` は外す）。`claude-kitty doctor` は、入っていないことを注意として出す。
+- `claude-kitty`: 仮想デスクトップ 2 への移動と最大化をやめた。設定の `kitty.desktop`（KDE Plasma の仮想デスクトップの番号）と `kitty.maximize` で入れる（既定は移さない・最大化しない。`--start-as normal`）。KWin のスクリプトは `lib/kitty_to_desktop.js` になった。
+- `claude-session-stats`: 日付の区切りを JST に固定していたのをやめ、既定をそのマシンのローカルの時刻にした。設定の `session_stats.timezone`（`"Asia/Tokyo"` など）で固定できる。
+- docs: `state.notice` の既定（「返事は不要」「【通知】」）は日本語の運用の例で、自分の決まりに合わせて変えるものだと書いた。
 - `claude-roster`: 設定の `roster` 節の読み込みを `lib/config.py` の `load_roster_config` に移した（doctor とテストから同じ関数で読むため。動きは同じ）。
 
 ### 修正
@@ -33,9 +39,14 @@
 
 0.2.0 から上げるとき。`git pull` のあと、次の 1 行で足りる（もう入っているものはそのまま）。
 
-1. `tools/install.sh --all --dry-run` で何が足されるかを見て、`tools/install.sh --all` を流す。手で入れた hook・リンク・ユニットはそのまま「入っている」と数え、足りないものだけを足す（0.2.0 の手順で `claude-lang-check` を hook に絶対パスで入れ、`~/.local/bin` にリンクしていなければ、そのリンクが足される）。
-2. `claude-kitty doctor` で NG が無いことを確かめる。
-3. kitty.conf を自分のものにしている（リポジトリの `kitty/kitty.conf` へのリンクでない）なら、install.sh が足した include を読ませるために kitty を起動し直す（`allow_remote_control` と `listen_on` は起動時にだけ読まれる）。
+1. **前の既定のままにしたいとき**は、`~/.config/claude-kitty/config.json` に書き足す（無い節は足す）。
+   - 返答の日本語の検査: `"lang": {"language": "ja"}`（書かないと claude-lang-check は何もしなくなる）
+   - kitty をデスクトップ 2 に最大化して開く: `"kitty": {"desktop": 2, "maximize": true}`
+   - session-stats の日付を JST で区切る: `"session_stats": {"timezone": "Asia/Tokyo"}`
+   - 0.2.0 の claude-session-stats は知らない項目で止まるので、`timezone` を書くのは `git pull` の後にする。
+2. `tools/install.sh --all --dry-run` で何が足されるかを見て、`tools/install.sh --all` を流す。手で入れた hook・リンク・ユニットはそのまま「入っている」と数え、足りないものだけを足す（0.2.0 の手順で `claude-lang-check` を hook に絶対パスで入れ、`~/.local/bin` にリンクしていなければ、そのリンクが足される）。lang の hook は `--all` では足さない（入っていれば残す）。
+3. `claude-kitty doctor` で NG が無いことを確かめる。
+4. kitty.conf を自分のものにしている（リポジトリの `kitty/kitty.conf` へのリンクでない）なら、install.sh が足した include を読ませるために kitty を起動し直す（`allow_remote_control` と `listen_on` は起動時にだけ読まれる）。
 
 ## [0.2.0] - 2026-11-20
 

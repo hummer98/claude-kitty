@@ -58,7 +58,8 @@ class FakeWorld:
 
     def env(self, **extra):
         e = {"HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin", "XDG_RUNTIME_DIR": str(self.run_dir),
-             "KITTY_LISTEN_ON": "unix:/fake/kitty-1", "CLAUDE_KITTY_CONFIG": str(self.root / "config.json")}
+             "KITTY_LISTEN_ON": "unix:/fake/kitty-1", "CLAUDE_KITTY_CONFIG": str(self.root / "config.json"),
+             "CLAUDE_LANG_CHECK_LANGUAGE": "ja"}
         e.update(extra)
         return {k: v for k, v in e.items() if v is not None}
 
@@ -145,6 +146,18 @@ class Doctor(unittest.TestCase):
         # 1 行ずつ、直し方は → の後
         line = next(x for x in text.splitlines() if x.startswith("NG   コマンドのリンク"))
         self.assertIn("  → tools/install.sh --links", line)
+
+    def test_lang_is_only_a_warning(self):
+        # lang は --hooks=lang で入れる人だけのもの。入っていなくても、言語が無くても NG にしない
+        _l, data = M.install({}, str(ROOT), ["state", "guard"])
+        (self.w.home / ".claude/settings.json").write_text(json.dumps(data))
+        rc, text = self.result(self.w.ctx())
+        self.assertEqual(rc, 0, text)
+        self.assertIn("注意 hook: claude-lang-check: 入っていない  → 使うなら tools/install.sh --hooks=lang", text)
+        _l, data = M.install({}, str(ROOT), list(M.PARTS))
+        (self.w.home / ".claude/settings.json").write_text(json.dumps(data))
+        items = self.by_name(self.w.ctx(CLAUDE_LANG_CHECK_LANGUAGE=None))
+        self.assertEqual(items["hook: claude-lang-check の言語"]["status"], "warn")
 
     def test_old_kitty_without_pairs(self):
         self.w.answers["ls"] = (0, json.dumps(LS_OLD))
@@ -247,7 +260,7 @@ class ConfigExample(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_every_section_present(self):
-        self.assertEqual(set(self.data), {"view", "state", "lang", "guard_hook", "session_stats", "roster"})
+        self.assertEqual(set(self.data), {"view", "kitty", "state", "lang", "guard_hook", "session_stats", "roster"})
 
     def test_loaders_read_example(self):
         from config import load_roster_config, load_state_config, load_view_config
@@ -274,6 +287,8 @@ class ConfigExample(unittest.TestCase):
         self.assertEqual(set(self.data["session_stats"]), set(DEFAULTS))
         r = load_roster_config(self.env, self.PATH)
         self.assertEqual(r, self.data["roster"])
+        from config import load_kitty_config
+        self.assertEqual(load_kitty_config(self.env, self.PATH), self.data["kitty"])
 
     def test_example_guard_blocks_nothing_when_copied(self):
         import guardhook as gh
@@ -294,7 +309,7 @@ class ConfigExample(unittest.TestCase):
 
     def test_defaults_in_docs_match_code(self):
         # 表の「既定」の列が、コードの既定と食い違わない（よく変わるものだけ）
-        from config import DEFAULT_ROSTER, DEFAULT_VIEW
+        from config import DEFAULT_KITTY, DEFAULT_ROSTER, DEFAULT_VIEW
         from langcheck import DEFAULTS as LANG
         doc = (ROOT / "docs/config.md").read_text()
 
@@ -304,6 +319,8 @@ class ConfigExample(unittest.TestCase):
             return m.group(1).strip() if m else None
         for k, v in LANG.items():
             self.assertEqual(default_of(k, "lang"), f"`{json.dumps(v)}`", k)
+        for k, v in DEFAULT_KITTY.items():
+            self.assertEqual(default_of(k, "kitty"), f"`{json.dumps(v)}`", k)
         for k, v in DEFAULT_ROSTER.items():
             self.assertEqual(default_of(k, "roster"), f"`{json.dumps(v)}`", k)
         self.assertEqual(default_of("left", "view"), f"`{json.dumps(DEFAULT_VIEW['left'])}`")

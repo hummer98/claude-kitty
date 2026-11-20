@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stop hook: 最後の返答が日本語（設定で変えられる）でなければ、書き直させる。
+"""Stop hook: 最後の返答が、設定の lang.language で決めた言語でなければ書き直させる（決めていなければ何もしない）。
 
   claude-lang-check            hook 用。stdin に Stop hook の JSON。止めるときだけ stdout に
                                {"decision": "block", "reason": ...} を出す。何が起きても exit 0

@@ -43,6 +43,7 @@ DEFAULTS = {
     "home_project": "",      # 統括の記録があるフォルダの名前。空ならホームのパスから作る
     "out_dir": "",           # 空なら $XDG_DATA_HOME/claude-kitty/stats
     "notes": [],             # 「数え方」の頭に足す文（手元の文書への言及など）
+    "timezone": "",          # 日付の区切りのタイムゾーン（"Asia/Tokyo" など）。空ならこのマシンのローカルの時刻
 }
 
 # 英語の返答: 長さが EN_MIN_LEN を超え、日本語の字（かな・カナ・漢字）の割合が EN_MAX_JA_RATIO 未満
@@ -116,7 +117,7 @@ def make_settings(section=None, env=None):
         if unknown:
             raise ValueError(f"session_stats に知らない項目がある: {sorted(unknown)}")
         sec.update(section)
-    for key in ("master", "role_dir_prefix", "projects", "home_project", "out_dir"):
+    for key in ("master", "role_dir_prefix", "projects", "home_project", "out_dir", "timezone"):
         if not isinstance(sec[key], str):
             raise ValueError(f"session_stats.{key} は文字列: {sec[key]!r}")
     s = {
@@ -131,6 +132,8 @@ def make_settings(section=None, env=None):
         "home_project": sec["home_project"] or default_home_project(),
         "out_dir": os.path.expanduser(sec["out_dir"]) if sec["out_dir"] else default_out_dir(env),
         "glossary": None,
+        "timezone": sec["timezone"],
+        "tz": zone(sec["timezone"]),
     }
     g = sec["glossary"]
     if g is not None:
@@ -321,8 +324,25 @@ def parse_ts(ts):
         return None
 
 
-def jst_day(dt):
-    return dt.astimezone(JST).date()
+def zone(name):
+    """設定のタイムゾーン。空なら None（このマシンのローカルの時刻。astimezone(None) が夏時間も含めて解く）。"""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(name)
+    except (ImportError, ValueError, KeyError, OSError) as e:
+        raise ValueError(f"session_stats.timezone が読めない（例 \"Asia/Tokyo\"）: {name!r}: {e}")
+
+
+def local_day(dt, tz=None):
+    """記録の時刻の、設定のタイムゾーンでの日付。"""
+    return dt.astimezone(tz).date()
+
+
+def tz_label(cfg):
+    """報告に書くタイムゾーン。ローカルのときは、読む人に分かるよう名前と UTC からのずれを添える（呼ぶ側が tz_label に入れる）。"""
+    return cfg.get("timezone") or cfg.get("tz_label") or "このマシンのローカルの時刻"
 
 
 # ---- 読む ------------------------------------------------------------------
@@ -429,7 +449,7 @@ class SessionStats:
             dt = parse_ts(obj.get("timestamp"))
             if dt is None:
                 continue
-            day = jst_day(dt)
+            day = local_day(dt, self.cfg.get("tz"))
             in_range = lo <= day < hi
             t = obj["type"]
             if t == "assistant":
@@ -550,7 +570,7 @@ def discover(cfg, lo_epoch):
 
 def collect(cfg, lo, hi, glossary=None):
     """lo <= 日 < hi の記録を数える。({名前: SessionStats}, 全体の Counter) を返す。"""
-    lo_epoch = datetime(lo.year, lo.month, lo.day, tzinfo=JST).timestamp()
+    lo_epoch = datetime(lo.year, lo.month, lo.day, tzinfo=cfg.get("tz")).timestamp()
     sessions, master, unnamed = discover(cfg, lo_epoch)
     gstats = Counter()
     result = {}
@@ -603,8 +623,9 @@ def period_metrics(st, days):
         m["echo:" + k] = _sum(st.echo[k], days)
     m["reply_median"] = _median([x for d in days for x in st.reply_len.get(d, [])])
     dayset = set(days)
-    m["sends"] = sum(1 for dt, _t, _b in st.sends if jst_day(dt) in dayset)
-    m["broadcasts"] = sum(1 for dt, _n, _b in st.broadcasts() if jst_day(dt) in dayset)
+    tz = st.cfg.get("tz")
+    m["sends"] = sum(1 for dt, _t, _b in st.sends if local_day(dt, tz) in dayset)
+    m["broadcasts"] = sum(1 for dt, _n, _b in st.broadcasts() if local_day(dt, tz) in dayset)
     # 用語集を読めなかったときは検査していないので、0 でなく — にする
     m["glossary"] = _sum(st.glossary, days) if st.is_master and st.rules is not None else None
     return m
@@ -689,7 +710,7 @@ def build_report(result, gstats, prev_days, cur_days, generated, cfg):
     L = []
     L.append(f"# セッションの数字 {c1.isoformat()}")
     L.append("")
-    L.append(f"作成: {generated}（JST）。`claude-session-stats` が自動で書いたもの。日付はすべて JST。")
+    L.append(f"作成: {generated}（{tz_label(cfg)}）。`claude-session-stats` が自動で書いたもの。日付はすべて {tz_label(cfg)}。")
     L.append(f"直近の期間 = {c0}〜{c1}（{len(cur_days)} 日）、前の期間 = {p0}〜{p1}（{len(prev_days)} 日）。")
     if generated[:10] == c1.isoformat():
         L.append(f"直近の期間の最後の日（{c1}）は、作成の時刻までの分だけ。量の項目は少なめに出る。")
