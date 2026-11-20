@@ -215,6 +215,13 @@ def transition(prev, event, payload, now):
         for k in [k for k, w in waits.items() if pred(k, w)]:
             del waits[k]
 
+    def arm_manual():
+        # 手の待ちを付けたターンが終わった（Stop / Esc で止めた）。この後に本体がまたツールを使い始めたら、
+        # 人が打っていなくても（他のセッションの依頼・背景の完了の通知で始まったターン。UserPromptSubmit が
+        # 人の入力でない・来ない）待ちは終わっている。外さないと、作業中なのに何時間も待受の色のまま残る
+        if "manual" in waits:
+            waits["manual"]["armed"] = True
+
     if event == "UserPromptSubmit":
         if payload.get("_notice") and not rec["main"]:
             # 他のセッションからの通知で始まったターン: 前の状態（idle / done）のまま見せ、終わっても done にしない
@@ -240,6 +247,7 @@ def transition(prev, event, payload, now):
             rec["seen"] = False  # 応答が 1 回終わった = 新しく読むものがある（見ていれば呼ぶ側が seen にする）
         # 担当が手で「問いを残した」と付けたら、その返事（次の UserPromptSubmit）まで待受のまま
         drop(lambda k, w: w.get("agent") is None and w.get("kind") != "manual")
+        arm_manual()
         if isinstance(payload.get("background_tasks"), list):
             _reconcile(agents, payload["background_tasks"], now)
             running = set(running_agents(rec))
@@ -263,6 +271,8 @@ def transition(prev, event, payload, now):
             agents.pop(a, None)  # 前面のもの（と、Claude Code の内部のエージェント）は終われば消す
     elif event == "PreToolUse":
         busy()
+        if a is None and (waits.get("manual") or {}).get("armed"):
+            del waits["manual"]  # 手の待ちを付けたターンの後で、本体が動き始めた
         key = _perm_key(a, payload)
         # 許可を待っていたエージェントが別のツールを呼び始めた = その許可は片付いた（断られたなど）
         drop(lambda k, w: w.get("agent") == a and w.get("kind") in ("permission", "notify") and k != key
@@ -291,6 +301,7 @@ def transition(prev, event, payload, now):
             rec["main"] = False
             rec["quiet"] = False
             drop(lambda k, w: w.get("agent") is None and w.get("kind") != "manual")
+            arm_manual()
             # 前面のサブエージェントは本体のターンの中でしか動かない。入力欄に戻っているなら終わっている
             for k in [k for k, v in agents.items() if v.get("end") is None and not v.get("bg")]:
                 del agents[k]
