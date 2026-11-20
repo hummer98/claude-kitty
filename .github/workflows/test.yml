@@ -36,8 +36,11 @@ jobs:
     runs-on: ubuntu-latest
     container: python:3.9-slim
     steps:
-      - name: Install git and procps
-        run: apt-get update && apt-get install -y --no-install-recommends git procps
+      - name: Install git and procps, put python3 in /usr/bin
+        # テストは PATH を /usr/bin:/bin に絞って install.sh を回すので、macOS と同じく /usr/bin/python3 を置く
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends git procps
+          ln -sf /usr/local/bin/python3 /usr/bin/python3
       - uses: actions/checkout@v5
       - name: Run all tests
         run: |
