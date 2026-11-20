@@ -1,0 +1,65 @@
+{
+  "view": {
+    "left": "main",
+    "restore": [["dev-a"], ["dev-b"]],
+    "guard": []
+  },
+  "state": {
+    "base_background": "#232627",
+    "colors": {
+      "working": {"background": "#22282e", "name": null},
+      "waiting": {"background": "#2e2a22", "name": 208},
+      "done":    {"background": "#222b25", "name": 108},
+      "idle":    {"background": null,      "name": 245}
+    },
+    "done_dwell_seconds": 2,
+    "watch_sockets": null,
+    "notice": {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]},
+    "subagent_colors": {"running": 110, "ended": 245}
+  },
+  "lang": {
+    "enabled": true,
+    "language": "ja",
+    "threshold": 0.3,
+    "head": 200,
+    "min": 20
+  },
+  "guard_hook": {
+    "guards": {
+      "presenting": {
+        "enabled": false,
+        "process": "^/usr/bin/slides-app --present",
+        "command": "test -e /tmp/presenting",
+        "command_timeout": 2,
+        "paths": ["~/.config/window-layout"],
+        "commands": [
+          "claude-view",
+          {"regex": "^kitten @ (focus|resize|goto)"},
+          {"program": "^svcctl(\\.py)?$", "value_options": ["--owner"],
+           "block": ["deploy", {"sub": "config", "if_any": ["--set"]}, {"sub": "reset", "unless_any": ["--dry-run"]}]}
+        ],
+        "allow_commands": ["claude-view status"],
+        "message": "発表が終わるまで画面を動かさないでください（{name}: {condition}）。"
+      }
+    }
+  },
+  "session_stats": {
+    "master": "main",
+    "roles": ["dev-a", "dev-b"],
+    "role_dir_prefix": "",
+    "rephrase": [["again", "「もう一度」", "もう一度|さっきも言った"]],
+    "echo": [["task_tools", "\"The task tools haven't been used recently…\"", "\\s*The task tools haven't been used recently"]],
+    "redact": [],
+    "glossary": null,
+    "projects": "~/.claude/projects",
+    "home_project": "",
+    "out_dir": "",
+    "notes": []
+  },
+  "roster": {
+    "models": {"dev-a": "opus"},
+    "ignore": ["scratch"],
+    "generations": 5,
+    "keep_absent_hours": 24
+  }
+}

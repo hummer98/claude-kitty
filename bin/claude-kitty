@@ -1,5 +1,6 @@
 #!/bin/bash
 # claude-code を並べた kitty を起動し、仮想デスクトップ2に置く（デスクトップの移動は KDE Plasma の KWin 用）。
+# claude-kitty doctor [--json] は、入っているもの・動くものを調べて直し方を出す。
 # kitty の場所は $CLAUDE_KITTY_KITTY で変えられる（既定は公式インストーラの ~/.local/kitty.app）。
 # claude-code の中から起動すると CLAUDE_* の環境変数を引き継ぎ、子の claude が
 # 「子セッション」扱いになって会話記録を保存しなくなるので、それらを消してから起動する。
@@ -7,6 +8,10 @@
 # 試験用の kitty を別のクラスで起動したときは、本物の窓を動かさないよう KWin の移動をしない。
 if [ "$*" = --version ]; then  # 版は lib/version.py が VERSION から読む（ほかのコマンドと同じ所）
 	exec python3 "$(dirname "$(readlink -f "$0")")/../lib/version.py" claude-kitty
+fi
+if [ "${1:-}" = doctor ]; then  # 入っているもの・動くものを調べる（読むだけ。lib/doctor.py）
+	shift
+	exec python3 "$(dirname "$(readlink -f "$0")")/../lib/doctor.py" "$@"
 fi
 session=${1:-$HOME/.config/kitty/claude3.session}
 kitty=${CLAUDE_KITTY_KITTY:-$HOME/.local/kitty.app/bin/kitty}

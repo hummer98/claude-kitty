@@ -27,7 +27,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
-from config import config_path, kitten_path, load_view_config  # noqa: E402
+from config import kitten_path, load_roster_config, load_view_config  # noqa: E402
 from core import kitty_pid_from_socket  # noqa: E402
 from geometry import tab_pane_fraction  # noqa: E402
 from guard import guarded_in_front  # noqa: E402
@@ -54,29 +54,10 @@ def roster_dir():
 
 def roster_conf():
     """設定の roster 節（無ければ既定）。壊れていれば止める（別のモデルで開かないように）。"""
-    out = {"models": {}, "ignore": [], "generations": 5, "keep_absent_hours": 24}
-    path = config_path(ENV)
     try:
-        data = json.loads(path.read_text())
-    except FileNotFoundError:
-        return out
-    except (OSError, ValueError) as e:
-        die(f"設定ファイルを読めない: {path}: {e}")
-    r = data.get("roster", {}) if isinstance(data, dict) else {}
-    if not isinstance(r, dict):
-        die(f"{path} の roster がオブジェクトでない")
-    if not isinstance(r.get("models", {}), dict) or not all(isinstance(v, str) for v in r.get("models", {}).values()):
-        die(f"{path} の roster.models は 役割→モデル名")
-    if not isinstance(r.get("ignore", []), list):
-        die(f"{path} の roster.ignore は役割のリスト")
-    g = r.get("generations", 5)
-    h = r.get("keep_absent_hours", 24)
-    if isinstance(g, bool) or not isinstance(g, int) or not 1 <= g <= 50:
-        die(f"{path} の roster.generations は 1〜50")
-    if isinstance(h, bool) or not isinstance(h, (int, float)) or h < 0:
-        die(f"{path} の roster.keep_absent_hours は 0 以上の数")
-    out.update(models=r.get("models", {}), ignore=r.get("ignore", []), generations=g, keep_absent_hours=h)
-    return out
+        return load_roster_config(ENV)
+    except ValueError as e:
+        die(str(e))
 
 
 # ---- プロセスとセッション ---------------------------------------------------

@@ -2712,6 +2712,8 @@ SIDE_TESTS = {
     "version_test": "Version",
     "changelog_test": "Changelog",
     "release_test": "Release",
+    "install_test": "Install",
+    "doctor_test": "Doctor",
 }
 
 

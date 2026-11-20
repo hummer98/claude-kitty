@@ -107,7 +107,16 @@ def rc_background(sock, wid, timeout=2.0):
 
 
 def _proc_exists(pid):
-    return os.path.exists(f"/proc/{pid}")
+    """pid が生きているか。/proc の無い macOS でも効くよう、signal 0 で確かめる（権限が無いのは生きている）。"""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True
 
 
 def find_sockets(env, configured=None, exists=_proc_exists):

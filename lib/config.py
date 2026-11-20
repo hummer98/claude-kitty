@@ -139,3 +139,35 @@ def load_state_config(env, path=None):
     return {"colors": merge_colors(st.get("colors")), "notice": merge_notice(st.get("notice")), "base": base or DEFAULT_BASE,
             "done_dwell": float(dwell), "watch_sockets": socks or None, "subagent_colors": merge_subagent_colors(st.get("subagent_colors")),
             "left": env.get("CLAUDE_VIEW_LEFT") or left}
+
+
+DEFAULT_ROSTER = {"models": {}, "ignore": [], "generations": 5, "keep_absent_hours": 24}
+
+
+def load_roster_config(env, path=None):
+    """claude-roster の設定 {"models", "ignore", "generations", "keep_absent_hours"} を返す（無ければ既定）。
+
+    壊れていれば ValueError（別のモデルで開き直さないよう、呼ぶ側は既定に戻さずに止める）。"""
+    path = Path(path) if path else config_path(env)
+    out = {k: (type(v)(v) if isinstance(v, (dict, list)) else v) for k, v in DEFAULT_ROSTER.items()}
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return out
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    r = data.get("roster", {}) if isinstance(data, dict) else {}
+    if not isinstance(r, dict):
+        raise ValueError(f"{path} の roster がオブジェクトでない")
+    if not isinstance(r.get("models", {}), dict) or not all(isinstance(v, str) for v in r.get("models", {}).values()):
+        raise ValueError(f"{path} の roster.models は 役割→モデル名")
+    if not isinstance(r.get("ignore", []), list):
+        raise ValueError(f"{path} の roster.ignore は役割のリスト")
+    g = r.get("generations", 5)
+    h = r.get("keep_absent_hours", 24)
+    if isinstance(g, bool) or not isinstance(g, int) or not 1 <= g <= 50:
+        raise ValueError(f"{path} の roster.generations は 1〜50")
+    if isinstance(h, bool) or not isinstance(h, (int, float)) or h < 0:
+        raise ValueError(f"{path} の roster.keep_absent_hours は 0 以上の数")
+    out.update(models=r.get("models", {}), ignore=r.get("ignore", []), generations=g, keep_absent_hours=h)
+    return out
