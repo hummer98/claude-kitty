@@ -126,12 +126,12 @@ class Doctor(unittest.TestCase):
         self.w.answers.update({"ls": (1, "Error: remote control is disabled"), "is-enabled": (1, "disabled\n"),
                                "node": (0, "v18.0.0\n"), "qdbus": (1, ""), "flatpak": (1, "")})
         (self.w.root / "config.json").write_text('{"view": {"left": ""}, "lang": {"threshold": 5}, "roster": {"generations": 0}}')
-        ctx = self.w.ctx(python=(3, 9, 0))
+        ctx = self.w.ctx(python=(3, 8, 10))
         rc, text = self.result(ctx)
         self.assertEqual(rc, 1)
         items = self.by_name(ctx)
         expect_ng = {"kitten @ ls": "install.sh --kitty", "kitty.conf のリモート操作": "install.sh --kitty",
-                     "python3": "3.10", "コマンドのリンク": "install.sh --links",
+                     "python3": "3.9", "コマンドのリンク": "install.sh --links",
                      "hook: claude-state（状態の色）": "--hooks=state",
                      "systemd: claude-state-watch.service": "enable --now", "設定: view": "docs/config.md",
                      "設定: lang": "docs/config.md", "設定: roster": "docs/config.md"}
@@ -193,13 +193,25 @@ class Doctor(unittest.TestCase):
         self.assertEqual(items["systemd: claude-session-stats.timer"]["status"], "warn")
 
     def test_macos(self):
-        os.makedirs(self.w.home / "Applications/Google Chrome.app")
+        # Chrome は claude-browser と同じ探し方（lib/browser.py。~/Applications の Google Chrome.app の実行ファイル）
+        app = self.w.home / "Applications/Google Chrome.app/Contents/MacOS"
+        os.makedirs(app)
+        (app / "Google Chrome").write_text("")
         rc, text = self.result(self.w.ctx(os_name="Darwin"))
         self.assertEqual(rc, 0, text)
         items = self.by_name(self.w.ctx(os_name="Darwin"))
-        self.assertEqual(items["systemd"]["status"], "skip")
+        self.assertNotIn("systemd", items)
+        self.assertEqual(items["launchd: claude-kitty.state-watch"]["status"], "warn")   # 入っていない
+        self.assertIn("--launchd", items["launchd: claude-kitty.state-watch"]["fix"])
         self.assertEqual(items["KWin"]["status"], "skip")
         self.assertEqual(items["Chrome"]["status"], "ok")
+        self.assertIn("Library/Application Support/claude-kitty/browser-profiles", items["Chrome"]["detail"])
+        self.assertIn("python3", items)
+        # 3.9（macOS の Command Line Tools の python3）で通り、3.8 は NG で Homebrew を案内する
+        self.assertEqual(self.by_name(self.w.ctx(os_name="Darwin", python=(3, 9, 6)))["python3"]["status"], "ok")
+        old = self.by_name(self.w.ctx(os_name="Darwin", python=(3, 8, 9)))["python3"]
+        self.assertEqual(old["status"], "ng")
+        self.assertIn("brew install python", old["fix"])
         self.assertFalse([a for a in self.w.calls if os.path.basename(a[0]) in ("systemctl", "qdbus", "flatpak")])
 
     def test_kitty_conf_include_and_relative_watcher(self):

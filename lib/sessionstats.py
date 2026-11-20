@@ -166,9 +166,10 @@ def load_settings(env, path=None, required=False):
     return make_settings(sec, env)
 
 
-def default_home_project():
-    home = os.path.realpath(os.path.expanduser("~"))
-    return home.replace("/", "-")
+def default_home_project(home=None):
+    """Claude Code の記録のフォルダの名前（英数字以外を - にする。/Users/first.last → -Users-first-last）。"""
+    home = os.path.realpath(os.path.expanduser("~")) if home is None else home
+    return re.sub(r"[^A-Za-z0-9]", "-", home)
 
 
 def default_out_dir(env):

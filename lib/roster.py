@@ -328,7 +328,7 @@ def signature(roster):
 
 
 def check_roster(roster):
-    """読み込んだ名簿の形を確かめる。おかしければ ValueError（壊れた名簿で別のセッションを開かないように）。"""
+    """読み込んだ名簿の形を確認する。おかしければ ValueError（壊れた名簿で別のセッションを開かないように）。"""
     if not isinstance(roster, dict) or roster.get("version") != VERSION:
         raise ValueError("名簿の形か版が違う")
     sess = roster.get("sessions")
@@ -546,7 +546,7 @@ def stop_target(pane, session_json, sessions, allow_bg=False):
     if (session_json or {}).get("kind") != "bg":
         return pane.get("front_pid")
     if not allow_bg:
-        return None  # 実物の背景セッションで確かめていないので、明示したときだけ
+        return None  # 実物の背景セッションで確認していないので、明示したときだけ
     pid = session_json.get("pid")
     if not pid:
         return None
@@ -561,7 +561,7 @@ def next_payload(waiter_pid, wait_id, sid, cwd, model, now):
 
 
 def read_next(text, waiter_pid, wait_id, now, max_age=NEXT_MAX_AGE):
-    """続きの指示のファイルの中身を確かめて {"session_id", "cwd", "model"} を返す。使えなければ None。
+    """続きの指示のファイルの中身を確認して {"session_id", "cwd", "model"} を返す。使えなければ None。
 
     別の claude-wait 宛て・別の claude-wait の ID 宛て・古いもの（止められずに残ったもの）・ID の形が違うものは使わない。
     """

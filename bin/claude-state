@@ -49,31 +49,26 @@ def conf(env):
 
 
 def ancestors(limit=12):
-    """[(pid, argv, environ の読み手)]（近い順）。environ は claude のときだけ読む。"""
+    """[(pid, argv)]（近い順）。Linux は /proc、macOS は sysctl（lib/proc.py）。"""
+    import proc
     out, pid = [], os.getppid()
     for _ in range(limit):
         if pid <= 1:
             break
-        try:
-            argv = [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
-            stat = Path(f"/proc/{pid}/stat").read_text()
-        except OSError:
+        argv = proc.argv(pid)
+        if argv is None:
             break
         out.append((pid, argv))
-        try:
-            pid = int(stat.rsplit(")", 1)[1].split()[1])
-        except (IndexError, ValueError):
+        pid = proc.ppid(pid)
+        if pid is None:
             break
     return out
 
 
 def read_environ(pid):
     """プロセスが起動したときの環境（あとから足した子向けの変数は入らない）。読めなければ None。"""
-    try:
-        raw = Path(f"/proc/{pid}/environ").read_bytes()
-    except OSError:
-        return None
-    return dict(kv.decode(errors="replace").split("=", 1) for kv in raw.split(b"\0") if b"=" in kv)
+    import proc
+    return proc.environ(pid)
 
 
 def who(env):
@@ -130,7 +125,7 @@ def _apply(event, payload, env, now, d, sid, wid, sock):
     if event == "UserPromptSubmit" and "<cross-session-message" in str(payload.get("prompt") or ""):
         payload = dict(payload, _notice=is_notice(payload["prompt"], conf(env)["notice"]))
     if event == "Stop" and (prev or {}).get("main") and not (prev or {}).get("quiet") and payload.get("transcript_path"):
-        # UserPromptSubmit で通知と分からなかったとき（hook の入力に本文が無い版など）の備え: 会話記録で確かめる
+        # UserPromptSubmit で通知と分からなかったとき（hook の入力に本文が無い版など）の備え: 会話記録で確認する
         origin, body = turn_origin(payload["transcript_path"])
         if origin == "peer" and body and is_notice(None, conf(env)["notice"], body=body):
             payload = dict(payload, _notice_turn=True)
@@ -272,7 +267,7 @@ def main(argv=None):
     p = sub.add_parser("repaint"); p.add_argument("--to")
     p = sub.add_parser("subagents"); p.add_argument("session", nargs="?")
     p = sub.add_parser("watch"); p.add_argument("--to", action="append", help="見る kitty の socket（何度でも。省くと設定か $XDG_RUNTIME_DIR/kitty-*）")
-    p.add_argument("--interval", type=float, default=1.0); p.add_argument("--once", action="store_true", help="1 回だけ見て終わる（確かめ用）")
+    p.add_argument("--interval", type=float, default=1.0); p.add_argument("--once", action="store_true", help="1 回だけ見て終わる（確認用）")
     args = ap.parse_args(argv)
 
     if args.cmd == "hook":

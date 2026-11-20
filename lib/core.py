@@ -7,7 +7,7 @@ def sanitize(key):
     # 小文字にそろえる（XWayland では KWin が窓のクラス名を小文字にするので、大文字だと窓を探せない）
     s = re.sub(r"[^a-z0-9_-]", "", (key or "").lower())[:64]
     if not s:
-        raise ValueError(f"invalid key: {key!r}")
+        raise ValueError(f"プロファイルの名前に使える文字（英数字と - _）が無い: {key!r}")
     return s
 
 
@@ -31,7 +31,7 @@ def choose_key(explicit, pane_vars, env):
     if wid:
         pid = kitty_pid_from_socket(env.get("KITTY_LISTEN_ON", "")) or "x"
         return sanitize(f"k{pid}-w{wid}")
-    raise ValueError("no --key, kitty pane or CLAUDE_CODE_SESSION_ID")
+    raise ValueError("プロファイルの名前を決められない（kitty のペインか Claude Code の中で呼ぶか、--key NAME で名前を付ける）")
 
 
 def kitty_pid_from_socket(sock):
@@ -40,16 +40,19 @@ def kitty_pid_from_socket(sock):
     return int(m.group(1)) if m else None
 
 
-def profile_processes(procs, profile):
+def profile_processes(procs, profile, loose=False):
     """procs=[(pid, argv)] から、このプロファイルで動いている Chrome の (pid, port) を返す。
 
     state ファイルが失われても（起動直後の失敗・手動の削除）実際のプロセスから
     ポートを取り戻せるようにする。ポートの持ち主の確認にも使う。
+    loose（macOS。引数を ps の空白区切りでしか読めなかったとき。lib/proc.py）なら、空白を含むプロファイルの
+    パス（~/Library/Application Support/…）は切れているので、つないだ文字列でも探す。Linux では使わない
+    （`bash -c "… --user-data-dir=… "` のような別のプロセスを Chrome と数えて止めないように）。
     """
     want = f"--user-data-dir={profile}"
     out = []
     for pid, argv in procs:
-        if want not in argv:
+        if want not in argv and not (loose and (want + " ") in (" ".join(argv) + " ")):
             continue
         port = None
         for a in argv:

@@ -12,14 +12,17 @@
 同じ ID を 2 つのプロセスで同時に開くと会話記録が壊れうるので、確実に終わるまで待つ:
 - ~/.claude/sessions/<pid>.json は claude が書き直すたびに一瞬空になるので、読めないときは「動いている」扱い。
 - JSON はプロセスの後片付けの途中で消えるので、見つけた pid そのもの（procStart で同一性を確認）が消えるまで待つ。
+  procStart と比べるのは Linux だけ（/proc/<pid>/stat の起動時刻と同じ値）。macOS では Claude Code が何を書くか
+  分からないので比べず、その pid が生きている間は待つ（待ちすぎる側に倒す。lib/proc.py）。
   /clear で sessionId が変わっても、その pid が生きている間は待ち続ける。
 - 見当たらない状態が 3 回続いてから再開する。同じ ID の claude-wait 同士は flock で 1 つだけにする。
 
-続きの指示（claude-roster restart が書く）: claude が終わったとき $XDG_RUNTIME_DIR/claude-wait/<ID>.next があり、
+続きの指示（claude-roster restart が書く）: claude が終わったとき $XDG_RUNTIME_DIR/claude-wait/<ID>.next があり
+（XDG_RUNTIME_DIR が無ければ /tmp/claude-kitty-<uid>。lib/rundir.py）、
 この claude-wait 宛て（pid）で新しければ（5 分以内）、シェルに戻らずに、その cwd とモデルで resume し直す
 （開く ID は指示の中のもの。/clear で ID が変わっていても、いまの会話に戻る。ファイルの名前は引数の ID のまま）。
 そのために、claude を開いている間は $XDG_RUNTIME_DIR/claude-wait/<ID>.waiter に自分の pid を書いておく
-（claude-roster はこれを見て、止めても続きを開ける claude-wait かを確かめる）。
+（claude-roster はこれを見て、止めても続きを開ける claude-wait かを確認する）。
 """
 import fcntl
 import json
@@ -36,26 +39,41 @@ SESSIONS = Path(os.environ.get("CLAUDE_SESSIONS_DIR", Path.home() / ".claude/ses
 CLAUDE = os.environ.get("CLAUDE_WAIT_CLAUDE") or "claude"  # テスト用: 偽の claude
 NEEDED_MISSES = 3
 TRACE = bool(os.environ.get("CLAUDE_WAIT_TRACE"))  # テスト用: 判定の変化を stderr に出す（固定の sleep で待たずに済むように）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import proc  # noqa: E402
+from rundir import runtime_dir  # noqa: E402
 try:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
     from roster import read_next  # noqa: E402
 except Exception:  # lib が読めなくても、待って開くことはできるように（続きの指示だけ使えない）
     read_next = None
 
 
+def login_shell(env=None):
+    """終わったあとに入るシェル: $SHELL が bash か zsh ならそれ（macOS の既定は zsh）、ほかは bash。"""
+    sh = (env if env is not None else os.environ).get("SHELL") or ""
+    return sh if os.path.basename(sh) in ("bash", "zsh") else "bash"
+
+
 def shell():
+    sys.stdout.flush()  # exec の前に出す（バッファのまま exec すると、表示した文が消える）
+    sys.stderr.flush()
     if os.environ.get("CLAUDE_WAIT_NO_SHELL"):  # テスト用
         sys.exit(0)
-    os.execvp("bash", ["bash", "-l"])
+    sh = login_shell()
+    os.execvp(sh, [sh, "-l"])
 
 
 def start_time(pid):
-    """/proc/<pid>/stat の 22 番目（起動時刻）。プロセスが無ければ None。"""
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
+    """起動時刻（Linux は /proc/<pid>/stat の 22 番目、macOS は sysctl。lib/proc.py）。プロセスが無ければ None。
+
+    Linux 以外で起動時刻を読めなくても、pid が生きていれば "alive" を返す（読めないことを「終わった」と取り違えて、
+    同じセッションを 2 か所で開かないように。pid の再利用は見分けられないが、待つ側に倒れる）。"""
+    if not isinstance(pid, int):
         return None
-    return stat.rsplit(")", 1)[1].split()[19]
+    s = proc.start_time(pid)
+    if s is None and not proc.is_linux() and proc.alive(pid):
+        return "alive"
+    return s
 
 
 UNREADABLE = {}  # 読めなかった回数。壊れたまま残ったファイルで永久に待たないよう、続いたら無視する
@@ -83,8 +101,8 @@ def find_live(sid):
         start = start_time(pid) if pid else None
         if start is None:
             continue  # プロセスはもう無い（古いファイル）
-        if data.get("procStart") is not None and str(data["procStart"]) != start:
-            continue  # pid が別のプロセスに再利用されている
+        if not proc.proc_start_matches(data.get("procStart"), start):
+            continue  # pid が別のプロセスに再利用されている（比べるのは Linux だけ）
         return ("live", pid, start, data.get("kind"))
     return ("unsure", None, None, None) if unsure else ("none", None, None, None)
 
@@ -103,7 +121,7 @@ def wait_free(name, sid):
                     # daemon の中の背景セッションは、前面の claude を閉じても終わらない（それで待ち続けた事故があった）
                     print(f"{name} ({sid})\nこのセッションは背景（daemon）で動いています。"
                           "前面の claude を閉じても終わりません。"
-                          f"idle を確かめてから、そのプロセス（pid {pid}）を止めてください。"
+                          f"idle を確認してから、そのプロセス（pid {pid}）を止めてください。"
                           "止まれば、ここで自動的に再開します。（Ctrl-C で待機をやめる）", flush=True)
                 else:
                     print(f"{name} ({sid})\nいま別の場所で動いています (pid {pid})。"
@@ -148,6 +166,9 @@ def main():
         from version import handle_version
         handle_version(sys.argv[1:], "claude-wait")
         return
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):  # 使い方を出して終わる（シェルには入らない）
+        print(__doc__.strip())
+        return
     argv, rename, model = [], False, None
     it = iter(sys.argv[1:])
     for a in it:
@@ -167,7 +188,7 @@ def main():
     if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", sid):
         print(f"claude-wait: セッション ID の形が違う: {sid}")
         shell()
-    rt = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    rt = runtime_dir()
     lock = open(rt / f"claude-wait-{sid}.lock", "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

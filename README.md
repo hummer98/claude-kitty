@@ -9,13 +9,13 @@
 
 - 1 つのセッション（たとえば左の列の「統括」）が、ほかのセッションのペインを `kitten @`（kitty のリモート操作）で並べ替える。人がマウスで直さなくても、「この 2 人を右に出して」「全員を等分に」ができる。1 人で使う・並べるだけでもよい（体制の例は [PRACTICES.md](PRACTICES.md)）。
 - ほかの端末で動いているセッションを、kitty のペインへ安全に移す（同じセッションを 2 か所で同時に開かない）。
-- 各セッションが自分専用の Chrome を自分のペインの上に重ね、Web アプリの動作を確かめる（プロファイルが残るのでログインは一度だけ）。
+- 各セッションが自分専用の Chrome を自分のペインの上に重ね、Web アプリの動作を確認する（プロファイルが残るのでログインは一度だけ）。
 
-作者の環境は Linux（KDE Plasma 6 Wayland）。窓の操作に KWin スクリプトを使う部分は Linux/KDE 専用で、kitty と `kitten @` の部分は OS を問わない。セットアップの手順と macOS への移植の手引きは [SETUP.md](SETUP.md)。
+作者の環境は Linux（KDE Plasma 6 Wayland）。窓の操作に KWin スクリプトを使う部分は Linux/KDE 専用で、kitty と `kitten @` の部分は OS を問わない。macOS は試験的に対応している（[下の節](#macos試験的)）。セットアップの手順は [SETUP.md](SETUP.md)。
 
 ## 最短の導入
 
-前提は kitty・Python 3.10 以降・Claude Code（[SETUP.md の 1.](SETUP.md#1-前提)）。
+前提は kitty・Python 3.9 以降・Claude Code（[SETUP.md の 1.](SETUP.md#1-前提)）。macOS は [下の節](#macos試験的) の手順から。
 
 ```sh
 git clone https://github.com/hummer98/claude-kitty ~/claude-kitty
@@ -23,7 +23,7 @@ git clone https://github.com/hummer98/claude-kitty ~/claude-kitty
 claude-kitty doctor                       # 足りないものと直し方を 1 行ずつ出す（NG が無ければ終了コード 0）
 ```
 
-- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-guard`。返答の言語を調べる `claude-lang-check` は `--hooks=lang` と明示したときだけ）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf` の 1 行を足す、systemd のユーザーユニットを入れる（Linux だけ。macOS は launchd の案内を出す）。部品ごとに `--links` `--hooks[=state,lang,guard]` `--kitty` `--systemd` で選べる。
+- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-guard`。返答の言語を調べる `claude-lang-check` は `--hooks=lang` と明示したときだけ）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）の 1 行を足す、常駐を入れる（Linux は systemd のユーザーユニット、macOS は launchd の LaunchAgent）。部品ごとに `--links` `--hooks[=state,lang,guard]` `--kitty` `--systemd` `--launchd` で選べる。hook の command はリポジトリの `bin/` の絶対パスで書く（PATH に頼らない）。
 - 既にあるものは壊さない: 別のファイルは上書きせず、既存の hook とキーは残し、同じ hook は二重に足さない。書き換える設定は `<名前>.bak-<日時>` に残す。何度流しても同じで、`--uninstall` で同じ部品を外せる。
 - kitty の設定（リモート操作とソケット）は kitty を起動し直してから効く。そのあと `claude-kitty` で kitty を開き、`claude-kitty doctor` をもう一度。
 - 役割名などの設定は `~/.config/claude-kitty/config.json`（無くても既定値で動く）。全項目の例は [config.example.json](config.example.json)、意味と既定値は [docs/config.md](docs/config.md)。
@@ -31,24 +31,45 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 
 | 道具 | 何をするか | OS 依存 |
 |---|---|---|
-| `bin/claude-kitty` | kitty を `CLAUDE_*` 環境変数なしで起動し、セッションファイルどおりにペインを開く | 仮想デスクトップへの移動だけ KWin |
-| `bin/claude-view` | 統括用。ペインを役割名で並べ替える（等分割にそろえる） | 「保護する窓が前面か」の確認だけ KWin、kitty の生存確認に `/proc` |
-| `bin/claude-wait` | 別の場所で動いている同じセッションの終了を待ってから resume する | `/proc` |
-| `bin/claude-browser` | ペインごとの Chrome を、そのペインに重ねる | KWin・`/proc`（Chrome はネイティブでも Flatpak でもよい） |
-| `bin/claude-state` | セッションの状態（作業中・待受中・完了（未読）・idle）をペインの背景色とステータス行の色で見せる（Claude Code の hook から呼ぶ）。`claude-state watch` は kitty の外の常駐で、見た完了のペインを idle に戻し、消えた色を塗り直す（[下の節](#claude-state状態の色)） | 入れ子の claude の判定に `/proc` |
-| `bin/claude-show` | 見てほしい HTML（他のペインの場所に縦 100%）・画像（自分のペインの上）を開く（[下の節](#claude-show見てほしいものを開く)） | 保護する窓の確認だけ KWin |
+| `bin/claude-kitty` | kitty を `CLAUDE_*` 環境変数なしで起動し、セッションファイルどおりにペインを開く | 仮想デスクトップへの移動と最大化だけ KWin（macOS では行わない） |
+| `bin/claude-view` | 統括用。ペインを役割名で並べ替える（等分割にそろえる） | 「保護する窓が前面か」の確認だけ KWin（macOS は `lsappinfo`） |
+| `bin/claude-wait` | 別の場所で動いている同じセッションの終了を待ってから resume する | プロセスの情報（`lib/proc.py`。Linux は `/proc`、macOS は `sysctl`） |
+| `bin/claude-browser` | ペインごとの Chrome を、そのペインに重ねる | 窓の配置は KWin（macOS は試験的に CoreGraphics と CDP）。Chrome はネイティブでも Flatpak でもよい |
+| `bin/claude-state` | セッションの状態（作業中・待受中・完了（未読）・idle）をペインの背景色とステータス行の色で見せる（Claude Code の hook から呼ぶ）。`claude-state watch` は kitty の外の常駐で、見た完了のペインを idle に戻し、消えた色を塗り直す（[下の節](#claude-state状態の色)） | 入れ子の claude の判定にプロセスの情報（`lib/proc.py`） |
+| `bin/claude-show` | 見てほしい HTML（他のペインの場所に縦 100%）・画像（自分のペインの上）を開く（[下の節](#claude-show見てほしいものを開く)） | 保護する窓の確認だけ KWin（macOS は `lsappinfo`）。kitty の外では `xdg-open`（macOS は `open`） |
 | `bin/claude-guard` | PreToolUse hook。名前の付いたガードが働いている間、決めたパスへの書き込みと決めたコマンドを止める（[docs/guard-hook.md](docs/guard-hook.md)） | 働く条件の `pgrep` |
 | `bin/claude-lang-check` | Stop hook で最後の返答の言語を調べ、設定の `lang.language` で決めた言語でなければ書き直させる（決めていなければ何もしない。[docs/lang-check.md](docs/lang-check.md)） | なし |
 | `bin/claude-session-stats` | 会話の記録から、言い直し・英語の返答・返答の長さなどを期間ごとに数えて Markdown に書く（[docs/session-stats.md](docs/session-stats.md)） | なし |
-| `bin/claude-roster` | kitty の中のセッションの名簿を保ち、kitty を起動し直したあとに元の配置・フォルダ・モデル・会話へ戻す（[docs/roster.md](docs/roster.md)） | `/proc`、保護する窓の確認だけ KWin |
+| `bin/claude-roster` | kitty の中のセッションの名簿を保ち、kitty を起動し直したあとに元の配置・フォルダ・モデル・会話へ戻す（[docs/roster.md](docs/roster.md)） | プロセスの情報（`lib/proc.py`）、保護する窓の確認だけ KWin |
 
 テスト: `python3 tests/run.py`（これ 1 つで全部。標準ライブラリだけで、kitty や Chrome は使わない。GitHub Actions も同じものを回す）
+
+## macOS（試験的）
+
+作者は macOS の実機で動かしていない（macOS の分岐は、Linux の上で OS の部分を偽物にした単体テストで確認している）。詳しい手順・確認してほしいことは [SETUP.md の macOS での導入](SETUP.md#macos-での導入)。
+
+```sh
+xcode-select --install                                   # git と python3（3.9）
+# Homebrew を https://brew.sh の手順で入れてから
+brew install --cask kitty google-chrome && brew install node
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
+echo 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"' >> ~/.bash_profile   # セッションのペインは bash -lic で開く
+git clone https://github.com/hummer98/claude-kitty ~/claude-kitty
+~/claude-kitty/tools/install.sh --all     # リンク・hook・kitty.conf・launchd の常駐
+# 動いている kitty を ⌘Q で全部終わらせ、ターミナル.app から
+claude-kitty                              # kitty を開く
+claude-kitty doctor                       # kitty のペインで。NG が無ければ OK
+```
+
+| 使える | 試験的（動くはずだが未確認） | 使えない |
+|---|---|---|
+| `claude-view` の並べ替え、`claude-kitty` の起動、`claude-browser` の open・shot・url・close、`claude-show` の画像、`claude-guard`・`claude-lang-check`・`claude-session-stats`、`claude-kitty doctor` | `claude-state` の色と `claude-state watch`（launchd）、`claude-wait`、`claude-roster`、`view.guard`（`lsappinfo`）、`claude-browser` の重ね置き（CoreGraphics + CDP。「常に最前面」は無く、前に出すのは `--focus browser` のときだけ。置けなければ普通の窓で開く） | 仮想デスクトップへの移動・最大化（`kitty.desktop`・`kitty.maximize`）、窓の「常に最前面」、systemd のユニット（代わりに launchd） |
 
 ## claude-kitty
 
 `claude-kitty [session]` — kitty を CLAUDE_* 環境変数なしで起動し（Claude Code の中から起動すると、中の claude が子セッション扱いになり会話記録が残らなくなるのを避ける）。設定の `kitty.maximize` で最大化し、`kitty.desktop` で KDE Plasma の仮想デスクトップへ移す（どちらも既定はしない。[docs/config.md](docs/config.md#kittyclaude-kitty-kitty-の起動)）。既定の配置は `kitty/claude3.session`（左 1/4 + 右上下）。
 
-- `claude-kitty doctor [--json]`: 入っているもの・動くもの（kitty の版とリモート操作、`layout_state.pairs`、python3・node、コマンドのリンク、hook、kitty.conf の watcher、systemd、設定ファイル、KWin、Chrome）を 1 行ずつ調べ、足りなければ直し方を出す。読むだけ。NG があれば終了コード 1。
+- `claude-kitty doctor [--json]`: 入っているもの・動くもの（kitty の版とリモート操作、`layout_state.pairs`、python3・node、コマンドのリンク、hook とその道具が見つかるか、kitty.conf の watcher、systemd（macOS は launchd）、設定ファイル、KWin（macOS は `lsappinfo`）、Chrome）を 1 行ずつ調べ、足りなければ直し方を出す。読むだけ。NG があれば終了コード 1。
 - `kitty/example.session`: 統括 1 + 担当 5 の例（各ペインが `claude-wait` で待ってから resume する）。手元の版は `kitty/<名前>.session` に置けば git に入らない（`.gitignore`）。
 
 ## claude-view（統括用の配置）
@@ -82,7 +103,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 ## claude-wait
 
 `claude-wait <名前> <セッションID> [--rename]` — 同じセッションが別の場所で動いている間は待ち、プロセスが確実に終わってから resume する（JSON の一瞬の空・後片付け中の削除・/clear・pid の再利用・同じ ID の二重待機に対応）。
-- 待つ相手の JSON の `kind` が `"bg"`（daemon の中の背景セッション）なら、前面の claude を閉じても終わらないので、その旨と pid を表示する（自動では止めない。idle を確かめてから人が止める）。
+- 待つ相手の JSON の `kind` が `"bg"`（daemon の中の背景セッション）なら、前面の claude を閉じても終わらないので、その旨と pid を表示する（自動では止めない。idle を確認してから人が止める）。
 - `--rename` の `-n` は resume では効かないので、再開の直前に「再開したら /rename <名前> と打ってください」と表示する。
 
 ## claude-browser
@@ -110,7 +131,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 - Flatpak の Chrome はホームの任意の場所を読めない。file:// で手元の資料を開くなら `flatpak override --user --filesystem=~/docs:ro com.google.Chrome` のように許可する。
 - 返り値の `cdp` URL に Playwright の `connectOverCDP` などで接続して操作できる。
 - プロファイルは置き場の `<key>` に残るので、パスキー等のログインは一度人が済ませれば以後使える。
-- 窓の配置は KDE Plasma の KWin だけ（`qdbus`・`qdbus6`・`qdbus-qt6` のどれか）。KWin が無ければ、何が足りないかを出して止まる。
+- 窓の配置は KDE Plasma の KWin（`qdbus`・`qdbus6`・`qdbus-qt6` のどれか）。Linux で KWin が無ければ、何が足りないかを出して止まる。macOS は試験的に、kitty の窓の位置を CoreGraphics で読み、Chrome の窓を CDP で置く（「常に最前面」は無い。置けなければ止めずに普通の窓のまま開く。[SETUP.md](SETUP.md#macos-で使えるもの試験的なもの使えないもの)）。
 
 ## claude-state（状態の色）
 
@@ -126,16 +147,16 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 | done（完了・未読） | 全部終わり、そのペインをまだ見ていない | ごく薄い緑 `#222b25` | 控えめな緑（108） |
 | idle | done のペインにフォーカスが来て 2 秒続いたあと（Stop の時点で見ていれば、すぐ） | 元の色（kitty.conf の `background`） | 薄い灰色（245） |
 
-数え方（hook の入力は Claude Code 2.1.328 で記録して確かめた）:
+数え方（hook の入力は Claude Code 2.1.328 で記録して確認した）:
 
 - 待ち: 許可は PermissionRequest で足し、同じエージェント・同じツール名・同じ入力の PostToolUse / PostToolUseFailure で外す（PermissionRequest には tool_use_id が無いため）。質問は tool_use_id で照合する。手の `claude-state waiting` は次の UserPromptSubmit まで残る。UserPromptSubmit では本体の待ちを外す（手の待ちは、人が打ったときだけ。背景の作業の完了の通知や他のセッションからのメッセージでも UserPromptSubmit は来るため）。サブエージェントの待ちは、そのエージェントの hook で外す。本体の Stop は本体の待ちと、もう動いていないサブエージェントの待ちを、SubagentStop はそのサブエージェントの待ちを外す。
 - サブエージェント: SubagentStart で足し、SubagentStop で外す（入力の `agent_id`）。本体の Stop の `background_tasks` に合わせ直すので、SubagentStop を取りこぼしても残らない。数えるのは subagent・workflow・teammate・cloud session で、shell と monitor は数えない（`tail -f` などがずっと作業中に見えてしまうため）。
 - 本体: UserPromptSubmit で動き、Stop / StopFailure で止まる。Stop のあとにツールの hook が来たら（背景の作業の完了で本体が自分で再開したときなど）また動いているとする。自動の compact（SessionStart の `source` が `compact`）では状態を変えない。
-- 他のセッションからのメッセージで、本文に「通知」の印（設定 `state.notice`。既定は空で、何も通知とみなさない。例は「返事は不要」を含む・「【通知】」で始まる。[docs/config.md](docs/config.md)）があるターンは、色を変えない（作業中にも見せず、終わっても done にしない）。UserPromptSubmit の `prompt` の `<cross-session-message>` で見分け、分からなければ Stop のときに会話記録（`transcript_path`）の、そのターンを始めた記録（`turnOrigin` が `peer` で、`origin.body` が本文）で確かめて、ターンの前の状態に戻す。印の無い依頼は、ふつうどおり終われば done。通知のターンの中で始まったサブエージェントは、ふつうどおり作業中に見せる（動いているものは見せる）。
+- 他のセッションからのメッセージで、本文に「通知」の印（設定 `state.notice`。既定は空で、何も通知とみなさない。例は「返事は不要」を含む・「【通知】」で始まる。[docs/config.md](docs/config.md)）があるターンは、色を変えない（作業中にも見せず、終わっても done にしない）。UserPromptSubmit の `prompt` の `<cross-session-message>` で見分け、分からなければ Stop のときに会話記録（`transcript_path`）の、そのターンを始めた記録（`turnOrigin` が `peer` で、`origin.body` が本文）で確認して、ターンの前の状態に戻す。印の無い依頼は、ふつうどおり終われば done。通知のターンの中で始まったサブエージェントは、ふつうどおり作業中に見せる（動いているものは見せる）。
 
 既知の制限:
 
-- 許可を断る（No）か Esc で止めると、Stop も PostToolUseFailure も来ない（実物で確かめた。入力欄のまま 60 秒の `idle_prompt` も来なかった）。待受中のまま残り、次に打ったとき（UserPromptSubmit）に消える。`idle_prompt` が来れば、そこで本体を止まったことにする。
+- 許可を断る（No）か Esc で止めると、Stop も PostToolUseFailure も来ない（実物で確認した。入力欄のまま 60 秒の `idle_prompt` も来なかった）。待受中のまま残り、次に打ったとき（UserPromptSubmit）に消える。`idle_prompt` が来れば、そこで本体を止まったことにする。
 - 許可に答えてから長いツールが終わるまでは、待受中のまま（答えたことを知らせる hook が無い）。並行する別のツールの終わりでは外さない。同じエージェントが 2 秒より後に別のツールを呼び始めたら、断られたと見なして外す。
 - 終わった背景のサブエージェントの記録は、本体が TaskStop で止めるか、そのセッションの記録が消えるまで残る（ステータス行の要約用。新しい 50 件まで）。
 - Stop の時点で `kitten @ ls` に失敗すると、見ているペインでも done になる（watch が、done になってから 2 秒後に消す）。
@@ -150,11 +171,11 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - done → idle は常駐の `claude-state watch`（lib/statewatch.py。systemd のユーザーサービス `contrib/systemd/claude-state-watch.service`）が行う。1 秒ごとに全部の kitty（`$XDG_RUNTIME_DIR/kitty-*` の、kitty がまだ動いているもの。設定 `state.watch_sockets` か `--to` で決めることもできる）の ls を読み、前面の OS 窓（`is_focused`）の表示中のタブ（`is_active`）の入力先のペイン（`is_focused`）が done で、そこへのフォーカスが `state.done_dwell_seconds`（既定 2 秒）続いたら idle にして背景を戻す。数え始めは、そのペインにフォーカスが来た時と done になった時の遅い方。途中で別のペインへ動いたり、kitty が前面でなくなったり、ls に失敗したりしたら数え直す。
   - watch が要る理由: kitty の watcher（`kitty/claude_state_watcher.py`、kitty.conf の `watcher`）は、kitty がペインを作るときに写し取られるので、動いている kitty で `load-config` しても前からあるペインには付かない。`on_tab_bar_dirty` の経路でも効くはずだったが、実物では前面の done のペインに 3.5 秒フォーカスしても消えなかった。kitty を再起動すると全セッションが落ちるので、kitty の外で同じ規則を行う。watcher は残す（新しいペインと再起動後の kitty では、こちらも効く）。
   - 二重に動いても害は無い: どちらも同じ `mark_seen`（watcher のもの）で、同じ `.<session_id>.lock` を待たずに取る。先に片方が idle にすれば、もう片方は done でないので何もしない。ロックが取れない（hook が書いている最中）回は見送り、watch は次の回にやり直す。
-  - kitty が前面かは、ls の OS 窓の `is_focused` で決める（KWin で別のアプリ（全画面のアプリ）が前面のとき、全部の kitty で false になるのを確かめた）。KWin は呼ばない。
+  - kitty が前面かは、ls の OS 窓の `is_focused` で決める（KWin で別のアプリ（全画面のアプリ）が前面のとき、全部の kitty で false になるのを確認した）。KWin は呼ばない。
   - ls と get-colors は kitten を起こさず、kitty の socket にリモート操作の文を直接書いて読む（ls 1 回は kitty 側で約 15 ms、get-colors は約 1 ms）。色を変える set-colors だけ kitten で。エラーは `errors.log` に残して続ける（ls の失敗は続くあいだ 1 回だけ）。落ちても systemd が起こし直す（`Restart=always`）。
-  - 色の確かめ: kitty が設定を読み直すと全ペインの色が消える。watch は 1 秒ごとに、記録のある各ペインの色を get-colors で見て（1 回約 1 ms）、記録の `background`（hook が書いた色。watch が起動時に読んだ設定ではない）と 2 回続けて違ったペインを、記録の色で塗り直す。1 回だけの違いは、hook が記録を書いてから set-colors するまでの間かもしれないので待つ。set-colors の失敗や、idle にした直後に hook が割り込んだときの食い違いも、これで直る。手で `set-colors` した色も、記録のあるペインなら 2 秒ほどで戻される。
-  - 制限: 1 秒ごとに見るので、1 秒より短くよそへ移ってすぐ戻ったのは、離れたと気づかないことがある。消えるのは、続けて 2 秒見てから最大 1 秒後。設定（`state.watch_sockets`）は起動時にだけ読む（変えたら `systemctl --user restart claude-state-watch`）。`watch_sockets` や `--to` で固定のパスを使い、kitty を起動し直すと、ペインの id が振り直されて古い記録に当たることがある（既定の `kitty-<pid>` では起きない）。
-- `claude-state watch [--to SOCKET]... [--interval 1] [--once]`: 上の常駐。`--once` は 1 回だけ見て終わる（数え始めるだけなので、ふつうは何も変えない。socket に届くかの確かめ用）。
+  - 色の確認: kitty が設定を読み直すと全ペインの色が消える。watch は 1 秒ごとに、記録のある各ペインの色を get-colors で見て（1 回約 1 ms）、記録の `background`（hook が書いた色。watch が起動時に読んだ設定ではない）と 2 回続けて違ったペインを、記録の色で塗り直す。1 回だけの違いは、hook が記録を書いてから set-colors するまでの間かもしれないので待つ。set-colors の失敗や、idle にした直後に hook が割り込んだときの食い違いも、これで直る。手で `set-colors` した色も、記録のあるペインなら 2 秒ほどで戻される。
+  - 制限: 1 秒ごとに見るので、1 秒より短くよそへ移ってすぐ戻ったのは、離れたと気づかないことがある。消えるのは、続けて 2 秒見てから最大 1 秒後。設定（`state.watch_sockets`）は起動時にだけ読む（変えたら `systemctl --user restart claude-state-watch`、macOS は `launchctl kickstart -k gui/$(id -u)/claude-kitty.state-watch`）。`watch_sockets` や `--to` で固定のパスを使い、kitty を起動し直すと、ペインの id が振り直されて古い記録に当たることがある（既定の `kitty-<pid>` では起きない）。
+- `claude-state watch [--to SOCKET]... [--interval 1] [--once]`: 上の常駐。`--once` は 1 回だけ見て終わる（数え始めるだけなので、ふつうは何も変えない。socket に届くかの確認用）。
 - `claude-state waiting`: ふつうの文で問いを残したときに担当が手で呼ぶ。Stop でも done に変わらず、次の UserPromptSubmit で working に戻る。
 - `claude-state list [--json] [--all]`: 統括用。1 行 1 セッションで role・状態・続いている時間（waiting・done・working・idle の順）。`--all` は claude が動いていない古い記録も出す。
 - `claude-state get [SESSION_ID]` / `claude-state paint SESSION_ID TEXT`: ステータス行用（状態の 1 語 / TEXT を状態の色で）。SESSION_ID を省くと `$CLAUDE_CODE_SESSION_ID`。
@@ -195,8 +216,8 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - HTML（`.html`/`.htm`）と URL: `claude-browser open <file:// か URL> --area others --mode show --focus none`（左の列を除いた右側のうち、自分のペインの横を避けた広い方を縦 100% で覆い、会話は見せたまま。入力先は動かさない。`--ratio` を付ければその場所の上から何割）。Flatpak の Chrome から見える場所に置くこと（claude-browser の項）。
 - 画像（png/jpg/jpeg/webp/gif/svg）: 自分のペインに kitty の overlay を重ねて `kitten icat --hold` で表示する。閉じるには、overlay をクリックしてからキーを押す。svg などは ImageMagick があれば表示できる。
 - 入力先は変えない（overlay も常に `--keep-focus`。ユーザーが打っている途中の文字が overlay に吸われないように）。自分のペインが表示されていないタブにあれば、その旨を `note` に書く。
-- 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確かめられないときも同じ）。
-- kitty の外では `xdg-open` に渡す。
+- 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確認できないときも同じ）。
+- kitty の外では `xdg-open`（macOS は `open`）に渡す。
 - overlay は重ねた先のペインと同じ window group に入るので、claude-view は並べ替えの対象に数えない。
 
 ## ライセンス

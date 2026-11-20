@@ -979,7 +979,7 @@ class Analyzer:
             self.tar(args)
         elif name == "unzip":
             if any(a in ("-l", "-t", "-v", "-Z", "-p", "-c") for a in args):
-                return                          # 一覧・確かめ・標準出力へは書き込まない
+                return                          # 一覧・確認・標準出力へは書き込まない
             d = None
             for i, a in enumerate(args):
                 if a == "-d" and i + 1 < len(args):

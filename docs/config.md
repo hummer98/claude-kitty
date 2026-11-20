@@ -6,8 +6,8 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
 - 全項目の例: リポジトリの [config.example.json](../config.example.json)。JSON はコメントを書けないので、意味はこのファイルに書きます。
   - 使う節だけを写して、値を自分のものに変えてください。例をまるごと写しても動きますが、例のガード（`guard_hook.guards.presenting`）は `enabled: false` にしてあるので何も止めません。例の `lang.language` は `null`（何もしない）なので、使うなら `"ja"` などに変えます。
-- 書いたあとは `claude-kitty doctor` で、各道具がその設定を読めるかを確かめられます（「設定: <節>」の行）。
-- 読み直すのは道具を呼ぶたび（hook は毎回）。常駐の `claude-state watch` だけは起動時に読むので、`state` を変えたら `systemctl --user restart claude-state-watch`。
+- 書いたあとは `claude-kitty doctor` で、各道具がその設定を読めるかを確認できます（「設定: <節>」の行）。
+- 読み直すのは道具を呼ぶたび（hook は毎回）。常駐の `claude-state watch` だけは起動時に読むので、`state` を変えたら `systemctl --user restart claude-state-watch`（macOS は `launchctl kickstart -k gui/$(id -u)/claude-kitty.state-watch`）。
 
 役割名（role）は、kitty のセッションファイルの `--var role=<名前>` でペインに付けた名前です（[SETUP.md](../SETUP.md#自分のセッション配置)）。例の `main`・`dev-a`・`dev-b` は [kitty/example.session](../kitty/example.session) の名前です。
 
@@ -17,7 +17,7 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 |---|---|---|
 | `left` | `"main"` | 左の列に固定する統括の役割名。`claude-view` はこの役割のいる kitty を操作し、`claude-browser --area right` / `--area others`（`--mode show` の既定）はこのペインを除いた右側を範囲にする |
 | `restore` | `[["dev-a"], ["dev-b"]]` | `claude-view restore` の配置。段（上から）のリストで、各段は左から並べる役割名。`"dev-a,dev-c/dev-b"` の文字列でも書ける |
-| `guard` | `[]` | 前面にあったら画面を並べ替えない窓のプロセス（`pgrep -f` の正規表現。文字列 1 つでもよい）。全画面のアプリや発表中の画面など。空なら前面の窓を調べない |
+| `guard` | `[]` | 前面にあったら画面を並べ替えない窓のプロセス（`pgrep -f` の正規表現。文字列 1 つでもよい）。全画面のアプリや発表中の画面など。空なら前面の窓を調べない。前面の窓は KDE Plasma なら KWin、macOS なら `lsappinfo` で読む（macOS で読めないときは、当たるプロセスが動いているだけで並べ替えを控える） |
 
 環境変数が設定より優先します: `CLAUDE_VIEW_LEFT`、`CLAUDE_VIEW_RESTORE`（`"a,b/c"`）、`CLAUDE_VIEW_GUARD`（`none` で止める）。空文字は未設定と同じです。
 
@@ -26,7 +26,7 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 | 項目 | 既定 | 意味 |
 |---|---|---|
 | `desktop` | `null` | 起動した kitty の窓を移す仮想デスクトップの番号（1 から。KDE Plasma の KWin だけ）。`null` なら移さない |
-| `maximize` | `false` | `true` なら最大化して起動する（`--start-as maximized`。`desktop` があれば KWin でも最大化する） |
+| `maximize` | `false` | `true` なら最大化して起動する（`--start-as maximized`。`desktop` があれば KWin でも最大化する）。macOS では使わない（注意を出して、最大化しないで起動する。`desktop` も同じ） |
 
 環境変数 `CLAUDE_KITTY_START_AS` が `maximize` より優先します。
 
@@ -40,9 +40,9 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 `command` が `null` のときに探す順（最初に見つかったもの）:
 
 1. 下の 2〜5 のうち、入っていて、その置き場（下の表）が既にあるもの（後から別の Chrome を入れても、ログイン済みのプロファイルから黙って移らない。0.4 までの Flatpak の Chrome の `~/.var/app/com.google.Chrome/claude-profiles` もこれで引き継ぐ）。複数あれば下の順
-2. ネイティブの Chrome: `google-chrome-stable`・`google-chrome`（PATH から。macOS は `/Applications/Google Chrome.app`）
+2. ネイティブの Chrome: `google-chrome-stable`・`google-chrome`（PATH から。macOS は `/Applications` か `~/Applications` の `Google Chrome.app`）
 3. Flatpak の Chrome（`com.google.Chrome`）
-4. ネイティブの Chromium: `chromium`・`chromium-browser`
+4. ネイティブの Chromium: `chromium`・`chromium-browser`（macOS は `Chromium.app`）
 5. Flatpak の Chromium（`org.chromium.Chromium`）
 
 `profile_root` が `null` のときの置き場:
@@ -51,10 +51,10 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 |---|---|
 | Flatpak（`flatpak run <アプリ ID>`。`command` に書いたときも） | `~/.var/app/<アプリ ID>/claude-profiles`（サンドボックスから書ける場所。Chrome は 0.4 までと同じ） |
 | Snap（`/snap/bin/…`） | `~/snap/<名前>/common/claude-kitty-profiles`（隠しフォルダはサンドボックスから書けない） |
-| それ以外 | `$XDG_DATA_HOME/claude-kitty/browser-profiles`（既定 `~/.local/share/claude-kitty/browser-profiles`）。ネイティブの Chromium は同じ所の `chromium-profiles`（Chrome とは cookie の鍵が違うので共有しない） |
+| それ以外 | `$XDG_DATA_HOME/claude-kitty/browser-profiles`（既定 `~/.local/share/claude-kitty/browser-profiles`。macOS は `$XDG_DATA_HOME` が無ければ `~/Library/Application Support/claude-kitty/browser-profiles`）。ネイティブの Chromium は同じ所の `chromium-profiles`（Chrome とは cookie の鍵が違うので共有しない） |
 
 どれを使っているかは `claude-browser status`（`browser` と `profile_root`）と `claude-kitty doctor`（「Chrome」の行）で分かります。
-置き場を変えると、前のプロファイル（ログイン）と台帳は引き継がれません。窓の配置は KDE Plasma の KWin だけで、Chrome の窓は `--class=claude-browser-<名前>`（X11 では WM_CLASS、Wayland では app_id になる）で見分けます。
+置き場を変えると、前のプロファイル（ログイン）と台帳は引き継がれません。窓の配置は KDE Plasma の KWin で、Chrome の窓は `--class=claude-browser-<名前>`（X11 では WM_CLASS、Wayland では app_id になる）で見分けます。macOS は試験的に、kitty の窓の位置を CoreGraphics で読み、Chrome の窓を CDP（`Browser.setWindowBounds`）で置きます（「常に最前面」は無い。置けなければ普通の窓のまま開く。[SETUP.md の macOS の節](../SETUP.md#macos-での導入)）。
 
 ## state（claude-state: 状態の色）
 
@@ -149,9 +149,12 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 
 | 環境変数 | 意味 |
 |---|---|
-| `CLAUDE_KITTY_KITTY` / `CLAUDE_KITTY_KITTEN` | kitty / kitten の場所（既定は公式インストーラの `~/.local/kitty.app/bin/`、無ければ PATH） |
+| `CLAUDE_KITTY_KITTY` / `CLAUDE_KITTY_KITTEN` | kitty / kitten の場所（既定は公式インストーラの `~/.local/kitty.app/bin/`、無ければ PATH、macOS は `/Applications/kitty.app/Contents/MacOS/`） |
 | `CLAUDE_KITTY_QDBUS` | KWin を呼ぶ qdbus の場所（既定は PATH の `qdbus`・`qdbus6`・`qdbus-qt6` の最初のもの） |
 | `CLAUDE_KITTY_CLASS` / `CLAUDE_KITTY_START_AS` | `claude-kitty` が起動する kitty の窓のクラス（既定 `kitty-claude`）と起動の形（既定は `kitty.maximize` で `maximized` か `normal`） |
 | `CLAUDE_KITTY_BIN_DIR` | `tools/install.sh` と `claude-kitty doctor` が見るコマンドのリンクの場所（既定 `~/.local/bin`） |
 | `CLAUDE_CONFIG_DIR` | Claude Code の設定のフォルダ（既定 `~/.claude`。`settings.json` の hook をここで探す） |
 | `CLAUDE_GUARD_ALLOW` | claude-guard のガードを名前で通す（[guard-hook.md](guard-hook.md#通す道)） |
+| `CLAUDE_KITTY_LAUNCH_AGENTS` | macOS: `tools/install.sh --launchd` と `claude-kitty doctor` が見る LaunchAgent の場所（既定 `~/Library/LaunchAgents`） |
+| `CLAUDE_BROWSER_MAC_TITLEBAR` | macOS: claude-browser が kitty の窓から差し引くタイトルバーの高さ（ポイント。既定は kitty.conf の `hide_window_decorations` が `titlebar-only` などなら 0、それ以外は 28） |
+| `XDG_RUNTIME_DIR` | 道具の記録（claude-state・claude-browser・claude-wait など）と kitty の socket の置き場。無ければ（macOS など）記録は `/tmp/claude-kitty-<uid>`、socket は `/tmp/kitty-<pid>`（macOS は両方を探す） |

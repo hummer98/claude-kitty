@@ -11,7 +11,6 @@ kitty の watcher（kitty/claude_state_watcher.py）は、kitty が窓を作っ�
 - kitty が設定を読み直すと set-colors の色が全ペインで消える。ペインごとに、記録の色と get-colors の色が 2 回続けて
   違ったら、記録の色で塗り直す（1 回だけの違いは、hook が記録を書いてから色を変えるまでの間かもしれないので待つ）。
 """
-import glob
 import importlib.machinery
 import importlib.util
 import json
@@ -21,12 +20,14 @@ import socket
 import stat
 from pathlib import Path
 
+import proc
 from kstate import all_states, alive
+from rundir import kitty_socket_paths
 from state import background_for
 
 HERE = Path(__file__).resolve().parent.parent
 WATCHER = HERE / "kitty" / "claude_state_watcher.py"
-RC_VERSION = [0, 14, 2]  # kitty はこの番号を互換の確かめにしか使わない
+RC_VERSION = [0, 14, 2]  # kitty はこの番号を互換の確認にしか使わない
 _PREFIX, _SUFFIX = b"\x1bP@kitty-cmd", b"\x1b\\"
 
 
@@ -106,29 +107,19 @@ def rc_background(sock, wid, timeout=2.0):
     return None
 
 
-def _proc_exists(pid):
-    """pid が生きているか。/proc の無い macOS でも効くよう、signal 0 で確かめる（権限が無いのは生きている）。"""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, OverflowError):
-        return False
-    return True
+_proc_exists = proc.alive  # pid が生きているか（signal 0。/proc の無い macOS でも効く。lib/proc.py）
 
 
-def find_sockets(env, configured=None, exists=_proc_exists):
-    """見る kitty の socket（'unix:/path'）。設定があればそれ、無ければ $XDG_RUNTIME_DIR/kitty-* の生きているもの。
+def find_sockets(env, configured=None, exists=_proc_exists, platform=None):
+    """見る kitty の socket（'unix:/path'）。設定があればそれ、無ければ $XDG_RUNTIME_DIR/kitty-* の生きているもの
+    （無ければ /tmp/kitty-*。macOS は両方。lib/rundir.py の socket_dirs）。
 
     名前が kitty-<pid> で、その pid が無いもの（kitty が落ちて残った socket）は除く。
     """
     if configured:
         return list(dict.fromkeys(s for s in configured if isinstance(s, str) and s))
-    base = env.get("XDG_RUNTIME_DIR") or "/tmp"
     out = []
-    for p in sorted(glob.glob(os.path.join(base, "kitty-*"))):
+    for p in kitty_socket_paths(env, platform):
         m = re.search(r"kitty-(\d+)$", p)
         if m and not exists(int(m.group(1))):
             continue
@@ -145,7 +136,7 @@ def focused_pane(osw_list):
     """ユーザーがいま見ているペインの id: 前面の OS 窓（is_focused）の、表示中のタブ（is_active）の、入力先のペイン。
 
     kitty が前面でなければ（別のアプリ・別のデスクトップ）、どの OS 窓も is_focused でないので None。
-    ペインの is_focused はタブごとの「最後の入力先」なので、タブが表示中かも確かめる（state.viewing と同じ規則）。
+    ペインの is_focused はタブごとの「最後の入力先」なので、タブが表示中かも確認する（state.viewing と同じ規則）。
     """
     for osw in osw_list or []:
         if not osw.get("is_focused"):
@@ -234,7 +225,7 @@ class Watch:
                 done = self.w.mark_seen(self.d, wid, sock, now)  # ロックが取れなければ [] → 次の回にやり直す
                 for sid, bg in done[-1:]:
                     if bg:
-                        self._set(sock, wid, bg)  # hook が割り込んで食い違っても、色の確かめで記録の色に直る
+                        self._set(sock, wid, bg)  # hook が割り込んで食い違っても、色の確認で記録の色に直る
                 out += [(sock, wid, sid) for sid, _bg in done]
                 if done:
                     entries = all_states(self.d)
@@ -273,7 +264,7 @@ class Watch:
     def _set(self, sock, wid, bg):
         ok = self.set_bg(sock, wid, bg)
         if ok is False:
-            self.log(f"{sock}: ペイン {wid} を {bg} に塗れなかった（次の回の色の確かめで塗り直す）")
+            self.log(f"{sock}: ペイン {wid} を {bg} に塗れなかった（次の回の色の確認で塗り直す）")
         return ok
 
 

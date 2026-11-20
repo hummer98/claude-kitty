@@ -6,7 +6,8 @@
 行の頭: OK（よい）・NG（問題。直し方を → の後に）・注意（無くても主な道具は動く）・--（この環境では調べない）。
 終了コード: 0 = NG が無い、1 = NG がある。
 
-kitty には `kitten @ ls`（読むだけ）しか送らない。systemd は is-enabled / is-active だけ。設定は各道具の読み込みの関数で読む。
+kitty には `kitten @ ls`（読むだけ）しか送らない。systemd は is-enabled / is-active だけ、launchd は launchctl print
+だけ。設定は各道具の読み込みの関数で読む。
 """
 import json
 import os
@@ -22,6 +23,8 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / "tools"))
 
 UNITS = ["claude-state-watch.service", "claude-roster-save.timer", "claude-session-stats.timer"]
+AGENTS = ["claude-kitty.state-watch", "claude-kitty.roster-save", "claude-kitty.session-stats"]
+MIN_PYTHON = (3, 9)  # macOS の Command Line Tools の /usr/bin/python3 が 3.9
 HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-check", "guard": "claude-guard"}
 
 
@@ -130,7 +133,7 @@ def check_kitty(ctx, rep):
     rc, out = ctx.run([kitty, "--version"])
     m = re.search(r"kitty (\d+(?:\.\d+)+)", out or "")
     if rc != 0 or not m:
-        rep.ng("kitty", f"版を読めない（{kitty}）", "kitty --version が動くか確かめる")
+        rep.ng("kitty", f"版を読めない（{kitty}）", "kitty --version が動くか確認する")
     else:
         rep.ok("kitty", f"{m.group(1)}（{kitty}）")
     kitten = find_kitten(ctx)
@@ -139,9 +142,9 @@ def check_kitty(ctx, rep):
         rep.ng("kitten @ ls", "kitten が見つからない", "kitty と一緒に入る。別の場所なら $CLAUDE_KITTY_KITTEN で指す")
         return
     if not socks:
-        rep.warn("kitten @ ls", "動いている kitty のソケットが無い（確かめられない）",
+        rep.warn("kitten @ ls", "動いている kitty のソケットが無い（確認できない）",
                  "claude-kitty で kitty を起動してから、もう一度 claude-kitty doctor")
-        rep.warn("layout_state.pairs", "kitty が動いていないので確かめられない")
+        rep.warn("layout_state.pairs", "kitty が動いていないので確認できない")
         return
     pairs, splits, failed = 0, 0, []
     for s in socks:
@@ -160,14 +163,15 @@ def check_kitty(ctx, rep):
                     splits += 1
                     pairs += "pairs" in st
     if failed:
+        where = "/tmp" if ctx.os_name == "Darwin" else "${XDG_RUNTIME_DIR}"
         rep.ng("kitten @ ls", f"{len(failed)}/{len(socks)} の kitty で失敗（{failed[0]}）",
-               "kitty.conf に allow_remote_control socket-only と listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}"
+               f"kitty.conf に allow_remote_control socket-only と listen_on unix:{where}/kitty-{{kitty_pid}}"
                "（tools/install.sh --kitty）を入れ、kitty を起動し直す")
     else:
         rep.ok("kitten @ ls", f"{len(socks)} 個の kitty で通る")
     if splits == 0:
         if len(failed) < len(socks):
-            rep.warn("layout_state.pairs", "splits のタブが無いので確かめられない",
+            rep.warn("layout_state.pairs", "splits のタブが無いので確認できない",
                      "kitty.conf に enabled_layouts splits,stack（tools/install.sh --kitty）")
     elif pairs == splits:
         rep.ok("layout_state.pairs", f"splits の {splits} 個のタブで出る")
@@ -244,10 +248,13 @@ def check_kitty_conf(ctx, rep):
 
 def check_runtimes(ctx, rep):
     v = ".".join(map(str, ctx.python))
-    if tuple(ctx.python[:2]) >= (3, 10):
+    want = ".".join(map(str, MIN_PYTHON))
+    if tuple(ctx.python[:2]) >= MIN_PYTHON:
         rep.ok("python3", v)
     else:
-        rep.ng("python3", f"{v}（3.10 より古い）", "python3 を 3.10 以降にする")
+        fix = ("brew install python で 3.9 以降を入れ、PATH で /usr/bin より前にする" if ctx.os_name == "Darwin"
+               else f"python3 を {want} 以降にする")
+        rep.ng("python3", f"{v}（{want} より古い）", fix)
     node = ctx.which("node")
     if not node:
         rep.warn("node", "無い（claude-browser の shot などの CDP が使えない）", "Node.js 22 以降を入れる")
@@ -255,7 +262,7 @@ def check_runtimes(ctx, rep):
     rc, out = ctx.run([node, "--version"])
     m = re.match(r"v(\d+)\.", (out or "").strip())
     if rc != 0 or not m:
-        rep.warn("node", f"版を読めない（{node}）", "node --version が動くか確かめる")
+        rep.warn("node", f"版を読めない（{node}）", "node --version が動くか確認する")
     elif int(m.group(1)) >= 22:
         rep.ok("node", out.strip())
     else:
@@ -298,13 +305,23 @@ def check_hooks(ctx, rep):
         return
     for part, (state, missing) in M.status(data).items():
         name = f"hook: {HOOK_LABELS[part]}"
-        if state == "all":
-            rep.ok(name, "入っている")
-        elif state == "some":
-            rep.ng(name, f"一部だけ（無い: {', '.join(missing)}）", f"tools/install.sh --hooks={part}")
-        else:
+        if state == "none":
             rep.warn(name, "入っていない", f"使うなら tools/install.sh --hooks={part}")
             continue
+        details, fixes = [], []
+        if state == "some":
+            details.append(f"一部だけ（無い: {', '.join(missing)}）")
+            fixes.append(f"tools/install.sh --hooks={part}")
+        lost = hook_programs_missing(ctx, M, data, part)
+        if lost:
+            # 道具が見つからない hook は、Claude Code の中で黙って失敗する（色が変わらない・ガードが効かない）
+            details.append(f"hook の道具が見つからない: {', '.join(lost)}")
+            fixes.append("tools/install.sh --links でリンクを張り PATH に ~/.local/bin を入れるか、settings.json の command を"
+                         f"このリポジトリの bin の絶対パス（{ctx.repo / 'bin'}/…）に書き直す")
+        if details:
+            rep.ng(name, "。".join(details), "。".join(fixes))
+        else:
+            rep.ok(name, "入っている")
         if part == "lang" and state != "none":
             from langcheck import load_lang_config
             cfg, _problems = load_lang_config(ctx.env)
@@ -314,11 +331,63 @@ def check_hooks(ctx, rep):
                          "設定の lang.language に ja・zh・ko のどれかを書く（docs/config.md）")
 
 
-# ---- systemd ------------------------------------------------------------------
+def hook_programs_missing(ctx, M, data, part):
+    """その部品の hook の command のうち、道具（最初の語）が絶対パスでも PATH でも見つからないもの。
+
+    PATH は doctor を動かしたシェルのもの（Claude Code を別の環境から起動すると違うことがある。素の名前の hook が
+    ここで見つかっても、Claude Code の PATH に無ければ失敗する）。"""
+    lost = []
+    for c in M.commands(data, part):
+        prog = M.program(c)
+        if not prog:
+            continue
+        p = prog.replace("${HOME}", str(ctx.home)).replace("$HOME", str(ctx.home))
+        if p == "~" or p.startswith("~/"):
+            p = str(ctx.home) + p[1:]       # 調べる環境の HOME（doctor を動かしたプロセスの HOME ではない）
+        else:
+            p = os.path.expanduser(p)       # ~user の形
+        if "/" in p:
+            ok = os.path.isfile(p) and os.access(p, os.X_OK)
+        else:
+            ok = bool(ctx.which(p))
+        if not ok and prog not in lost:
+            lost.append(prog)
+    return lost
+
+
+# ---- systemd / launchd ----------------------------------------------------------
+
+def check_launchd(ctx, rep):
+    """macOS: contrib/launchd の LaunchAgent が入っていて、launchctl に読み込まれているか。"""
+    agent_dir = Path(ctx.env.get("CLAUDE_KITTY_LAUNCH_AGENTS") or ctx.home / "Library" / "LaunchAgents")
+    lc = ctx.which("launchctl") or ("/bin/launchctl" if os.path.exists("/bin/launchctl") else None)
+    uid = os.getuid()
+    for label in AGENTS:
+        name = f"launchd: {label}"
+        if not (agent_dir / f"{label}.plist").exists():
+            fix = "tools/install.sh --launchd"
+            if label == "claude-kitty.state-watch":
+                rep.warn(name, "入っていない（見た完了の緑が idle に戻らない・消えた色が塗り直されない）", fix)
+            else:
+                rep.warn(name, "入っていない", fix)
+            continue
+        if not lc:
+            rep.warn(name, "launchctl が無いので読み込みを確認できない")
+            continue
+        rc, _out = ctx.run([lc, "print", f"gui/{uid}/{label}"])
+        if rc == 0:
+            rep.ok(name, "入っていて、読み込まれている")
+        else:
+            rep.ng(name, "入っているが、読み込まれていない",
+                   f"launchctl bootstrap gui/{uid} {agent_dir / (label + '.plist')}（理由は ~/Library/Logs/claude-kitty/）")
+
 
 def check_systemd(ctx, rep):
+    if ctx.os_name == "Darwin":
+        check_launchd(ctx, rep)
+        return
     if ctx.os_name != "Linux":
-        rep.skip("systemd", f"{ctx.os_name} では使わない（macOS は launchd。SETUP.md）")
+        rep.skip("systemd", f"{ctx.os_name} では使わない")
         return
     sc = ctx.which("systemctl")
     if not sc:
@@ -426,12 +495,15 @@ def check_desktop(ctx, rep):
                      "使えない（ほかは動く。窓の操作は KDE Plasma 専用）")
         check_browser(ctx, rep)
     elif ctx.os_name == "Darwin":
-        rep.skip("KWin", "macOS では使わない")
-        app = "/Applications/Google Chrome.app"
-        if os.path.isdir(app) or os.path.isdir(str(ctx.home / app.lstrip("/"))):
-            rep.ok("Chrome", app)
+        rep.skip("KWin", "macOS では使わない（claude-browser の重ね置きは試験的に CoreGraphics と CDP で行う。"
+                         "claude-kitty の最大化・デスクトップ移動はしない。SETUP.md の macOS の節）")
+        lsappinfo = ctx.which("lsappinfo") or ("/usr/bin/lsappinfo" if os.path.exists("/usr/bin/lsappinfo") else None)
+        if lsappinfo:
+            rep.ok("前面のアプリ（view.guard）", f"{lsappinfo} で読める")
         else:
-            rep.warn("Chrome", "Google Chrome.app が無い", "claude-browser を使うなら Chrome を入れる（窓の操作は SETUP.md の移植の手引き）")
+            rep.warn("前面のアプリ（view.guard）", "lsappinfo が無い（view.guard を設定すると、当たるプロセスが動いているだけで"
+                     "並べ替えを控える）")
+        check_browser(ctx, rep)
     else:
         rep.skip("KWin / Chrome", f"{ctx.os_name} では調べない")
 
@@ -445,7 +517,7 @@ def run_checks(ctx):
     for c in CHECKS:
         try:
             c(ctx, rep)
-        except Exception as e:  # noqa: BLE001  1 つの確かめが落ちても残りは出す
+        except Exception as e:  # noqa: BLE001  1 つの確認が落ちても残りは出す
             rep.ng(c.__name__.replace("check_", ""), f"調べる途中で失敗した: {type(e).__name__}: {e}",
                    "claude-kitty の不具合かもしれない（CONTRIBUTING.md の issue へ）")
     return rep

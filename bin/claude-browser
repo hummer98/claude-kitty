@@ -18,7 +18,8 @@ kitty は縮めない（縮めると全ペインの claude-code が再描画で�
 プロファイル名は起動し直しても変わらないもの（ペインの user var role > slot > セッション ID）。
 プロファイルは残すので、パスキー等のログインは一度人が済ませれば以後そのまま使える。
 起動する Chrome（Chromium）は設定の browser.command、無ければ自動で探す（順は lib/browser.py。status に出る）。
-窓の配置は KDE Plasma の KWin だけ。
+窓の配置は KDE Plasma の KWin。macOS は試験的に、kitty の窓の矩形を CoreGraphics（lib/macwin.py）で読み、
+Chrome の窓を CDP の Browser.setWindowBounds で置く（「常に最前面」は無い。置けなければ普通の窓のまま開く）。
 """
 import argparse
 import json
@@ -33,12 +34,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
+import proc  # noqa: E402
 from browser import SEARCHED, find_browser  # noqa: E402
 from config import kitten_path, load_browser_config, load_view_config  # noqa: E402
 from core import (choose_key, kitty_pid_from_socket, ledger_touch,  # noqa: E402
                   parse_journal, profile_processes, resolve_pane, resolve_place_opts)
 from geometry import (fit_correction, others_area_fraction, right_area_fraction,  # noqa: E402
                       tab_pane_fraction, target_rect)
+from rundir import live_kitty_sockets, runtime_dir  # noqa: E402
 
 KITTEN = kitten_path(os.environ)
 CHROME_FLAGS = [
@@ -49,12 +52,14 @@ CHROME_FLAGS = [
 ]
 # 起動する Chrome とプロファイルの置き場は setup_browser() が決める（探す順と置き場は lib/browser.py）。
 # Flatpak なら ~/.var/app/<アプリ ID>/claude-profiles（サンドボックスから書ける場所）、ほかは
-# $XDG_DATA_HOME/claude-kitty/browser-profiles。設定の browser.command / browser.profile_root で変える
+# $XDG_DATA_HOME/claude-kitty/browser-profiles（macOS は ~/Library/Application Support/claude-kitty/browser-profiles）。
+# 設定の browser.command / browser.profile_root で変える
 CHROME = None
 BROWSER = None
 PROFILE_ROOT = None
 LEDGER = None
-STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "claude-browser"
+STATE_DIR = runtime_dir() / "claude-browser"
+PLATFORM = sys.platform  # テストで偽の OS にするため
 CDP = HERE / "lib" / "cdp.mjs"
 PLACE_KEYS = ("mode", "ratio", "over", "focus", "area")  # 既定と引き継ぎは core.resolve_place_opts
 SETTLE = 0.4  # 配置してから、窓の大きさが落ち着くまで待つ秒数（Chrome が自分で大きさを戻すことがある）
@@ -119,17 +124,13 @@ def save_state(key, st):
 
 
 def scan_procs():
-    for d in Path("/proc").iterdir():
-        if d.name.isdigit():
-            try:
-                yield int(d.name), (d / "cmdline").read_bytes().decode(errors="replace").split("\0")
-            except OSError:
-                pass
+    """[(pid, 引数のリスト)]（Linux は /proc、macOS は sysctl。lib/proc.py）。"""
+    return proc.processes()
 
 
 def running(profile):
     """このプロファイルの Chrome の (pid 一覧, ポート)。ポートはプロセスの引数から取る（持ち主の確認を兼ねる）。"""
-    found = profile_processes(scan_procs(), str(profile))
+    found = profile_processes(scan_procs(), str(profile), loose=not proc.is_linux())
     ports = [p for _, p in found if p]
     return [pid for pid, _ in found], (ports[0] if ports else None)
 
@@ -181,12 +182,13 @@ def kitty_socket():
     env = os.environ.get("KITTY_LISTEN_ON")
     if env:
         return env
-    rt = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
     # 生きている kitty のソケットだけを候補にする（クラッシュ後に残ったものを拾わない）
-    socks = [p for p in rt.glob("kitty-*") if (pid := kitty_pid_from_socket(str(p))) and Path(f"/proc/{pid}").exists()]
+    socks = live_kitty_sockets(os.environ)
+    if not socks:
+        die("kitty が見つからない（kitty の中で動かすか、claude-kitty で起動する。別の kitty なら KITTY_LISTEN_ON を設定する）")
     if len(socks) != 1:
         die("kitty のソケットを 1 つに決められない（KITTY_LISTEN_ON を設定するか kitty の中で呼ぶ）")
-    return f"unix:{socks[0]}"
+    return socks[0]
 
 
 def kitty_ls(sock):
@@ -283,6 +285,68 @@ def main_browser_window(st):
     return max(wins, key=lambda w: w["area"])["id"] if wins else None
 
 
+# ---------- macOS（試験的）----------
+def is_mac():
+    return PLATFORM == "darwin"
+
+
+def warn(msg):
+    print(f"claude-browser: {msg}", file=sys.stderr)
+
+
+def find_kitty_mac(kitty_pid, osw):
+    """kitty の OS 窓のクライアント領域を CoreGraphics から読み、(None, (x, y, w, h)) を返す。読めなければ None（止めない）。"""
+    from macwin import MacWinError, kitty_client
+    try:
+        return None, kitty_client(kitty_pid, osw.get("platform_window_id"), os.environ)
+    except MacWinError as e:
+        warn(f"macOS: kitty の窓の位置を読めないので、ペインに重ねずに普通の窓で開く（{e}）")
+        return None
+
+
+def mac_window_id(port):
+    r = node(port, "window", check=False)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip().isdigit() else None
+
+
+def mac_placement(st, opts, kitty_win, tab, pane):
+    """macOS: CDP の Browser.setWindowBounds で Chrome の窓を置く。失敗しても止めない（普通の窓のまま）。
+
+    「常に最前面」は無い。Chrome を前に出す（Page.bringToFront。入力先も Chrome に移る）のは --focus browser の
+    ときだけ。既定の kitty と none は入力先を動かさない（打っている途中の文字が Chrome に入らないように）ので、
+    Chrome が kitty の後ろに隠れることがある。"""
+    st.update(kwin_id=None, mode=opts["mode"], ratio=float(opts["ratio"]),
+              over=opts["over"], focus=opts["focus"], area=opts["area"])
+    if kitty_win is None:
+        return None
+    _kid, client = kitty_win
+    try:
+        frac = area_fraction(opts, tab, pane, own_window_id())
+    except (KeyError, ValueError) as e:
+        warn(f"重ねる場所を計算できないので、普通の窓のまま（{e}）")
+        return None
+    rect = target_rect(client, frac, opts["mode"], float(opts["ratio"]))
+    wid = mac_window_id(st["port"])
+    if wid is None:
+        warn("Chrome の窓の ID を CDP で取れないので、普通の窓のまま")
+        return None
+    r = node(st["port"], "place", wid, *map(str, rect), check=False)
+    if r.returncode:
+        warn(f"Chrome の窓を置けなかった（{(r.stderr or r.stdout).strip()}）。普通の窓のまま")
+        return None
+    try:
+        got = tuple(json.loads(r.stdout))
+    except ValueError:
+        got = None
+    if opts["focus"] == "browser":
+        node(st["port"], "front", check=False)
+    else:
+        warn("macOS: 入力先を動かさないので、Chrome が kitty の後ろに隠れていることがある（前に出すなら --focus browser）")
+    if got and _off(rect, got) > 8:
+        warn(f"窓が指定の位置に収まらない（指定 {rect}、実際 {got}）")
+    return rect
+
+
 # ---------- commands ----------
 def prepare(args, st, move=False):
     """起動の前に配置先を確定させる（失敗してから Chrome が残らないように）。"""
@@ -299,6 +363,8 @@ def prepare(args, st, move=False):
     kitty_pid = kitty_pid_from_socket(sock)
     if not kitty_pid:
         die(f"kitty のソケット名から pid が分からない: {sock}")
+    if is_mac():
+        return opts, find_kitty_mac(kitty_pid, osw), tab, pane
     active = next((w for t in osw["tabs"] if t.get("is_active") for w in t["windows"] if w.get("is_active")), pane)
     kitty_win = find_kitty(kitty_pid, active.get("title", ""))  # Chrome を起動する前に決めておく
     return opts, kitty_win, tab, pane
@@ -339,6 +405,8 @@ def area_fraction(opts, tab, pane, own_id=None):
 
 
 def placement(st, opts, kitty_win, tab, pane, settle=SETTLE):
+    if is_mac():
+        return mac_placement(st, opts, kitty_win, tab, pane)
     kitty_id, client = kitty_win
     try:
         frac = area_fraction(opts, tab, pane, own_window_id())
@@ -381,9 +449,16 @@ def wait_http(port, seconds):
     return False
 
 
-def wait_window(cls, seconds):
+def has_window(cls, port):
+    """Chrome の窓が出ているか（KWin で窓のクラスを探す。macOS は CDP で窓の ID が取れるか）。"""
+    if is_mac():
+        return mac_window_id(port) is not None
+    return bool(browser_windows(cls))
+
+
+def wait_window(cls, seconds, port=None):
     for _ in range(int(seconds * 4)):
-        if browser_windows(cls):
+        if has_window(cls, port):
             return True
         time.sleep(0.25)
     return False
@@ -391,7 +466,7 @@ def wait_window(cls, seconds):
 
 def wait_ready(port, cls, seconds):
     for _ in range(int(seconds * 4)):
-        if http_ok(port) and browser_windows(cls):
+        if http_ok(port) and has_window(cls, port):
             return True
         time.sleep(0.25)
     return False
@@ -419,7 +494,7 @@ def cmd_open(args, key):
         st.update(port=port, **{"class": cls, "profile": str(profile)})
         save_state(key, st)
         node(port, "goto", args.url)  # タブが無ければ cdp.mjs が作る
-        if not wait_window(cls, 10):
+        if not wait_window(cls, 10, port):
             die("Chrome の窓が出てこない")
     else:
         if not CHROME:

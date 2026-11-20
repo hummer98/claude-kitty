@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- claude-session-stats を毎週月曜の 7:30 に走らせる（contrib/systemd/claude-session-stats.timer の macOS 版）。
+     眠っていて逃したら、launchd が起きたときに 1 回走らせる。今日より前の直近の日曜までを数える。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>claude-kitty.session-stats</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@REPO@@/bin/claude-session-stats</string>
+    <string>--end</string>
+    <string>last-sunday</string>
+    <string>--out</string>
+    <string>@@HOME@@/.local/share/claude-kitty/stats/session_stats_{end}.md</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@@PATH@@</string>
+    <key>HOME</key><string>@@HOME@@</string>@@EXTRA_ENV@@
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key><integer>1</integer>
+    <key>Hour</key><integer>7</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>Nice</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>@@LOGDIR@@/session-stats.log</string>
+  <key>StandardErrorPath</key><string>@@LOGDIR@@/session-stats.log</string>
+</dict>
+</plist>

@@ -11,7 +11,7 @@
 - 入力先は動かさない（HTML の Chrome も画像の overlay も、フォーカスを取らない。ユーザーが打っている途中の
   文字が、別の窓に入ってしまわないように）。
 - 保護する窓（view.guard、全画面のアプリや発表中の画面など）が前面なら何もしないで、その旨を返す（exit 2）。
-- kitty の外では xdg-open に渡す。
+- kitty の外では xdg-open（macOS は open）に渡す。
 使う kitten @ は ls・launch だけ（close 系と send-text は使わない）。
 """
 import argparse
@@ -32,6 +32,12 @@ from state import find_window  # noqa: E402
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 HTML_EXT = {".html", ".htm", ".xhtml"}
 BROWSER = HERE / "bin" / "claude-browser"
+PLATFORM = sys.platform
+
+
+def opener(platform=None):
+    """kitty の外で開くコマンド（macOS は open、ほかは xdg-open）。"""
+    return "open" if (PLATFORM if platform is None else platform) == "darwin" else "xdg-open"
 
 
 def classify(target):
@@ -51,14 +57,14 @@ def classify(target):
 
 
 def is_guarded(env, run=subprocess.run, active_pid=None):
-    """(保護する窓が前面か, 理由)。前面の窓を確かめられないときも「動かさない」側に倒す。"""
+    """(保護する窓が前面か, 理由)。前面の窓を確認できないときも「動かさない」側に倒す。"""
     try:
         patterns = load_view_config(env)["guard"]
         return guarded_in_front(patterns, run=run, active_pid=active_pid), "保護する窓（view.guard）が前面にある"
     except ValueError as e:
         return True, str(e)
     except SystemExit:  # kwin.die（前面の窓が分からない）
-        return True, "前面の窓を確かめられない"
+        return True, "前面の窓を確認できない"
 
 
 def overlay_args(kitten, wid, path):
@@ -78,8 +84,12 @@ def show(target, env, ratio, run=subprocess.run, active_pid=None):
         return 2, {"skipped": why, "target": str(val)}
     wid, sock = env.get("KITTY_WINDOW_ID"), env.get("KITTY_LISTEN_ON")
     if not wid or not sock:
-        r = run(["xdg-open", val if kind == "url" else str(val)], capture_output=True, text=True)
-        return (0 if r.returncode == 0 else 1), {"shown": "xdg-open", "target": str(val)}
+        cmd = opener()
+        try:
+            r = run([cmd, val if kind == "url" else str(val)], capture_output=True, text=True)
+        except OSError as e:
+            return 1, {"error": f"{cmd} を動かせない: {e}", "target": str(val)}
+        return (0 if r.returncode == 0 else 1), {"shown": cmd, "target": str(val)}
     if kind in ("url", "html"):
         url = val if kind == "url" else val.as_uri()
         cmd = [str(BROWSER), "open", url, "--area", "others", "--mode", "show", "--focus", "none"]

@@ -1,6 +1,6 @@
 """claude-state の副作用のある部分（state ファイル・ロック・kitten の呼び出し）。claude-view からも使う。
 
-state ファイル: $XDG_RUNTIME_DIR/claude-state/<session_id>.json
+state ファイル: $XDG_RUNTIME_DIR/claude-state/<session_id>.json（無ければ /tmp/claude-kitty-<uid>/claude-state。lib/rundir.py）
   {"session_id", "state", "since", "updated", "reason", "waits", "agents", "main", "seen", "quiet", "seen_before",
    "window", "socket", "role", "pid", "cwd", "background", "idle_background", "done_dwell"}
   state は waits（待ち）・agents（サブエージェント）・main（本体が動いているか）・seen から state.derive() で決める。
@@ -13,12 +13,14 @@ import subprocess
 import time
 from pathlib import Path
 
+import proc
+from rundir import runtime_dir
 from state import is_claude_argv, tab_mark_ops, valid_session_id
 
 
 def state_dir(env=None):
-    env = os.environ if env is None else env
-    return Path(env.get("XDG_RUNTIME_DIR") or "/tmp") / "claude-state"
+    """記録の置き場（$XDG_RUNTIME_DIR/claude-state、無ければ /tmp/claude-kitty-<uid>/claude-state。lib/rundir.py）。"""
+    return runtime_dir(env) / "claude-state"
 
 
 def state_file(d, sid):
@@ -59,10 +61,10 @@ def alive(entry):
     pid = entry.get("pid")
     if not isinstance(pid, int) or pid <= 0:
         return True  # pid が分からない記録は、消さずに残す（判断できない）
-    try:
-        argv = [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
-    except OSError:
-        return False
+    argv = proc.argv(pid)
+    if argv is None:
+        # 引数が読めない: 終わったか、読めない OS・権限。生きていれば残す（判断できないものは消さない）
+        return proc.alive(pid)
     return is_claude_argv(argv)
 
 

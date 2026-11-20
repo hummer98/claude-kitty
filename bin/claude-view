@@ -30,10 +30,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
 from config import kitten_path, load_view_config  # noqa: E402
-from core import kitty_pid_from_socket  # noqa: E402
 from geometry import tab_pane_fraction  # noqa: E402
 from guard import guarded_in_front as _guarded_in_front  # noqa: E402
 from kstate import Kitten, refresh_marks, state_dir, state_lock  # noqa: E402
+from rundir import live_kitty_sockets, runtime_dir  # noqa: E402
 from view import (add_role, current_rows, overlay_ids, parse_rows, plan, remove_role,  # noqa: E402
                   split_two, swap_roles, validate)
 
@@ -51,14 +51,15 @@ def kitty_socket(arg, left):
         return arg
     if os.environ.get("KITTY_LISTEN_ON"):
         return os.environ["KITTY_LISTEN_ON"]
-    rt = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
-    live = [p for p in rt.glob("kitty-*") if (pid := kitty_pid_from_socket(str(p))) and Path(f"/proc/{pid}").exists()]
+    # 生きている kitty の socket（$XDG_RUNTIME_DIR か /tmp の kitty-<pid>。落ちて残ったものは除く）
+    live = live_kitty_sockets(os.environ)
+    if not live:
+        die("kitty が見つからない（kitty の中で動かすか、claude-kitty で起動する。別の場所の socket なら --to で指定する）")
     # 統括（左の枠）のいる kitty を選ぶ（テスト用の kitty が同時にあっても取り違えない）
-    hits = [p for p in live if any(w["user_vars"].get("role") == left
-                                   for w in windows(ls(f"unix:{p}")))]
+    hits = [s for s in live if any(w["user_vars"].get("role") == left for w in windows(ls(s)))]
     if len(hits) != 1:
         die("対象の kitty を 1 つに決められない（--to で指定する）")
-    return f"unix:{hits[0]}"
+    return hits[0]
 
 
 def kitten(sock, *args, check=True):
@@ -177,7 +178,7 @@ def main(argv=None):
         die("保護する窓（view.guard）が前面にあるので何もしない（--force で実行）", 2)
 
     # 同時に 2 つ並べ替えると形が崩れるので 1 つずつ
-    lock = open(Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "claude-view.lock", "w")
+    lock = open(runtime_dir() / "claude-view.lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     osw_list = ls(sock)
     rmap = role_map(osw_list)

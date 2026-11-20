@@ -647,7 +647,7 @@ def proc_start(pid):
 
 
 class ClaudeWait(unittest.TestCase):
-    """偽の sessions ディレクトリと偽の claude で、二重起動しないことを確かめる。
+    """偽の sessions ディレクトリと偽の claude で、二重起動しないことを確認する。
 
     固定の sleep で「そろそろ読んだはず」と決めると、負荷しだいで落ちる（2026-11-20、20 回に 1 回）。
     待ち受けの出力（CLAUDE_WAIT_TRACE の判定の変化と、待ち始めの表示）が出るまで待ってから次へ進む。
@@ -1019,7 +1019,7 @@ class ClaudeViewCli(unittest.TestCase):
         finally:
             s.kill(); s.wait()
         self.assertIn("qdbus", self.calls.read_text())  # 前面の確認をした
-        self.assertNotIn("detach-window", self.calls.read_text())  # 前面を確かめられなければ並べ替えない
+        self.assertNotIn("detach-window", self.calls.read_text())  # 前面を確認できなければ並べ替えない
         self.assertNotEqual(r.returncode, 0)
 
     def test_guard_does_not_send_desktop_notifications(self):
@@ -2146,7 +2146,7 @@ class ClaudeStateCli(unittest.TestCase):
 
     def test_permission_request_hook_is_silent_and_waits_for_its_tool(self):
         self.hook("UserPromptSubmit")
-        self.hook("PermissionRequest", dict(BASH_A))  # stdout が空 = 許可の判断をしない（hook() が確かめる）
+        self.hook("PermissionRequest", dict(BASH_A))  # stdout が空 = 許可の判断をしない（hook() が確認する）
         self.assertEqual(self.state()["state"], "waiting")
         self.hook("PostToolUse", dict(BASH_B, agent_id="x", tool_use_id="z"))
         self.assertEqual(self.state()["state"], "waiting")
@@ -2525,7 +2525,7 @@ class StateWatch(unittest.TestCase):
         return v
 
     def get_bg(self, sock, wid):
-        return self.colors.get((sock, wid))  # 分からなければ None（塗り直しを確かめるテストだけ色を入れる）
+        return self.colors.get((sock, wid))  # 分からなければ None（塗り直しを確認するテストだけ色を入れる）
 
     def set_bg(self, sock, wid, bg):
         self.sets.append((sock, wid, bg))
@@ -2920,6 +2920,7 @@ SIDE_TESTS = {
     "doctor_test": "Doctor",
     "launch_test": "Launch",
     "browser_test": "Browser",
+    "macos_test": "Mac",
 }
 
 

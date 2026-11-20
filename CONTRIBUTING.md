@@ -29,8 +29,8 @@ python3 tests/run.py
 
 これ 1 つで全部が走ります（`tests/run.py` が `tests/*_test.py` も読み込みます。新しいテストのファイルを足したら、`tests/run.py` の `SIDE_TESTS` にも足してください）。
 
-- 標準ライブラリだけを使います。kitty・Claude Code・Chrome・KWin・Node は使いません（どれも偽物に置き換えています）。要るのは Python 3.10 以降（CI は 3.12 と最新）、`git`、`pgrep`（procps）です。
-- kitty のペインの中で走らせても、外と同じ結果になるようにしてください。テストは `KITTY_*` や `CLAUDE_*` の環境変数に頼らず、要るものは自分で与えます。CI と同じ条件は次で確かめられます。
+- 標準ライブラリだけを使います。kitty・Claude Code・Chrome・KWin・Node は使いません（どれも偽物に置き換えています）。要るのは Python 3.9 以降（CI は 3.9・3.12・最新）、`git`、`pgrep`（procps）です。
+- kitty のペインの中で走らせても、外と同じ結果になるようにしてください。テストは `KITTY_*` や `CLAUDE_*` の環境変数に頼らず、要るものは自分で与えます。CI と同じ条件は次で確認できます。
   ```sh
   env -i PATH=/usr/bin:/bin HOME="$(mktemp -d)" LANG=C.UTF-8 python3 tests/run.py
   ```
@@ -52,7 +52,7 @@ python3 tests/run.py
 ## コミット
 
 - 意味のある単位で分けます。
-- メッセージは英語で、1 行目に何をしたか、本文に **なぜ** を書きます（何が困っていたか、なぜこの作りにしたか、何を確かめたか）。差分を読めば分かる「何を」の繰り返しより、差分からは分からない理由を。
+- メッセージは英語で、1 行目に何をしたか、本文に **なぜ** を書きます（何が困っていたか、なぜこの作りにしたか、何を確認したか）。差分を読めば分かる「何を」の繰り返しより、差分からは分からない理由を。
 - 推測で直したところは、そう書いてください（例: 「These causes are inferred from the code; the fix still needs checking on the real desktop.」）。
 - テストが通ってからコミットします。
 
@@ -70,9 +70,9 @@ python3 tests/run.py
 1. `CHANGELOG.md` の `## [Unreleased]` の中身を、新しい `## [X.Y.Z] - YYYY-MM-DD` の節に移し、`[Unreleased]` を空にします。末尾の比較リンク（`[Unreleased]: …/compare/vX.Y.Z...HEAD` と `[X.Y.Z]: …/compare/v前の版...vX.Y.Z`）も直します。
 2. `VERSION` を `X.Y.Z` にします。
 3. 1 と 2 をコミットします。
-4. `tools/release.sh X.Y.Z --dry-run` で、確かめる内容・release の本文・行う操作を見ます。
+4. `tools/release.sh X.Y.Z --dry-run` で、確認する内容・release の本文・行う操作を見ます。
 5. `tools/release.sh X.Y.Z` を実行します。
 
-`tools/release.sh` は、`main` にいること・作業ツリーがきれいなこと・`VERSION` と CHANGELOG の見出しが合うこと・タグ `vX.Y.Z` が手元にも origin にも無いことを確かめ、テストを走らせてから、軽量タグ `vX.Y.Z` を付け、`main` とそのタグだけを push します（`--all`・`--tags` は使いません）。タグの push を受けて `.github/workflows/release.yml` が、`main` の CHANGELOG の該当の節を本文にして GitHub の release を作ります。
+`tools/release.sh` は、`main` にいること・作業ツリーがきれいなこと・`VERSION` と CHANGELOG の見出しが合うこと・タグ `vX.Y.Z` が手元にも origin にも無いことを確認し、テストを走らせてから、軽量タグ `vX.Y.Z` を付け、`main` とそのタグだけを push します（`--all`・`--tags` は使いません）。タグの push を受けて `.github/workflows/release.yml` が、`main` の CHANGELOG の該当の節を本文にして GitHub の release を作ります。
 
 過去の commit に版のタグを付けるときは `tools/release.sh X.Y.Z --at <commit>` です。`VERSION` とテストは見ず、`main` も push せず、タグだけを push します（その commit が origin/main にあり、origin/main の CHANGELOG にその版の節があること）。過去の commit には `release.yml` が無いのでタグの push では release が作られません。`gh workflow run release.yml -f tag=vX.Y.Z` で、既定の枝の定義から作ります。

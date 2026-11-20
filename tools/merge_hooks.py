@@ -109,6 +109,31 @@ def present(data, event, tool, args):
     return False
 
 
+def commands(data, part):
+    """その部品の道具を呼んでいる hook の command の文字列（重なりなし、出てきた順）。doctor が道具の有無を調べる用。"""
+    tools = {tool for _ev, _m, tool, _a in PARTS[part]}
+    out = []
+    for groups in (data.get("hooks") or {}).values():
+        for g in groups if isinstance(groups, list) else []:
+            for h in g.get("hooks", []) if isinstance(g, dict) else []:
+                c = h.get("command") if isinstance(h, dict) else None
+                ident = identity(c)
+                if ident and ident[0] in tools and c not in out:
+                    out.append(c)
+    return out
+
+
+def program(command):
+    """command の最初の語（頭の VAR=値 を除く）。読めなければ None。"""
+    try:
+        words = shlex.split(command)
+    except (ValueError, AttributeError):
+        return None
+    while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+        words = words[1:]
+    return words[0] if words else None
+
+
 def status(data):
     """部品ごとに {"part": ("all" | "some" | "none", [足りないイベント])}。doctor 用。"""
     out = {}
@@ -119,7 +144,8 @@ def status(data):
 
 
 def command_for(repo, tool, args):
-    """書く command。PATH に頼らないよう、リポジトリの bin の絶対パスで書く。"""
+    """書く command。PATH に頼らないよう、リポジトリの bin の絶対パスで書く（Claude Code を GUI や別のシェルから
+    起動して ~/.local/bin が PATH に無くても、hook が黙って失敗しないように）。"""
     return " ".join([shlex.quote(str(Path(repo) / "bin" / tool))] + [shlex.quote(a) for a in args])
 
 

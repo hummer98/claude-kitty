@@ -28,16 +28,17 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
 from config import kitten_path, load_roster_config, load_view_config  # noqa: E402
-from core import kitty_pid_from_socket  # noqa: E402
 from geometry import tab_pane_fraction  # noqa: E402
 from guard import guarded_in_front  # noqa: E402
+import proc  # noqa: E402
 import roster as R  # noqa: E402
+from rundir import live_kitty_sockets, runtime_dir  # noqa: E402
 
 ENV = os.environ
 KITTEN = kitten_path(ENV)
 SESSIONS = Path(ENV.get("CLAUDE_SESSIONS_DIR") or Path.home() / ".claude/sessions")
 PROJECTS = Path(ENV.get("CLAUDE_PROJECTS_DIR") or Path.home() / ".claude/projects")
-RT = Path(ENV.get("XDG_RUNTIME_DIR") or "/tmp")
+RT = runtime_dir(ENV)  # 記録の置き場（claude-wait と同じ。lib/rundir.py）。kitty の socket は find_sockets で探す
 
 
 def die(msg, code=1):
@@ -63,24 +64,22 @@ def roster_conf():
 # ---- プロセスとセッション ---------------------------------------------------
 
 def start_time(pid):
-    try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
-    except (OSError, IndexError):
+    """起動時刻（lib/proc.py。Linux は /proc、macOS は sysctl）。Linux 以外で読めなくても生きていれば "alive"
+    （claude-wait と同じ決まり。止めた相手がまだいるのを「いない」と取り違えないように）。"""
+    if not isinstance(pid, int):
         return None
+    s = proc.start_time(pid)
+    if s is None and not proc.is_linux() and proc.alive(pid):
+        return "alive"
+    return s
 
 
 def ppid_of(pid):
-    try:
-        return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
-    except (OSError, IndexError, ValueError):
-        return None
+    return proc.ppid(pid) if isinstance(pid, int) else None
 
 
 def cmdline(pid):
-    try:
-        return [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
-    except OSError:
-        return []
+    return proc.argv(pid) or []
 
 
 def live_sessions():
@@ -95,8 +94,8 @@ def live_sessions():
             continue
         pid = d.get("pid") or (int(f.stem) if f.stem.isdigit() else None)
         st = start_time(pid) if pid else None
-        if st is None or (d.get("procStart") is not None and str(d["procStart"]) != st):
-            continue
+        if st is None or not proc.proc_start_matches(d.get("procStart"), st):
+            continue  # 終わった、または pid が別のプロセスに再利用されている（procStart と比べるのは Linux だけ）
         d["pid"] = pid
         out.append(d)
     return out
@@ -106,17 +105,17 @@ def busy_sessions(sessions):
     """{session_id: 理由}。どこかで claude が開いている、または claude-wait が待っている ID（開くと二重になる）。
 
     claude-wait のロックは試しに取ると、ちょうど起動した claude-wait を追い返してしまうので、
-    /proc のコマンド行で見る。
+    プロセスのコマンド行で見る（lib/proc.py）。
     """
     busy = {s["sessionId"]: f"いま動いている (pid {s['pid']})" for s in sessions if s.get("sessionId")}
     me = os.getpid()
-    for p in Path("/proc").iterdir():
-        if not p.name.isdigit() or int(p.name) == me:
+    for pid, argv in proc.processes():
+        if pid == me:
             continue
-        info = R.parse_argv(cmdline(int(p.name)))
+        info = R.parse_argv(argv)
         if info and info.get("session_id") and info["session_id"] not in busy:
             what = "claude-wait が待っている" if info["tool"] == "claude-wait" else "claude が開いている"
-            busy[info["session_id"]] = f"{what} (pid {p.name})"
+            busy[info["session_id"]] = f"{what} (pid {pid})"
     return busy
 
 
@@ -175,13 +174,10 @@ def roles_in(osw_list):
 def kitties():
     """動いている kitty の [(socket, ls)]。"""
     out = []
-    for p in sorted(RT.glob("kitty-*")):
-        pid = kitty_pid_from_socket(str(p))
-        if not pid or not Path(f"/proc/{pid}").exists():
-            continue
-        data = ls(f"unix:{p}")
+    for sock in live_kitty_sockets(ENV):  # $XDG_RUNTIME_DIR か /tmp の kitty-<pid> で、kitty が生きているもの
+        data = ls(sock)
         if data is not None:
-            out.append((f"unix:{p}", data))
+            out.append((sock, data))
     return out
 
 
@@ -504,7 +500,7 @@ def cmd_restart(args, view, conf):
     tmp = nxt.with_name(f".{nxt.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(R.next_payload(waiter["pid"], wait_id, sid, cwd, model, time.time())))
     os.replace(tmp, nxt)
-    # 止める直前にもう一度: 同じプロセスのまま idle か（確かめてから送るまでの間に動き出していないか）
+    # 止める直前にもう一度: 同じプロセスのまま idle か（確認してから送るまでの間に動き出していないか）
     st = start_time(target)
     again = next((s for s in live_sessions() if s.get("sessionId") == sid), None)
     word = state_word(sid)
@@ -573,7 +569,7 @@ def main(argv=None):
     p.add_argument("--include-absent", action="store_true"); p.add_argument("--force", action="store_true")
     p = sub.add_parser("restart", parents=[common]); p.add_argument("role"); p.add_argument("--model"); p.add_argument("--cwd")
     p.add_argument("--timeout", type=float, default=30.0); p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--allow-bg", action="store_true", help="背景セッション（kind=bg）も止める（実物では確かめていない）")
+    p.add_argument("--allow-bg", action="store_true", help="背景セッション（kind=bg）も止める（実物では確認していない）")
     sub.add_parser("status", parents=[common])
     p = sub.add_parser("show"); p.add_argument("--from", dest="source")
     args = ap.parse_args(argv)

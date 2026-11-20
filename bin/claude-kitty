@@ -10,14 +10,23 @@
 # 窓のクラスは $CLAUDE_KITTY_CLASS（既定 kitty-claude）、起動の形は $CLAUDE_KITTY_START_AS（既定は kitty.maximize が
 # true なら maximized、そうでなければ normal）。
 # 試験用の kitty を別のクラスで起動したときは、本物の窓を動かさないよう KWin の移動をしない。
+# macOS: kitty の --detach は使えないので、nohup で切り離して起動する。kitty.maximize・kitty.desktop（KWin 用）は
+# 行わず、設定してあれば注意だけ出す。
+# 自分の場所（~/.local/bin のリンクの先）。readlink -f は古い macOS に無いので、リンクを 1 段ずつたどる
+self=$0
+while [ -L "$self" ]; do
+	t=$(readlink "$self")
+	case "$t" in /*) self=$t ;; *) self=$(dirname "$self")/$t ;; esac
+done
+here=$(cd -P "$(dirname "$self")" && pwd) || exit 1
 if [ "$*" = --version ]; then  # 版は lib/version.py が VERSION から読む（ほかのコマンドと同じ所）
-	exec python3 "$(dirname "$(readlink -f "$0")")/../lib/version.py" claude-kitty
+	exec python3 "$here/../lib/version.py" claude-kitty
 fi
 if [ "${1:-}" = doctor ]; then  # 入っているもの・動くものを調べる（読むだけ。lib/doctor.py）
 	shift
-	exec python3 "$(dirname "$(readlink -f "$0")")/../lib/doctor.py" "$@"
+	exec python3 "$here/../lib/doctor.py" "$@"
 fi
-here=$(dirname "$(readlink -f "$0")")
+os=${CLAUDE_KITTY_UNAME:-$(uname -s)}   # テストで偽の OS にするため
 session=${1:-${KITTY_CONFIG_DIRECTORY:-${XDG_CONFIG_HOME:-$HOME/.config}/kitty}/claude3.session}
 [ -n "${1:-}" ] || [ -e "$session" ] || session=$here/../kitty/claude3.session
 kitty=${CLAUDE_KITTY_KITTY:-}
@@ -29,10 +38,23 @@ if [ -z "$kitty" ]; then
 fi
 class=${CLAUDE_KITTY_CLASS:-kitty-claude}
 read -r desktop maximize < <(python3 "$here/../lib/config.py" kitty-launch)
+if [ "$os" = Darwin ]; then
+	# 最大化と仮想デスクトップへの移動は KWin 用なので行わない（設定があれば知らせる）
+	if [ "${maximize:-0}" = 1 ]; then
+		echo "claude-kitty: 注意: macOS では kitty.maximize を使わない（最大化しないで起動する。大きさは kitty の remember_window_size などで決める）" >&2
+	fi
+	case "$desktop" in ''|-) ;; *) echo "claude-kitty: 注意: macOS では kitty.desktop を使わない（仮想デスクトップへは移さない）" >&2 ;; esac
+	maximize=0 desktop=-
+fi
 if [ "${maximize:-0}" = 1 ]; then start_as=${CLAUDE_KITTY_START_AS:-maximized}; else start_as=${CLAUDE_KITTY_START_AS:-normal}; fi
 # この道具自身の設定（CLAUDE_KITTY_* / CLAUDE_VIEW_*）は残し、中の claude-view に届ける
 for v in $(env | grep -oE '^(CLAUDE[A-Z_]*|CLAUDECODE)=' | grep -vE '^CLAUDE_(KITTY|VIEW)_'); do unset "${v%=}"; done
 cd ~ || exit 1
+if [ "$os" = Darwin ]; then
+	# --detach は macOS では使えない。端末を閉じても kitty が残るよう、nohup で切り離す
+	nohup "$kitty" --class "$class" --start-as "$start_as" --session "$session" </dev/null >/dev/null 2>&1 &
+	exit 0
+fi
 "$kitty" --detach --class "$class" --start-as "$start_as" --session "$session"
 [ "$class" = kitty-claude ] || exit 0
 case "$desktop" in ''|-|*[!0-9]*) exit 0 ;; esac   # kitty.desktop を設定していなければ、窓を動かさない

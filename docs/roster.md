@@ -83,7 +83,7 @@ systemctl --user daemon-reload && systemctl --user enable --now claude-roster-sa
 2. そのペインの claude が idle であること: `~/.claude/sessions` の `status` が `idle`、かつ `claude-state get` が空・idle・done（exit 3）。
 3. その claude が、続きの指示に対応した claude-wait（`$XDG_RUNTIME_DIR/claude-wait/<ID>.waiter` の pid と、claude の親の pid が一致）から
    開かれていること。そうでなければ止めない（止めてもシェルに戻るだけなので）。
-4. `$XDG_RUNTIME_DIR/claude-wait/<ID>.next` に cwd・モデル・claude-wait の pid・時刻を書き、止める直前にもう一度 idle と保護するプロセスを確かめてから
+4. `$XDG_RUNTIME_DIR/claude-wait/<ID>.next` に cwd・モデル・claude-wait の pid・時刻を書き、止める直前にもう一度 idle と保護するプロセスを確認してから
    SIGTERM を送る。モデルは `--model` > 名簿、フォルダは `--cwd` > 名簿。
 5. claude-wait は claude が終わったあと、自分宛て（pid が一致）で 5 分以内の `.next` があれば消して読み、シェルに戻らずに、
    その cwd とモデルで、指示の中の ID（いまの会話。/clear のあとは claude-wait の引数の ID と違う）を resume し直す
@@ -137,9 +137,9 @@ env -u DISPLAY XDG_RUNTIME_DIR=$S/rt WAYLAND_DISPLAY=wayland-0 KITTY_CONFIG_DIRE
 
 - 動いている claude-wait は、更新前のものだと続きの指示に対応していない。restart はそれを見分けて断る（一度 `restore` か
   `claude-wait` で開き直せば使える）。
-- 背景セッションの restart は、実物の背景セッションでは確かめていない（単体テストだけ）ので、`--allow-bg` が要る。
+- 背景セッションの restart は、実物の背景セッションでは確認していない（単体テストだけ）ので、`--allow-bg` が要る。
 - idle の判定は Claude Code の status と claude-state で、背景の shell・monitor のタスク（claude-state は数えない）は見ない。
-  背景で長いコマンドや Monitor を回している役割は、止める前に確かめる。
+  背景で長いコマンドや Monitor を回している役割は、止める前に確認する。
 - kitty を `claude-roster restore` 以外の方法（ふつうのセッションファイルで新しい claude）で起動し直すと、5 分後の自動の保存で
   新しい ID が名簿に入る。古い ID は世代（`roster.json.1` …）にだけ残る。起動し直すときは `claude-roster restore` を使う。
 - 別のフォルダ（`--cwd`）で resume したとき、Claude Code がその ID の会話記録を見つけられるかは、版によって違う見込み。

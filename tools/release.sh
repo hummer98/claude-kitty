@@ -6,7 +6,7 @@
 #       （VERSION とテストは見ず、main も push しない。その commit は origin/main にあり、origin/main の CHANGELOG に
 #        節があること。release は gh workflow run release.yml -f tag=v0.1.0 で作る）
 #
-# 確かめること: main にいる・作業ツリーがきれい・VERSION が <版> と同じ（--at のときは見ない）・
+# 確認すること: main にいる・作業ツリーがきれい・VERSION が <版> と同じ（--at のときは見ない）・
 # CHANGELOG.md に「## [<版>] - YYYY-MM-DD」の節があって空でない・v<版> のタグが手元にも origin にも無い。
 # GitHub の release は、タグの push を受けて .github/workflows/release.yml が CHANGELOG の節から作る
 # （main の CHANGELOG を読むので、main を先に push する）。
@@ -38,7 +38,7 @@ ver="${ver#v}"
 tag="v$ver"
 case "$tag" in private-*) die "private-* のタグは push しない: $tag" ;; esac
 
-root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+root="$(cd "$(dirname "$0")/.." && pwd -P)"   # readlink -f は古い macOS に無い
 cd "$root"
 
 run() {  # 書き換える操作。--dry-run では表示だけ
@@ -54,7 +54,7 @@ branch="$(git symbolic-ref --quiet --short HEAD || true)"
 if [ -n "$at" ]; then
 	target="$(git rev-parse --verify --quiet "$at^{commit}")" || die "commit が無い: $at"
 	# --at では main を push しない（テストしていない main を出さないため）。代わりに、タグの commit と
-	# release の本文（Actions が読む origin/main の CHANGELOG の節）が、もう origin にあることを確かめる
+	# release の本文（Actions が読む origin/main の CHANGELOG の節）が、もう origin にあることを確認する
 	git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null || die "origin/main が無い（git fetch origin）"
 	git merge-base --is-ancestor "$target" origin/main || die "$at は origin/main の祖先でない"
 	git show origin/main:CHANGELOG.md 2>/dev/null | grep -qF "## [${ver#v}] - " \
@@ -75,8 +75,8 @@ fi
 if remote_tag="$(git ls-remote --tags origin "refs/tags/$tag")"; then
 	[ -z "$remote_tag" ] || die "タグ $tag は origin にもうある"
 else
-	[ "$dry" = 1 ] || die "origin のタグを確かめられない"
-	echo "release.sh: origin のタグを確かめられない（--dry-run なので続ける）" >&2
+	[ "$dry" = 1 ] || die "origin のタグを確認できない"
+	echo "release.sh: origin のタグを確認できない（--dry-run なので続ける）" >&2
 fi
 
 echo "版: $ver（タグ $tag → $(git log -1 --format='%h %s' "$target")）"

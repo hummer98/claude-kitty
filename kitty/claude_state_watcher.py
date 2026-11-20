@@ -28,8 +28,10 @@ _last = {}  # OS 窓 id → 最後に見た (前面か, ペイン id)。tab_bar_
 
 
 def state_dir(env=None):
+    """lib/kstate.py の state_dir と同じ場所（kitty の中では lib を読めないので、lib/rundir.py の決まりを写して持つ）。"""
     env = os.environ if env is None else env
-    return Path(env.get("XDG_RUNTIME_DIR") or "/tmp") / "claude-state"
+    base = env.get("XDG_RUNTIME_DIR")
+    return (Path(base) if base else Path("/tmp") / f"claude-kitty-{os.getuid()}") / "claude-state"
 
 
 def _load(p):
@@ -121,7 +123,7 @@ def _still_focused(boss, window):
 def seen(boss, window):
     """window にフォーカスが来た。done なら、dwell 秒たってもまだそこにフォーカスがあれば idle にする。
 
-    kitty の中なので待たない: kitty のタイマー（add_timer）で後から確かめる。
+    kitty の中なので待たない: kitty のタイマー（add_timer）で後から確認する。
     """
     sock = _sock(boss)
     if window is None or sock is None:
@@ -162,8 +164,19 @@ def _mark(boss, window, retry=True):
 
 
 def _alive(e):
+    """記録を書いた claude がまだいるか。/proc の無い macOS でも効くよう signal 0 で調べる（権限が無いのは生きている）。"""
     pid = e.get("pid")
-    return not isinstance(pid, int) or pid <= 0 or os.path.exists(f"/proc/{pid}")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True
 
 
 def repaint_ops(d, sock):

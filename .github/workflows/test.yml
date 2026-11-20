@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.x"]
+        python-version: ["3.9", "3.12", "3.x"]   # 3.9 は macOS の /usr/bin/python3
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

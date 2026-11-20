@@ -6,6 +6,42 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-20
+
+### 追加
+
+- macOS に試験的に対応した（作者は macOS の実機では動かしていない。macOS の分岐は Linux の上で OS の部分を偽物にした単体テスト `tests/macos_test.py` で確認した）。手順と、使えるもの・試験的なもの・使えないものの表は [SETUP.md の macOS での導入](SETUP.md#macos-での導入)。
+  - `lib/proc.py`: プロセスの情報（生きているか・引数・起動時の環境・親・起動時刻・一覧）を 1 か所にまとめた。Linux は `/proc`、macOS は ctypes で `sysctl`（KERN_PROCARGS2）と `proc_pidinfo`（使えなければ `ps`）。`claude-state`（入れ子の判定）・`claude-wait`・`claude-roster`・`claude-browser`・`claude-view` と状態の記録の掃除がこれを使い、`/proc` を直接読むのはここだけになった。kitty の watcher は signal 0 で生存を見る。
+  - `claude-wait`・`claude-roster`: Claude Code の `procStart` と起動時刻を比べるのは Linux だけ。macOS では比べず、その pid が生きている間は「動いている」とみなす（同じセッションを 2 か所で開かない側）。
+  - `claude-browser`: macOS では、kitty の窓の位置を CoreGraphics（`CGWindowListCopyWindowInfo`。画面収録・アクセシビリティの許可は要らない）で読み、Chrome の窓を CDP の `Browser.setWindowBounds` で置く（`lib/macwin.py`、`lib/cdp.mjs` の `window`・`place`・`front`）。「常に最前面」は無く、Chrome を前に出す（入力先も移る）のは `--focus browser` のときだけ（既定の kitty と none では入力先を動かさないので、Chrome が kitty の後ろに隠れることがある。新しく起動した Chrome は macOS が前に出すことがある）。読めない・置けないときは止めずに普通の窓のまま開く。プロファイルの既定の置き場は `~/Library/Application Support/claude-kitty/browser-profiles`。`~/Applications` の Chrome と `Chromium.app` も探す。
+  - `view.guard`（`claude-view`・`claude-show`）: macOS では前面のアプリを `lsappinfo` で読む。読めなければ、当たるプロセスが動いているだけで並べ替えを控える。
+  - `claude-kitty`: macOS では `--detach` の代わりに `nohup` で起動する。`kitty.maximize`・`kitty.desktop` は使わず、設定してあれば注意を出す。`readlink -f` を使わない（古い macOS に無い）。
+  - `claude-show`: kitty の外では、macOS は `open` で開く。
+  - `tools/install.sh --launchd`（macOS の `--all` に含む）: `contrib/launchd/` の LaunchAgent（`claude-state watch`、`claude-roster save --auto` の 5 分ごと、`claude-session-stats` の週 1 回）を `~/Library/LaunchAgents` に写して `launchctl bootstrap` する。PATH（`~/.local/bin`・`/opt/homebrew/bin`・システム）と HOME を plist で渡す。`--uninstall` で `bootout` して消す。
+  - `claude-kitty doctor`: macOS では launchd の LaunchAgent が入って読み込まれているか、`lsappinfo` が使えるかを出す。Chrome は `claude-browser` と同じ探し方（`lib/browser.py`）で出す。
+- `claude-kitty doctor`: hook が入っていても、その道具（command の最初の語）が絶対パスでも PATH でも見つからなければ NG にする（Claude Code の中で黙って失敗するため）。
+
+### 変更
+
+- 対応する Python の下限を 3.10 から 3.9 にした（macOS の Command Line Tools の `/usr/bin/python3` が 3.9。3.9 でテストが全部通ることを確認した）。`tools/install.sh` は python3 が 3.9 より古ければ何もせずに止まり、`claude-kitty doctor` は NG にする（macOS は `brew install python` を案内する）。
+- 道具の記録の置き場（`claude-state`・`claude-browser`・`claude-wait`・`claude-roster`・`claude-view` のロック）は、`$XDG_RUNTIME_DIR` が無いとき `/tmp` ではなく `/tmp/claude-kitty-<uid>`（0700）にする（`lib/rundir.py`。`/tmp` はほかのユーザーと共有なので）。kitty の socket は前と同じく `$XDG_RUNTIME_DIR` か `/tmp` を探し、macOS では両方を探す。`$XDG_RUNTIME_DIR` がある環境（ふつうの Linux）は変わらない。
+- `tools/install.sh --all` の常駐は OS に合う方だけを行う（Linux は `--systemd`、macOS は `--launchd`）。
+- `claude-wait`: 終わったあとに入るシェルは `$SHELL` が bash か zsh ならそれ（macOS の既定は zsh）、ほかは前と同じ bash。
+- `claude-session-stats`: 統括の記録のフォルダの名前（`session_stats.home_project` の既定）を、Claude Code と同じく英数字以外を `-` にして作る（前は `/` だけを置き換えていたので、`/Users/first.last` などで合わなかった）。
+- 文言: 「確かめる」を「確認する」に言い換えた（メッセージ・文書・コメント）。
+
+### 修正
+
+- `claude-wait --help` が何も出さずに終わっていた（使い方を出す）。引数の誤りで使い方を出したあとシェルを exec するとき、表示がバッファのまま消えていたのも直した。
+- `claude-view`: kitty が 1 つも無いときに「対象の kitty を 1 つに決められない（--to で指定する）」と出ていたのを、「kitty が見つからない（kitty の中で動かすか、claude-kitty で起動する）」に分けた。
+- `claude-browser`: kitty の外で呼んだときの英語の「no --key, kitty pane or CLAUDE_CODE_SESSION_ID」を日本語にした。
+
+### 上げるときに手で行うこと
+
+- macOS で使うなら、[SETUP.md の macOS での導入](SETUP.md#macos-での導入) の手順で入れ、`tools/install.sh --all` を流す（`--launchd` が入る）。そのあと kitty を ⌘Q で終わらせて `claude-kitty` で開き直す。
+- Linux で `$XDG_RUNTIME_DIR` の無い環境（cron・ssh など）で道具を動かしていた人だけ: 記録の置き場が `/tmp/claude-state` などから `/tmp/claude-kitty-<uid>/…` に変わる。動いている claude の色の記録は、次の hook で新しい場所に作り直される（古い `/tmp/claude-state` などは消してよい）。
+- それ以外（Linux で `$XDG_RUNTIME_DIR` がある、ふつうの環境）は何もしなくてよい。hook は今の形（素の名前・`~/.local/bin/…`・絶対パス）のまま数えるので、`tools/install.sh --hooks` を流し直しても二重にならない。
+
 ## [0.5.0] - 2026-11-20
 
 ### 追加
@@ -38,7 +74,7 @@
 
 - 他のセッションからの「【通知】」「返事は不要」のメッセージで色を変えない: `"state": {"notice": {"contains": ["返事は不要", "返事不要"], "prefix": ["【通知】"]}}`（書かないと、そのターンも作業中・完了の色になる）。常駐の `claude-state watch` は起動時に設定を読むので、書いたら `systemctl --user restart claude-state-watch`。
 - Chrome: Flatpak の `com.google.Chrome` を使っていて前のプロファイルがあるなら、何もしなくても前と同じ Chrome と置き場を使う。ネイティブの Chrome などを入れたあとも必ず Flatpak の Chrome にしたいなら `"browser": {"command": ["flatpak", "run", "com.google.Chrome"]}`（置き場は前と同じ `~/.var/app/com.google.Chrome/claude-profiles`）。
-- `claude-kitty doctor` で「Chrome」の行が使いたい Chrome と置き場を指していることを確かめる。
+- `claude-kitty doctor` で「Chrome」の行が使いたい Chrome と置き場を指していることを確認する。
 
 ## [0.4.0] - 2026-11-20
 
@@ -84,7 +120,7 @@
   - bash が実際に動かすものは今までどおり読む: `bash -c` / `sh -c` の中身、二重引用符の中と区切りを引用しない `<<EOF` の本文の `$(...)` と `` `...` ``（二重引用符の中の置換は、前の版では読んでいなかった）。
   - 複数行の二重引用符の中の `<<` を、ヒアドキュメントの始まりと取り違えて後ろの行を読み飛ばすことがあった（止めるべきコマンドを見逃しうる）のも直した。
   - 本文を stdin から動かすもの（`bash <<'EOF'`・`sh -s <<EOF`・`ssh host <<'EOF'`）は、本文を `bash -c` の中身と同じに読む。算術式の `<<`（`$((1<<2))`）をヒアドキュメントの始まりとみて、後ろの行を読み飛ばさない。
-- `claude-state watch`（と doctor）: kitty のソケットの持ち主が生きているかを `/proc` で見ていたため、macOS では動いている kitty を見つけられなかった。signal 0 で確かめる。
+- `claude-state watch`（と doctor）: kitty のソケットの持ち主が生きているかを `/proc` で見ていたため、macOS では動いている kitty を見つけられなかった。signal 0 で確認する。
 
 ### 上げるときに手で行うこと
 
@@ -96,7 +132,7 @@
    - session-stats の日付を JST で区切る: `"session_stats": {"timezone": "Asia/Tokyo"}`
    - 0.2.0 の claude-session-stats は知らない項目で止まるので、`timezone` を書くのは `git pull` の後にする。
 2. `tools/install.sh --all --dry-run` で何が足されるかを見て、`tools/install.sh --all` を流す。手で入れた hook・リンク・ユニットはそのまま「入っている」と数え、足りないものだけを足す（0.2.0 の手順で `claude-lang-check` を hook に絶対パスで入れ、`~/.local/bin` にリンクしていなければ、そのリンクが足される）。lang の hook は `--all` では足さない（入っていれば残す）。
-3. `claude-kitty doctor` で NG が無いことを確かめる。
+3. `claude-kitty doctor` で NG が無いことを確認する。
 4. kitty.conf を自分のものにしている（リポジトリの `kitty/kitty.conf` へのリンクでない）なら、install.sh が足した include を読ませるために kitty を起動し直す（`allow_remote_control` と `listen_on` は起動時にだけ読まれる）。
 
 ## [0.2.0] - 2026-11-20
@@ -164,7 +200,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/hummer98/claude-kitty/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hummer98/claude-kitty/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hummer98/claude-kitty/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hummer98/claude-kitty/compare/v0.2.0...v0.3.0

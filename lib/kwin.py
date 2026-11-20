@@ -10,8 +10,9 @@ import time
 from pathlib import Path
 
 from core import parse_journal
+from rundir import runtime_dir
 
-STATE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "claude-browser"
+STATE_DIR = runtime_dir() / "claude-browser"
 
 
 def die(msg):

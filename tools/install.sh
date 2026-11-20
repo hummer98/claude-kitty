@@ -11,7 +11,8 @@
 #   --kitty            kitty.conf の末尾に「include <リポジトリ>/kitty/claude-kitty.conf」を足し、
 #                      watcher と claude3.session のリンクを ~/.config/kitty に張る
 #   --systemd          contrib/systemd のユニットを ~/.config/systemd/user に写して enable --now（Linux だけ）
-#   --all              上の全部
+#   --launchd          contrib/launchd の LaunchAgent を ~/Library/LaunchAgents に写して launchctl bootstrap（macOS だけ）
+#   --all              上の全部（常駐は OS に合う方だけ: Linux は --systemd、macOS は --launchd）
 #
 # まず何をするかを見せ、変えるものがあれば確認してから行う（--yes で確認を省く。端末でなければ --yes が要る）。
 # --dry-run は見せるだけ。何度流しても同じ結果になり、--uninstall で同じ部品を外せる。
@@ -21,16 +22,20 @@
 # 終了コード: 0 = できた（または変えるものが無い）、1 = 止めた・失敗した、2 = 引数の誤り。
 #
 # 場所は環境変数で変えられる: CLAUDE_KITTY_BIN_DIR（既定 ~/.local/bin）、CLAUDE_CONFIG_DIR（Claude Code の
-# 設定のフォルダ。既定 ~/.claude）、KITTY_CONFIG_DIRECTORY、XDG_CONFIG_HOME。
+# 設定のフォルダ。既定 ~/.claude）、KITTY_CONFIG_DIRECTORY、XDG_CONFIG_HOME、CLAUDE_KITTY_LAUNCH_AGENTS（既定
+# ~/Library/LaunchAgents）。
 
 usage() {
-	sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
 REPO=$(cd "$(dirname "$0")/.." && pwd -P) || exit 1
 OS=${CLAUDE_KITTY_UNAME:-$(uname -s)}          # テストで偽の OS にするため
 SYSTEMCTL=${CLAUDE_KITTY_SYSTEMCTL:-systemctl}
+LAUNCHCTL=${CLAUDE_KITTY_LAUNCHCTL:-launchctl}
+AGENT_DIR=${CLAUDE_KITTY_LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}
+AGENT_LOG_DIR=$HOME/Library/Logs/claude-kitty
 BIN_DIR=${CLAUDE_KITTY_BIN_DIR:-$HOME/.local/bin}
 SETTINGS=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json
 CONF_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
@@ -39,18 +44,22 @@ UNIT_DIR=$CONF_HOME/systemd/user
 UNITS_ENABLE="claude-state-watch.service claude-roster-save.timer claude-session-stats.timer"
 KITTY_MARK="# claude-kitty: tools/install.sh が足した行（tools/install.sh --uninstall --kitty で外す）"
 UNIT_MARK="# claude-kitty: tools/install.sh が contrib/systemd から作った（手で直すなら、この行を消すと install.sh は触らない）"
+AGENT_MARK="<!-- claude-kitty: tools/install.sh が contrib/launchd から作った（手で直すなら、この行を消すと install.sh は触らない） -->"
 
-do_links=0 do_hooks=0 do_kitty=0 do_systemd=0 any=0
+# --all の常駐は OS に合う方だけ（Linux で launchd の、macOS で systemd の「飛ばす」を毎回出さないように）
+case "$OS" in Darwin) all_systemd=0 all_launchd=1 ;; *) all_systemd=1 all_launchd=0 ;; esac
+do_links=0 do_hooks=0 do_kitty=0 do_systemd=0 do_launchd=0 any=0
 hook_parts="" hooks_named=0
 yes=0 dry=0 uninstall=0
 for a in "$@"; do
 	case "$a" in
-	--all) do_links=1 do_hooks=1 do_kitty=1 do_systemd=1 any=1 ;;
+	--all) do_links=1 do_hooks=1 do_kitty=1 do_systemd=$all_systemd do_launchd=$all_launchd any=1 ;;
 	--links) do_links=1 any=1 ;;
 	--hooks) do_hooks=1 any=1 ;;
 	--hooks=*) do_hooks=1 any=1 hook_parts=${a#--hooks=} hooks_named=1 ;;
 	--kitty) do_kitty=1 any=1 ;;
 	--systemd) do_systemd=1 any=1 ;;
+	--launchd) do_launchd=1 any=1 ;;
 	--yes|-y) yes=1 ;;
 	--dry-run|-n) dry=1 ;;
 	--uninstall) uninstall=1 ;;
@@ -58,14 +67,20 @@ for a in "$@"; do
 	*) echo "install.sh: 知らない引数: $a" >&2; usage 2 ;;
 	esac
 done
-[ "$any" = 1 ] || { do_links=1 do_hooks=1 do_kitty=1 do_systemd=1; }
+[ "$any" = 1 ] || { do_links=1 do_hooks=1 do_kitty=1 do_systemd=$all_systemd do_launchd=$all_launchd; }
 # lang（返答の言語の検査）は使う人だけが --hooks=lang で入れる。外すときは、--all で全部の hook を外す
 if [ -z "$hook_parts" ] && [ "$hooks_named" = 0 ]; then
 	if [ "$uninstall" = 1 ]; then hook_parts=state,lang,guard; else hook_parts=state,guard; fi
 fi
 
-command -v python3 >/dev/null 2>&1 || { echo "install.sh: python3 が要る（3.10 以降）" >&2; exit 1; }
-# 部品の名前は先に確かめる（見せたあとで知らない名前で止まらないように）
+# 道具は python3 の 3.9 以降で動く（macOS の Command Line Tools の /usr/bin/python3 が 3.9）
+command -v python3 >/dev/null 2>&1 || {
+	echo "install.sh: python3 が要る（3.9 以降。macOS は xcode-select --install か brew install python）" >&2; exit 1; }
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+	echo "install.sh: python3 が古い（$(python3 -c 'import platform; print(platform.python_version())' 2>/dev/null)、$(command -v python3)）。3.9 以降にする（macOS は brew install python）" >&2
+	exit 1
+fi
+# 部品の名前は先に確認する（見せたあとで知らない名前で止まらないように）
 if [ "$do_hooks" = 1 ]; then
 	python3 -c 'import sys; ok={"state","lang","guard"}; p=[x for x in sys.argv[1].split(",") if x]; sys.exit(0 if p and set(p)<=ok else 1)' "$hook_parts" ||
 		{ echo "install.sh: --hooks= に使えるのは state,lang,guard: $hook_parts" >&2; exit 2; }
@@ -254,7 +269,7 @@ step_systemd() {
 	case "$OS" in
 	Linux) ;;
 	Darwin)
-		note "! macOS には systemd が無いので飛ばす。claude-state watch などは launchd の LaunchAgent で動かす（SETUP.md の「macOS: launchd で常駐させる」）"
+		note "! macOS には systemd が無いので飛ばす。claude-state watch などは launchd で動かす（tools/install.sh --launchd）"
 		return ;;
 	*) note "! $OS では systemd を使わないので飛ばす"; return ;;
 	esac
@@ -329,6 +344,99 @@ step_systemd() {
 	done
 }
 
+# ---- launchd（macOS）---------------------------------------------------------
+
+AGENTS="claude-kitty.state-watch claude-kitty.roster-save claude-kitty.session-stats"
+
+# LaunchAgent の中身を作る: @@REPO@@ などを置き換え（XML の文字はエスケープ）、DOCTYPE の後に印の行を入れる。
+# PATH は hook と同じ道具が見つかるように: ~/.local/bin（$BIN_DIR）・Homebrew・システム。XDG_RUNTIME_DIR は、
+# 入れたときのシェルにあれば渡す（hook と常駐で記録の置き場がずれないように。lib/rundir.py）
+gen_agent() {  # gen_agent SRC OUT
+	python3 - "$1" "$REPO" "$HOME" "$BIN_DIR" "$AGENT_LOG_DIR" "$AGENT_MARK" "${XDG_RUNTIME_DIR:-}" >"$2" <<'PY'
+import os, sys
+from xml.sax.saxutils import escape
+src, repo, home, bin_dir, log_dir, mark, xdg = sys.argv[1:8]
+text = open(src, encoding="utf-8").read()
+path = ":".join(dict.fromkeys([bin_dir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]))
+extra = ""
+if xdg and os.path.isdir(xdg):
+    extra = "\n    <key>XDG_RUNTIME_DIR</key><string>" + escape(xdg) + "</string>"
+for k, v in (("REPO", os.path.realpath(repo)), ("HOME", home), ("PATH", path), ("LOGDIR", log_dir)):
+    text = text.replace("@@" + k + "@@", escape(v))
+text = text.replace("@@EXTRA_ENV@@", extra)
+head, sep, rest = text.partition(".dtd\">\n")
+sys.stdout.write(head + sep + mark + "\n" + rest if sep else mark + "\n" + text)
+PY
+}
+agent_body() { grep -v -x -F "$AGENT_MARK" "$1"; }
+# bootout は後ろで終わることがあり、直後の bootstrap が「Input/output error」で失敗するので、消えるまで待つ（最大 5 秒）
+agent_gone() {  # agent_gone DOMAIN/LABEL
+	i=0
+	while "$LAUNCHCTL" print "$1" >/dev/null 2>&1 && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i + 1)); done
+}
+
+step_launchd() {
+	echo "## launchd の LaunchAgent（$AGENT_DIR）"
+	case "$OS" in
+	Darwin) ;;
+	Linux) note "! Linux では launchd を使わないので飛ばす（常駐は tools/install.sh --systemd）"; return ;;
+	*) note "! $OS では launchd を使わないので飛ばす"; return ;;
+	esac
+	if ! command -v "$LAUNCHCTL" >/dev/null 2>&1; then
+		note "! launchctl が無いので飛ばす"; return
+	fi
+	domain="gui/$(id -u)"
+	for label in $AGENTS; do
+		src=$REPO/contrib/launchd/$label.plist dest=$AGENT_DIR/$label.plist gen=$TMPD/$label.plist
+		[ -f "$src" ] || continue
+		gen_agent "$src" "$gen" || { fail "$label を作れない"; continue; }
+		loaded=0
+		"$LAUNCHCTL" print "$domain/$label" >/dev/null 2>&1 && loaded=1
+		if [ "$uninstall" = 1 ]; then
+			if [ ! -e "$dest" ]; then
+				note "= $dest（入っていない）"
+			elif grep -q -x -F "$AGENT_MARK" "$dest" || [ "$(agent_body "$dest")" = "$(agent_body "$gen")" ]; then
+				if [ "$loaded" = 1 ]; then
+					note "- launchctl bootout $domain/$label"
+					run "$LAUNCHCTL" bootout "$domain/$label" >/dev/null 2>&1 || fail "$label を止められない"
+				fi
+				note "- $dest"
+				run rm -f "$dest" || fail "$dest を消せない"
+			else
+				note "! $dest は手で直したもの（作るものと中身が違う）。残す（外すなら launchctl bootout $domain/$label のあと消す）"
+			fi
+			continue
+		fi
+		if [ ! -e "$dest" ]; then
+			note "+ $dest"
+		elif [ "$(agent_body "$dest")" = "$(agent_body "$gen")" ]; then
+			note "= $dest（入っている）"
+			if [ "$loaded" = 1 ]; then
+				note "= $label（launchctl に読み込み済み）"
+			else
+				note "+ launchctl bootstrap $domain $dest"
+				run "$LAUNCHCTL" bootstrap "$domain" "$dest" >/dev/null 2>&1 || fail "$label を読み込めない"
+			fi
+			continue
+		elif grep -q -x -F "$AGENT_MARK" "$dest"; then
+			note "~ $dest（新しい中身にする）"
+		else
+			note "= $dest（手で入れたもの。中身が違うので上書きしない。新しい版にするなら $src と見比べる）"; continue
+		fi
+		if [ "$loaded" = 1 ]; then
+			note "~ launchctl bootout $domain/$label（読み込み直すため）"
+			run "$LAUNCHCTL" bootout "$domain/$label" >/dev/null 2>&1 || fail "$label を止められない"
+			[ "$DRY" = 1 ] || agent_gone "$domain/$label"
+		fi
+		note "+ launchctl bootstrap $domain $dest"
+		if [ "$DRY" = 0 ]; then
+			mkdir -p "$AGENT_DIR" "$AGENT_LOG_DIR" && cp "$gen" "$dest.tmp.$$" && mv -f "$dest.tmp.$$" "$dest" ||
+				{ fail "$dest を書けない"; continue; }
+			"$LAUNCHCTL" bootstrap "$domain" "$dest" >/dev/null 2>&1 || fail "$label を読み込めない（launchctl bootstrap $domain $dest）"
+		fi
+	done
+}
+
 # ---- 本体 -------------------------------------------------------------------
 
 steps() {
@@ -337,6 +445,7 @@ steps() {
 	[ "$do_hooks" = 1 ] && step_hooks
 	[ "$do_kitty" = 1 ] && step_kitty
 	[ "$do_systemd" = 1 ] && step_systemd
+	[ "$do_launchd" = 1 ] && step_launchd
 	return 0
 }
 
@@ -374,4 +483,4 @@ if [ "$FAILED" = 1 ]; then
 	echo "# 一部に失敗した（! の行）。直してから流し直せば、残りだけを行う"
 	exit 1
 fi
-echo "# できた。確かめる: claude-kitty doctor"
+echo "# できた。確認する: claude-kitty doctor"

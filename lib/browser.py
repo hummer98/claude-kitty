@@ -5,15 +5,16 @@
   2. 下の 3〜6 のうち、入っていて、その置き場（プロファイルのフォルダ）が既にあるもの
      （後から別の Chrome を入れても、ログイン済みのプロファイルから黙って移らないように。0.4 までの
      Flatpak の Chrome の ~/.var/app/com.google.Chrome/claude-profiles もこれで引き継ぐ）
-  3. ネイティブの Chrome（google-chrome-stable・google-chrome、macOS は Google Chrome.app）
+  3. ネイティブの Chrome（google-chrome-stable・google-chrome、macOS は /Applications か ~/Applications の Google Chrome.app）
   4. Flatpak の Chrome（com.google.Chrome）
-  5. ネイティブの Chromium（chromium・chromium-browser）
+  5. ネイティブの Chromium（chromium・chromium-browser、macOS は Chromium.app）
   6. Flatpak の Chromium（org.chromium.Chromium）
 
 プロファイルの置き場（設定の browser.profile_root が優先）:
   - Flatpak: ~/.var/app/<アプリ ID>/claude-profiles（サンドボックスから書ける場所。Chrome は 0.4 までと同じ）
   - Snap: ~/snap/<名前>/common/claude-kitty-profiles（隠しフォルダはサンドボックスから書けないため）
-  - それ以外: $XDG_DATA_HOME/claude-kitty/browser-profiles（既定 ~/.local/share/claude-kitty/browser-profiles）。
+  - それ以外: $XDG_DATA_HOME/claude-kitty/browser-profiles（既定 ~/.local/share/claude-kitty/browser-profiles。
+    macOS は $XDG_DATA_HOME が無ければ ~/Library/Application Support/claude-kitty/browser-profiles）。
     ネイティブの Chromium は chromium-profiles（Chrome とは cookie の鍵が違うので、同じプロファイルを共有しない）
 
 副作用は読むことだけ（which・exists・flatpak_has は呼ぶ側が渡す。テストでは偽物にする）。
@@ -26,6 +27,7 @@ FLATPAK_CHROMIUM = "org.chromium.Chromium"
 NATIVE_CHROME = ("google-chrome-stable", "google-chrome")
 NATIVE_CHROMIUM = ("chromium", "chromium-browser")
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+MAC_CHROMIUM = "/Applications/Chromium.app/Contents/MacOS/Chromium"
 FLATPAK_PROFILE_DIR = "claude-profiles"
 SNAP_PROFILE_DIR = "claude-kitty-profiles"
 
@@ -60,7 +62,13 @@ def snap_name(path):
     return os.path.basename(path) if path and str(path).startswith("/snap/") else None
 
 
-def default_profile_root(argv, env, home, resolved=None, family="chrome"):
+def mac_app_paths(home, family="chrome"):
+    """macOS の .app の実行ファイルの候補（/Applications、無ければ ~/Applications）。"""
+    main = MAC_CHROME if family == "chrome" else MAC_CHROMIUM
+    return [main, str(Path(home) / main.lstrip("/"))]
+
+
+def default_profile_root(argv, env, home, resolved=None, family="chrome", os_name="Linux"):
     """そのコマンドで起動する Chrome のプロファイルの置き場（設定の profile_root が無いとき）。
 
     resolved は argv[0] を PATH で探した結果（Snap の見分けに使う）。family は "chrome" か "chromium"。"""
@@ -71,7 +79,12 @@ def default_profile_root(argv, env, home, resolved=None, family="chrome"):
     snap = snap_name(resolved or (argv[0] if argv else None))
     if snap:
         return home / "snap" / snap / "common" / SNAP_PROFILE_DIR
-    base = Path(env["XDG_DATA_HOME"]) if env.get("XDG_DATA_HOME") else home / ".local/share"
+    if env.get("XDG_DATA_HOME"):
+        base = Path(env["XDG_DATA_HOME"])
+    elif os_name == "Darwin":
+        base = home / "Library" / "Application Support"   # macOS の慣習の場所
+    else:
+        base = home / ".local/share"
     return base / "claude-kitty" / ("chromium-profiles" if family == "chromium" else "browser-profiles")
 
 
@@ -86,7 +99,8 @@ def find_browser(conf, env, home, which, exists, flatpak_has, os_name="Linux"):
 
     def out(argv, kind, name, resolved=None, configured=False, family="chrome"):
         root = conf.get("profile_root")
-        root = Path(os.path.expanduser(root)) if root else default_profile_root(argv, env, home, resolved, family)
+        root = (Path(os.path.expanduser(root)) if root
+                else default_profile_root(argv, env, home, resolved, family, os_name))
         return {"command": argv, "kind": kind, "name": name, "profile_root": root, "configured": configured}
 
     if conf.get("command"):
@@ -103,8 +117,11 @@ def find_browser(conf, env, home, which, exists, flatpak_has, os_name="Linux"):
             p = which(name)
             if p:
                 return out([p], "snap" if snap_name(p) else "native", name, p, family=family)
-        if family == "chrome" and os_name == "Darwin" and exists(MAC_CHROME):
-            return out([MAC_CHROME], "native", "Google Chrome.app")
+        if os_name == "Darwin":
+            for app in mac_app_paths(home, family):
+                if exists(app):
+                    return out([app], "native", "Google Chrome.app" if family == "chrome" else "Chromium.app",
+                               family=family)
         return None
 
     def flat(app, family):
@@ -127,9 +144,10 @@ def find_browser(conf, env, home, which, exists, flatpak_has, os_name="Linux"):
                 return b
     return {"command": None, "kind": None, "name": None, "configured": False,
             "profile_root": Path(os.path.expanduser(conf["profile_root"])) if conf.get("profile_root")
-            else default_profile_root(None, env, home)}
+            else default_profile_root(None, env, home, os_name=os_name)}
 
 
 # 見つからなかったときに出す「探したもの」（設定の browser.command を書いていれば、探さずにそれを使う）
 SEARCHED = ("・".join(NATIVE_CHROME) + f"、Flatpak の {FLATPAK_CHROME}、"
-            + "・".join(NATIVE_CHROMIUM) + f"、Flatpak の {FLATPAK_CHROMIUM}")
+            + "・".join(NATIVE_CHROMIUM) + f"、Flatpak の {FLATPAK_CHROMIUM}"
+            + "（macOS は Google Chrome.app・Chromium.app も）")
