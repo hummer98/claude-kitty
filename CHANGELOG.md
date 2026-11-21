@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### 変更
+
+- `claude-kitty`: 起動の前に、呼んだ側の端末の環境変数も消す（`CMUX_*`・`C11_*`・`GHOSTTY_*`・`TMUX`・`TMUX_PANE`・`TERM_PROGRAM`・`TERM_PROGRAM_VERSION`・`KITTY_WINDOW_ID`・`KITTY_LISTEN_ON`・`KITTY_PID`・`WINDOWID`）。cmux（c11）の中の Claude Code から起動すると、kitty の各ペインの claude が「c11 の中に居る」と判断し、c11 用の SessionStart hook が失敗していた。足すものは `CLAUDE_KITTY_UNSET`（名前か `FOO_*`）。`CLAUDE_KITTY_*` と `CLAUDE_VIEW_*` を残すのは今までどおり。
+
+### 修正
+
+- `claude-kitty`: macOS で `--class` を渡していた。macOS の kitty（0.51）には `--class` が無く「Unknown flag: --class use --help.」で終わるので、kitty が開かなかった。しかも背景で起動するので 0 で終わり、失敗に気づけなかった。macOS では `--class` を渡さず（`CLAUDE_KITTY_CLASS` は Linux だけ）、`CLAUDE_KITTY_WAIT` 秒（既定 2）のうちに kitty が 0 以外で終わったら kitty のエラーを出して 1 で終わる。
+- `claude-wait`・`claude-roster`: Claude Code の sessions を `~/.claude/sessions` に決め打ちしていた。`$CLAUDE_CONFIG_DIR`（direnv などでプロジェクトごとに分けている）で動く claude を見つけられず、動いている相手を「いない」とみなして同じセッションを 2 か所で開いていた。`CLAUDE_SESSIONS_DIR` > `$CLAUDE_CONFIG_DIR/sessions` > `~/.claude/sessions` の順に見る（`claude-roster` の projects も同じ）。
+- `tools/install.sh`・`tools/release.sh`・`claude-kitty`: macOS の `/bin/sh`（bash 3.2）で、変数のすぐ後ろに全角文字があるメッセージ（`$BIN_DIR（` など）の変数が空になり、出力が UTF-8 として壊れていた（`${名前}` と書く）。
+- `claude-state`: 手の待ち（`claude-state waiting`）が、人が打ったときしか外れなかった。他のセッションからの依頼や背景の作業の完了の通知で再開したセッションが、作業中なのに何時間も待受の色のまま残っていた。付けたターンが終わった後（Stop・Esc で止めた）に本体がまたツールを使い始めたら外す。付けたターンの中のツールとサブエージェントのツールでは外さない。
+
 ## [0.6.1] - 2026-11-21
 
 ### 修正
