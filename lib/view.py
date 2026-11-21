@@ -126,6 +126,8 @@ def overlay_ids(tab):
     - role を持つものがちょうど 1 つ: それが本体。
     - role を持つものが無い（role の無いペインに重ねたとき）・2 つ以上（どれが本体か決められない）:
       従来どおり先頭を本体にする（今まで動いていた形を変えない）。
+      role の無い本体の上で overlay が先頭に来ると取り違えるが、role の無いペインはどの呼び出し側も
+      並べ替え・名簿の対象にしないので影響しない。
     """
     groups = ((tab.get("layout_state") or {}).get("all_windows") or {}).get("window_groups") or []
     has_role = set()

@@ -1201,6 +1201,10 @@ class ClaudeViewCli(unittest.TestCase):
         r = self.run_view("--dry-run", "restore")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("見つからない", r.stderr)
+        # equalize は main タブの role の組み立て（overlay を外す 2 つめの経路）も通る
+        r = self.run_view("--dry-run", "equalize")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("見つからない", r.stderr)
         r = self.run_view("restore")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("id:99", self.calls.read_text())
