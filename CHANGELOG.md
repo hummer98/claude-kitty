@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-21
+
 ### 追加
 
 - `claude-relay`（第 1 段）: 互いに承認した端末（別の claude.ai アカウントでもよい）の Claude Code セッションの間で、LAN の中の ssh でメッセージを渡す（[docs/relay.md](docs/relay.md)、登録の手順は [SETUP.md の 7.](SETUP.md#7-端末をまたぐ連絡claude-relay)）。
@@ -237,7 +239,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/hummer98/claude-kitty/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/hummer98/claude-kitty/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/hummer98/claude-kitty/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hummer98/claude-kitty/compare/v0.5.0...v0.6.0
