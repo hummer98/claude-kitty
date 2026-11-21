@@ -125,6 +125,16 @@ LS = [{"id": 1, "is_focused": True, "tabs": [{"id": 1, "title": "main", "is_acti
     {"id": 5, "is_focused": False, "user_vars": {"role": "dev-a"}}]}]}]
 
 
+FAKE_CLAUDE = r"""
+import json, subprocess, sys
+for line in sys.stdin:
+    q = json.loads(line)
+    r = subprocess.run(q["argv"], input=q["input"], capture_output=True, text=True, env=q["env"], timeout=60)
+    sys.stdout.write(json.dumps([r.returncode, r.stdout, r.stderr]) + "\n")
+    sys.stdout.flush()
+"""
+
+
 class World:
     """端末 a（user-a@a.lan）と b（user-b@b.lan）の一時の HOME と、偽の道具。"""
 
@@ -214,17 +224,37 @@ class World:
     def kitten_calls(self):
         return [json.loads(x) for x in self.kcalls.read_text().splitlines()] if self.kcalls.exists() else []
 
+    def claude(self):
+        """hook を子として動かす、生き続ける偽の claude（argv[0] が claude。hook は祖先の claude の pid を記録する）。"""
+        if getattr(self, "_claude", None) is None:
+            self._claude = subprocess.Popen(["claude", "-c", FAKE_CLAUDE], executable=sys.executable, text=True,
+                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        return self._claude
+
+    def close(self):
+        c = getattr(self, "_claude", None)
+        if c is not None:
+            c.stdin.close()
+            c.stdout.close()
+            c.kill()
+            c.wait()
+            self._claude = None
+
     def hook(self, name, event, payload, **extra):
-        r = subprocess.run([sys.executable, str(RELAY), "hook", event], input=json.dumps(payload), capture_output=True,
-                           text=True, env=self.env(name, **extra), timeout=60)
-        assert r.returncode == 0, r.stderr
-        return json.loads(r.stdout) if r.stdout else None
+        c = self.claude()
+        c.stdin.write(json.dumps({"argv": [sys.executable, str(RELAY), "hook", event], "input": json.dumps(payload),
+                                  "env": self.env(name, **extra)}) + "\n")
+        c.stdin.flush()
+        rc, out, err = json.loads(c.stdout.readline())
+        assert rc == 0, err
+        return json.loads(out) if out else None
 
 
 class RelayBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.w = World(self.tmp.name)
+        self.addCleanup(self.w.close)
 
     def tearDown(self):
         for c in self.w.kitten_calls():
@@ -546,11 +576,11 @@ class FakeMessagingSocket:
     """Claude Code の cross-session messaging の socket の偽物。接続ごとに、閉じられるまでに届いた行（JSON）を残す。
     AF_UNIX のパスは 104〜108 バイトまでなので、短い一時のフォルダに作る。"""
 
-    def __init__(self, accept=True):
+    def __init__(self, accept=True, name="msg.sock"):
         import socket
         import threading
         self.dir = tempfile.mkdtemp(prefix="ckr-", dir="/tmp" if os.path.isdir("/tmp") else None)
-        self.path = os.path.join(self.dir, "1234.sock")
+        self.path = os.path.join(self.dir, name)
         self.conns = []
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.bind(self.path)
@@ -623,6 +653,7 @@ class WakeSocket(RelayBase):
         self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)  # token を含む
         rec = self.newest()
         self.assertEqual((rec["socket"], rec["token"], rec["session_id"]), (self.srv.path, "tok-123", "sid-b"))
+        self.assertEqual(rec["claude_pid"], self.w.claude().pid)  # hook を呼んだ claude（祖先）
         r = self.w.cli("a", "send", "b", "secret-body-xyz")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.srv.done.wait(10))
@@ -644,6 +675,17 @@ class WakeSocket(RelayBase):
         r = self.w.cli("b", "inbox", "--deliver", "--role", "main")
         self.assertIn("secret-body-xyz", r.stdout)
         self.assertIsNone(self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env()))
+
+    def test_hook_with_pid_named_socket_wakes(self):
+        # Claude Code と同じ cc-socks/<claude の pid>.sock の形で、hook の記録から recv の知らせまで通る
+        srv = FakeMessagingSocket(name=f"{self.w.claude().pid}.sock")
+        self.addCleanup(srv.close)
+        self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env(path=srv.path))
+        self.assertEqual(self.newest()["claude_pid"], self.w.claude().pid)
+        r = self.w.cli("a", "send", "b", "hi")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(srv.done.wait(10))
+        self.assertEqual(self.last_log()["wake"], "sent")
 
     def test_without_token_sends_only_user_line(self):
         self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env(token=None))
@@ -727,15 +769,88 @@ class WakeSocket(RelayBase):
         rec["claude_start"] = "not-" + str(rec["claude_start"])
         self.rec_path("sid-b").write_text(json.dumps(rec))
         self.assertEqual(R.wake_records(self.env, "main"), [])
+        self.assertFalse(self.rec_path("sid-b").exists())
 
-    def test_unknown_pid_record_goes_stale(self):
+    def test_unknown_claude_pid_is_not_recorded(self):
+        # 祖先の claude が見つからなければ記録しない（pid の使い回しを見分けられず、別のセッションに届きうる）
         e = dict(self.env, **self.sock_env())
+        orig = R.claude_ancestor
+        R.claude_ancestor = lambda pid=None: None
+        try:
+            self.assertFalse(R.record_wake(e, "main", "sid-b"))
+        finally:
+            R.claude_ancestor = orig
+        for bad in (0, -1, True):
+            self.assertFalse(R.record_wake(e, "main", "sid-b", claude=bad))
+        self.assertFalse(self.rec_path("sid-b").exists())
+        # 前の版が書いた pid の無い記録は使わずに消す
         R.record_wake(e, "main", "sid-b", claude=os.getpid())
         rec = json.loads(self.rec_path("sid-b").read_text())
         rec.update(claude_pid=None, claude_start=None)
         self.rec_path("sid-b").write_text(json.dumps(rec))
-        self.assertEqual(len(R.wake_records(self.env, "main")), 1)
-        self.assertEqual(R.wake_records(self.env, "main", now=time.time() + R.WAKE_STALE + 1), [])
+        self.assertEqual(R.wake_records(self.env, "main"), [])
+        self.assertFalse(self.rec_path("sid-b").exists())
+
+    def test_socket_name_pid_must_match_claude(self):
+        # cc-socks/<pid>.sock の pid が記録の claude と違えば使わない（使い回された pid の別の claude の socket）
+        other = FakeMessagingSocket(name=f"{os.getpid() + 1}.sock")
+        self.addCleanup(other.close)
+        R.record_wake(dict(self.env, **self.sock_env(path=other.path)), "main", "sid-b", claude=os.getpid())
+        self.assertEqual(R.wake_records(self.env, "main"), [])
+        self.assertFalse(self.rec_path("sid-b").exists())
+        self.put_inbox()
+        self.assertEqual(R.wake_role(self.env, "main")[0], "unavailable")
+        self.assertEqual(other.conns, [])
+        # 同じ pid なら使う
+        mine = FakeMessagingSocket(name=f"{os.getpid()}.sock")
+        self.addCleanup(mine.close)
+        R.record_wake(dict(self.env, **self.sock_env(path=mine.path)), "main", "sid-b", claude=os.getpid())
+        self.assertEqual(R.wake_role(self.env, "main")[0], "sent")
+        self.assertTrue(mine.done.wait(10))
+        # 記録するときも、名前の pid が違えば書かない
+        self.assertFalse(R.record_wake(dict(self.env, **self.sock_env(path=other.path)), "main", "sid-c", claude=os.getpid()))
+        self.assertFalse(self.rec_path("sid-c").exists())
+        self.assertEqual(R.socket_pid("/run/user/1000/cc-socks/212265.sock"), 212265)
+        for p in ("/x/msg.sock", "/x/12a.sock", "/x/12.sock.old", "/x/.12.sock", None):
+            self.assertIsNone(R.socket_pid(p), p)
+
+    def test_unknown_start_is_not_used(self):
+        # 起動時刻が今は読めるのに記録に無ければ、同じプロセスと確かめられないので使わない
+        R.record_wake(dict(self.env, **self.sock_env()), "main", "sid-b", claude=os.getpid())
+        rec = json.loads(self.rec_path("sid-b").read_text())
+        self.assertIsNotNone(rec["claude_start"])
+        rec["claude_start"] = None
+        self.rec_path("sid-b").write_text(json.dumps(rec))
+        self.assertEqual(R.wake_records(self.env, "main"), [])
+        self.assertFalse(self.rec_path("sid-b").exists())
+
+    def test_new_state_place_is_private(self):
+        # 初めて作る置き場は、親のフォルダ（claude-kitty/・relay/・wake/）まで 0700。既にあるフォルダは変えない
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        base = self.w.root / "fresh" / "state"
+        (self.w.root / "fresh").mkdir(mode=0o755)
+        os.chmod(self.w.root / "fresh", 0o755)
+        e = dict(self.env, XDG_STATE_HOME=str(base), **self.sock_env())
+        self.assertTrue(R.record_wake(e, "main", "sid-b", claude=os.getpid()))
+        for d in (base, base / "claude-kitty", base / "claude-kitty" / "relay", base / "claude-kitty" / "relay" / "wake",
+                  base / "claude-kitty" / "relay" / "wake" / "main"):
+            self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700, d)
+        self.assertEqual(stat.S_IMODE((self.w.root / "fresh").stat().st_mode), 0o755)
+        # ログ・受信箱など、ほかの置き場も同じ
+        base2 = self.w.root / "fresh" / "state2"
+        R.append_log({"XDG_STATE_HOME": str(base2), "HOME": self.env["HOME"]}, {"x": 1})
+        self.assertEqual(stat.S_IMODE((base2 / "claude-kitty").stat().st_mode), 0o700)
+        # 既にあるフォルダの権限は変えない
+        os.chmod(base / "claude-kitty", 0o750)
+        R.mkdir_private(base / "claude-kitty" / "relay" / "inbox" / "main")
+        self.assertEqual(stat.S_IMODE((base / "claude-kitty").stat().st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE((base / "claude-kitty" / "relay" / "inbox").stat().st_mode), 0o700)
+        R.mkdir_private(base / "claude-kitty")  # 既にあれば何もしない
+        f = base / "plain"
+        f.write_text("x")
+        with self.assertRaises(OSError):
+            R.mkdir_private(f / "sub")  # 途中がファイルなら失敗する（前と同じ）
 
     def test_two_sessions_same_role_fall_back(self):
         # 統括のペインで人が動かした claude -p などが後から記録しても、それが終われば止まっている本命を起こす

@@ -9,7 +9,7 @@ hook が記録した Claude Code の cross-session messaging の socket に短�
 置き場:
   鍵・known_hosts   $XDG_CONFIG_HOME/claude-kitty/relay/（既定 ~/.config/claude-kitty/relay/）
   受信箱・ログ      $XDG_STATE_HOME/claude-kitty/relay/（既定 ~/.local/state/claude-kitty/relay/。macOS も同じ）
-                    inbox/<役割>/<id>.json、delivered/<役割>/<id>.json、log.jsonl、wake/<役割>.json（socket と token）
+                    inbox/<役割>/<id>.json、delivered/<役割>/<id>.json、log.jsonl、wake/<役割>/<セッション id>.json（socket と token）
   受け取りの登録    ~/.ssh/authorized_keys の「… claude-relay:<名前>」の行
 """
 import base64
@@ -54,7 +54,6 @@ HEAD = 80
 WAKE_TIMEOUT = 3.0          # 起こす知らせを送る socket の timeout（sshd の強制コマンドの中なので短く）
 WAKE_ACK_SECONDS = 60       # 知らせを送ってこれだけたっても受信箱に残っていれば「未受領」とログに出す
 WAKE_REFRESH = 600          # 中身が同じでも、これだけたったら記録の更新時刻を新しくする（新しく動いたセッションから起こす）
-WAKE_STALE = 24 * 3600      # claude の pid が分からない記録は、これより古ければ使わない
 WAKE_IDS_MAX = 50           # 知らせの印に入れる id の数（新しい方から）
 WAKE_RATE = (20, 600)       # 役割ごとに、この秒数（2 つ目）に起こすのはこの回数（1 つ目）まで。人がいないままの往復の歯止め
 # 知らせの 1 行目の印。受け手の UserPromptSubmit の hook が prompt から拾い、受領を記録する
@@ -163,7 +162,21 @@ def attr(value):
 
 
 def mkdir_private(d):
-    Path(d).mkdir(mode=0o700, parents=True, exist_ok=True)
+    """d を 0700 で作る。無い親も 1 つずつ 0700 で作る（Path.mkdir(parents=True) の親は umask のまま 755 になる。
+    XDG の置き場の決まりも、無いフォルダは 0700 で作る）。既にあるフォルダの権限は変えない。"""
+    d = Path(d)
+    missing = []
+    while not d.is_dir():
+        missing.append(d)
+        if d.parent == d:
+            break
+        d = d.parent
+    for m in reversed(missing):
+        try:
+            m.mkdir(mode=0o700)
+        except FileExistsError:
+            if not m.is_dir():
+                raise
 
 
 @contextlib.contextmanager
@@ -795,18 +808,21 @@ def _read_json(path, kind):
 
 
 def same_process(pid, start):
-    """pid が生きていて、記録した起動時刻と同じプロセスか（pid の使い回しを見分ける。起動時刻が読めなければ生死だけ）。"""
+    """pid が生きていて、記録した起動時刻と同じプロセスか（pid の使い回しを見分ける）。今の起動時刻が読めない OS・
+    権限なら生死だけで見る。今は読めるのに記録に無いものは、同じと確かめられないので違うとみなす。"""
     import proc
     if not isinstance(pid, int) or isinstance(pid, bool) or not proc.alive(pid):
         return False
     now = proc.start_time(pid)
-    return start is None or now is None or str(start) == now
+    return now is None or (start is not None and str(start) == now)
 
 
 def record_wake(env, role, sid, claude=None, now=None):
     """hook から: このセッションの socket と token を、役割の下のセッションごとの記録にする（同じ役割のセッションが
     いくつあっても、互いに上書きしない）。socket が無い（古い Claude Code・Claude Code の外）・セッション id が無いなら
-    何もしない。中身が同じで新しければ書かない（毎ターン書かない。WAKE_REFRESH ごとに更新時刻だけ新しくする）。"""
+    何もしない。祖先の claude の pid が分からなければ記録しない（使うときに pid の使い回しを見分けられず、
+    socket のパスを作り直した別のセッションに届きうる）。中身が同じで新しければ書かない（毎ターン書かない。
+    WAKE_REFRESH ごとに更新時刻だけ新しくする）。"""
     import proc
     from state import valid_session_id
     path = env.get("CLAUDE_CODE_MESSAGING_SOCKET")
@@ -815,8 +831,10 @@ def record_wake(env, role, sid, claude=None, now=None):
     now = time.time() if now is None else now
     token = env.get("CLAUDE_CODE_MESSAGING_TOKEN") or None
     cpid = claude if claude is not None else claude_ancestor()
+    if not isinstance(cpid, int) or isinstance(cpid, bool) or cpid <= 0 or socket_pid(path) not in (None, cpid):
+        return False  # socket の名前の pid が違う（親の socket を継いだなど）記録は、使うときに消すだけなので書かない
     rec = {"role": role, "session_id": sid, "socket": path, "token": token,
-           "claude_pid": cpid, "claude_start": proc.start_time(cpid) if cpid else None}
+           "claude_pid": cpid, "claude_start": proc.start_time(cpid)}
     p = wake_dir(env, role) / f"{sid}.json"
     old = _read_json(p, dict)
     if all(old.get(k) == v for k, v in rec.items()) and now - (old.get("t") or 0) < WAKE_REFRESH:
@@ -827,10 +845,31 @@ def record_wake(env, role, sid, claude=None, now=None):
     return True
 
 
-def wake_records(env, role, now=None):
-    """使える記録（新しく動いた順）。claude が終わった記録は消す。claude の pid が分からない記録は、
-    WAKE_STALE より古ければ使わない（終わったセッションの socket のパスを、別のプロセスが作り直していることがある）。"""
-    now = time.time() if now is None else now
+SOCKET_PID_RE = re.compile(r"([0-9]+)\.sock")
+
+
+def socket_pid(path):
+    """socket のファイル名が「<pid>.sock」（Claude Code の cc-socks/<claude の pid>.sock）ならその pid、違う形なら None。"""
+    m = SOCKET_PID_RE.fullmatch(os.path.basename(path)) if isinstance(path, str) else None
+    return int(m.group(1)) if m else None
+
+
+def wake_usable(rec):
+    """記録が、今も記録したセッションの claude を指しているか。claude の pid が記録にあり、生きていて起動時刻も
+    記録と同じで、socket のファイル名が <pid>.sock の形ならその pid とも同じこと（pid が使い回されると、
+    同じパスの socket を同じユーザーの別の claude が作っていることがある）。"""
+    cpid = rec.get("claude_pid")
+    if not isinstance(cpid, int) or isinstance(cpid, bool):
+        return False
+    spid = socket_pid(rec.get("socket"))
+    if spid is not None and spid != cpid:
+        return False
+    return same_process(cpid, rec.get("claude_start"))
+
+
+def wake_records(env, role):
+    """使える記録（新しく動いた順）。使えない記録（claude が終わった・pid が使い回された・pid が分からない・
+    socket の名前の pid と違う。wake_usable）は消す。"""
     d = wake_dir(env, role)
     try:
         names = sorted(n for n in os.listdir(d) if n.endswith(".json"))
@@ -841,13 +880,9 @@ def wake_records(env, role, now=None):
         rec = _read_json(d / n, dict)
         if not isinstance(rec.get("socket"), str):
             continue
-        cpid = rec.get("claude_pid")
-        if cpid is not None and not same_process(cpid, rec.get("claude_start")):
+        if not wake_usable(rec):
             with contextlib.suppress(OSError):
-                (d / n).unlink()  # 記録したセッションの claude が終わった（socket も消えているはず）
-            continue
-        t = rec.get("t") if isinstance(rec.get("t"), (int, float)) else 0
-        if cpid is None and now - t > WAKE_STALE:
+                (d / n).unlink()  # 記録したセッションの claude ではもう届かない（届けば別のセッションに届く）
             continue
         out.append(rec)
     return sorted(out, key=lambda r: -(r.get("t") or 0))
