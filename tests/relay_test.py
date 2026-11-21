@@ -607,11 +607,21 @@ class WakeSocket(RelayBase):
     def last_log(self):
         return [x for x in R.read_log(self.env) if x.get("dir") == "in"][-1]
 
+    def rec_path(self, sid):
+        return R.wake_dir(self.env, "main") / f"{sid}.json"
+
+    def newest(self):
+        recs = R.wake_records(self.env, "main")
+        return recs[0] if recs else None
+
+    def wake_logs(self):
+        return [(x["result"], x.get("via"), x["ids"]) for x in R.read_log(self.env) if x.get("dir") == "wake"]
+
     def test_hook_records_and_recv_wakes(self):
         self.assertIsNone(self.w.hook("b", "UserPromptSubmit", {"session_id": "sid-b"}, **self.sock_env()))
-        p = R.wake_path(self.env, "main")
+        p = self.rec_path("sid-b")
         self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)  # token を含む
-        rec = R.read_wake(self.env, "main")
+        rec = self.newest()
         self.assertEqual((rec["socket"], rec["token"], rec["session_id"]), (self.srv.path, "tok-123", "sid-b"))
         r = self.w.cli("a", "send", "b", "secret-body-xyz")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -637,7 +647,7 @@ class WakeSocket(RelayBase):
 
     def test_without_token_sends_only_user_line(self):
         self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env(token=None))
-        self.assertIsNone(R.read_wake(self.env, "main")["token"])
+        self.assertIsNone(self.newest()["token"])
         self.w.cli("a", "send", "b", "hi")
         self.assertTrue(self.srv.done.wait(10))
         self.assertEqual([x["type"] for x in self.srv.conns[0]], ["user"])
@@ -646,7 +656,7 @@ class WakeSocket(RelayBase):
         self.w.cli("a", "send", "b", "one")
         self.assertIsNone(self.w.hook("b", "SessionStart", {"session_id": "sid-b"}, **self.sock_env()))
         self.assertEqual(len(self.w.inbox("b")), 1)  # SessionStart では渡さない
-        self.assertEqual(R.read_wake(self.env, "main")["session_id"], "sid-b")
+        self.assertEqual(self.newest()["session_id"], "sid-b")
 
     def test_not_receiver_or_no_socket_records_nothing(self):
         for ev in ("UserPromptSubmit", "Stop", "SessionStart"):
@@ -654,11 +664,11 @@ class WakeSocket(RelayBase):
             self.w.hook("b", ev, {"session_id": "sid-none"}, **self.sock_env())  # 役割が分からない
             self.w.hook("b", ev, {"session_id": "sid-b"})                         # socket が無い（古い Claude Code）
             self.w.hook("b", ev, {"session_id": "sid-b"}, CLAUDE_CODE_MESSAGING_SOCKET="rel/x.sock")
-        self.assertIsNone(R.read_wake(self.env, "main"))
-        self.assertFalse((R.state_root(self.env) / "wake" / "dev-a.json").exists())
+        self.assertIsNone(self.newest())
+        self.assertFalse(R.wake_dir(self.env, "dev-a").exists())
         self.w.set_relay("b", enabled=False)
         self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env())
-        self.assertIsNone(R.read_wake(self.env, "main"))
+        self.assertIsNone(self.newest())
 
     def test_session_start_without_socket_does_not_ask_kitty(self):
         # SessionStart はどのセッションでも走り、まだ記録が無いことが多い。socket が無ければ kitty に役割を聞かない
@@ -669,15 +679,26 @@ class WakeSocket(RelayBase):
         # socket があれば聞いて、受け取りの役割なら記録する
         self.w.hook("b", "SessionStart", {"session_id": "new"}, KITTY_WINDOW_ID="4", KITTY_LISTEN_ON="unix:/fake/kitty-1",
                     **self.sock_env())
-        self.assertEqual(R.read_wake(self.env, "main")["session_id"], "new")
+        self.assertEqual(self.newest()["session_id"], "new")
+        # 受け取りの登録が無い端末では、socket があっても聞かない
+        self.w.cli("b", "untrust", "a", "--yes")
+        before = len(self.w.kitten_calls())
+        self.w.hook("b", "SessionStart", {"session_id": "new2"}, KITTY_WINDOW_ID="4", KITTY_LISTEN_ON="unix:/fake/kitty-1",
+                    **self.sock_env())
+        self.assertEqual(len(self.w.kitten_calls()), before)
 
     def test_record_is_rewritten_only_when_changed(self):
         e = dict(self.env, **self.sock_env())
         self.assertTrue(R.record_wake(e, "main", "sid-b", claude=os.getpid()))
         self.assertFalse(R.record_wake(e, "main", "sid-b", claude=os.getpid()))  # 毎ターン書かない
         self.assertTrue(R.record_wake(e, "main", "sid-b2", claude=os.getpid()))  # /clear などで作り直した
-        self.assertEqual(R.read_wake(self.env, "main")["session_id"], "sid-b2")
+        self.assertEqual(self.newest()["session_id"], "sid-b2")
         self.assertTrue(R.record_wake(dict(e, CLAUDE_CODE_MESSAGING_TOKEN="other"), "main", "sid-b2", claude=os.getpid()))
+        # 同じ中身でも WAKE_REFRESH たてば更新時刻を新しくする（新しく動いた方から起こす）
+        self.assertTrue(R.record_wake(e, "main", "sid-b", claude=os.getpid(), now=time.time() + R.WAKE_REFRESH + 1))
+        self.assertEqual(self.newest()["session_id"], "sid-b")
+        self.assertFalse(R.record_wake(e, "main", None, claude=os.getpid()))  # セッション id が無ければ記録しない
+        self.assertFalse(R.record_wake(e, "main", "../x", claude=os.getpid()))
 
     def test_no_record(self):
         r = self.w.cli("a", "send", "b", "hi")
@@ -689,14 +710,74 @@ class WakeSocket(RelayBase):
         p = subprocess.Popen([sys.executable, "-c", "pass"])
         p.wait()
         R.record_wake(dict(self.env, **self.sock_env()), "main", "sid-b", claude=p.pid)
-        rec = R.read_wake(self.env, "main")
+        rec = json.loads(self.rec_path("sid-b").read_text())
         rec["claude_start"] = rec["claude_start"] or "1"
-        R.wake_path(self.env, "main").write_text(json.dumps(rec))
+        self.rec_path("sid-b").write_text(json.dumps(rec))
         r = self.w.cli("a", "send", "b", "hi")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.last_log()["wake"], "unavailable")  # 記録の claude が終わっている
         self.assertFalse(self.srv.done.wait(0.5))
         self.assertEqual(len(self.w.inbox("b")), 1)  # 受信箱には置く（第 1 段のまま）
+        self.assertFalse(self.rec_path("sid-b").exists())  # 終わったセッションの記録は消す
+
+    def test_reused_pid_is_not_used(self):
+        # pid は生きていても起動時刻が違う（pid の使い回し）なら、記録の claude ではない
+        R.record_wake(dict(self.env, **self.sock_env()), "main", "sid-b", claude=os.getpid())
+        rec = json.loads(self.rec_path("sid-b").read_text())
+        rec["claude_start"] = "not-" + str(rec["claude_start"])
+        self.rec_path("sid-b").write_text(json.dumps(rec))
+        self.assertEqual(R.wake_records(self.env, "main"), [])
+
+    def test_unknown_pid_record_goes_stale(self):
+        e = dict(self.env, **self.sock_env())
+        R.record_wake(e, "main", "sid-b", claude=os.getpid())
+        rec = json.loads(self.rec_path("sid-b").read_text())
+        rec.update(claude_pid=None, claude_start=None)
+        self.rec_path("sid-b").write_text(json.dumps(rec))
+        self.assertEqual(len(R.wake_records(self.env, "main")), 1)
+        self.assertEqual(R.wake_records(self.env, "main", now=time.time() + R.WAKE_STALE + 1), [])
+
+    def test_two_sessions_same_role_fall_back(self):
+        # 統括のペインで人が動かした claude -p などが後から記録しても、それが終われば止まっている本命を起こす
+        dead = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        R.record_wake(dict(self.env, **self.sock_env()), "main", "sid-b", claude=os.getpid(), now=time.time() - 100)
+        R.record_wake(dict(self.env, **self.sock_env(path="/nonexistent/x.sock")), "main", "sid-p", claude=dead.pid)
+        self.assertEqual([r["session_id"] for r in R.wake_records(self.env, "main")], ["sid-p", "sid-b"])
+        # 生きている間でも、新しい方に送れなければ次の記録へ
+        r = self.w.cli("a", "send", "b", "hi")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.srv.done.wait(10))
+        self.assertEqual(self.last_log()["wake"], "sent")
+        dead.kill()
+        dead.wait()
+        self.assertEqual([r["session_id"] for r in R.wake_records(self.env, "main")], ["sid-b"])
+        self.assertFalse(self.rec_path("sid-p").exists())
+
+    def test_timeout_is_a_failure(self):
+        import socket as so
+
+        def slow(*_a):
+            raise so.timeout("timed out")
+        R.record_wake(dict(self.env, **self.sock_env()), "main", "sid-b", claude=os.getpid())
+        self.put_inbox()
+        r, via, ids = R.wake_role(self.env, "main", wakers=[R.SocketWaker(send=slow)])
+        self.assertEqual((via, ids), (None, []))
+        self.assertTrue(r.startswith("failed: socket: ") and r.endswith("timed out"), r)  # 3.9 は timeout、3.10 から TimeoutError
+        self.assertFalse(R.pending_path(self.env, "main").exists())  # 送れなかった分は控えない
+
+    def test_wake_rate_limit(self):
+        R.record_wake(dict(self.env, **self.sock_env()), "main", "sid-b", claude=os.getpid())
+        self.put_inbox()
+        sent = []
+        sw = R.SocketWaker(send=lambda *a: sent.append(a))
+        now = time.time()
+        for i in range(R.WAKE_RATE[0]):
+            self.assertEqual(R.wake_role(self.env, "main", wakers=[sw], now=now + i)[0], "sent")
+        r, via, _ids = R.wake_role(self.env, "main", wakers=[sw], now=now + R.WAKE_RATE[0])
+        self.assertTrue(r.startswith("skipped: 上限"), r)
+        self.assertEqual((via, len(sent)), (None, R.WAKE_RATE[0]))
+        # 時間がたてば、また起こす
+        self.assertEqual(R.wake_role(self.env, "main", wakers=[sw], now=now + R.WAKE_RATE[1] + 1)[0], "sent")
 
     def test_missing_or_dead_socket_does_not_change_recv(self):
         for path in (os.path.join(self.srv.dir, "gone.sock"), str(self.w.root / "plain-file")):
@@ -735,7 +816,7 @@ class WakeSocket(RelayBase):
         self.assertTrue(sw.available(self.env, "main"))
         self.assertTrue(sw.wake(self.env, "main", "hi"))
         self.assertEqual(sent, [(self.srv.path, "tok-123", "hi")])
-        R.wake_path(self.env, "main").write_text("[")  # 壊れた記録
+        self.rec_path("sid-b").write_text("[")  # 壊れた記録
         self.assertFalse(sw.available(self.env, "main"))
         self.assertEqual([w.name for w in R.WAKERS], ["socket"])
 
@@ -831,13 +912,12 @@ class WakeSocket(RelayBase):
         self.assertIn("secret-body-xyz", ctx)
         self.assertIn(R.NOTICE, ctx)
         self.assertEqual([p.stem for p in self.w.delivered("b")], [mid])
-        acks = [x for x in R.read_log(self.env) if x.get("dir") == "wake"]
-        self.assertEqual([(x["result"], x["ids"]) for x in acks], [("acked", [mid])])
+        self.assertEqual(self.wake_logs(), [("acked", "hook", [mid])])
         # 受領したので、時間がたっても未受領にしない。送った記録も片付く
         self.assertEqual(R.check_wakes(self.env, "main", now=time.time() + 3600), set())
         self.assertFalse(R.pending_path(self.env, "main").exists())
         r = self.w.cli("b", "log")
-        self.assertIn("知らせ  main  acked  1 通", r.stdout)
+        self.assertIn("知らせ  main  acked  1 通（hook で渡した）", r.stdout)
         self.assertIn("起こす知らせ: sent", r.stdout)
 
     def test_spoofed_marker_is_ignored(self):
@@ -871,6 +951,29 @@ class WakeSocket(RelayBase):
         out = self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env())
         self.assertIn("one", out["reason"])
         self.assertEqual(R.check_wakes(self.env, "main", now=later + 20), set())
+        self.assertFalse(R.pending_path(self.env, "main").exists())
+        # 第 1 段の道で渡ったことも受領として 1 度出す
+        self.assertEqual(self.wake_logs()[-1], ("acked", "delivered", [mid]))
+        R.check_wakes(self.env, "main", now=later + 30)
+        self.assertEqual(len(self.wake_logs()), 2)
+
+    def test_repeated_wakes_judge_each_id_once(self):
+        # 続けて届くと、2 通目の知らせには 1 通目の id も入る。未受領・受領は id ごとに 1 度だけ
+        self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env())
+        self.w.cli("a", "send", "b", "one")
+        first = R.wake_ids(self.notice())
+        self.w.cli("a", "send", "b", "two")
+        both = R.wake_ids(self.notice())
+        self.assertEqual(both[:1], first)
+        self.assertEqual(len(both), 2)
+        self.assertEqual(sorted(json.loads(R.pending_path(self.env, "main").read_text())), sorted(both))
+        later = time.time() + R.WAKE_ACK_SECONDS + 1
+        self.assertEqual(R.check_wakes(self.env, "main", now=later), set(both))
+        self.assertEqual(self.wake_logs(), [("unacked", None, both)])
+        # inbox --deliver（セッションが自分で受け取った）でも受領
+        self.w.cli("b", "inbox", "--deliver", "--role", "main")
+        R.check_wakes(self.env, "main", now=later + 1)
+        self.assertEqual(self.wake_logs()[-1], ("acked", "delivered", both))
         self.assertFalse(R.pending_path(self.env, "main").exists())
 
     def test_status_without_wake_is_cheap_and_unchanged(self):

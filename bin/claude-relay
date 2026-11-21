@@ -381,7 +381,8 @@ def cmd_log(a, env):
         elif r.get("dir") == "wake":
             # 起こす知らせの受領（acked = hook で渡した）・未受領（unacked）
             who = "知らせ"
-            extra = f"  {len(r.get('ids') or [])} 通" + (f"  {r.get('reason')}" if r.get("reason") else "")
+            via = {"hook": "（hook で渡した）", "delivered": "（Stop・inbox --deliver などで渡った）"}.get(r.get("via"), "")
+            extra = f"  {len(r.get('ids') or [])} 通{via}" + (f"  {r.get('reason')}" if r.get("reason") else "")
         if r.get("wake"):
             extra += f"  起こす知らせ: {r.get('wake')}" + (f"（{r['wake_via']}）" if r.get("wake_via") else "")
         print(relay.clean(f"{r.get('at')}  {who}  {r.get('role') or '-'}  {r.get('result') or ''}{extra}"))
