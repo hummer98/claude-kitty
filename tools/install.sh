@@ -138,7 +138,7 @@ unlink_one() {  # unlink_one SRC DEST: SRC を指すリンクだけ消す
 }
 
 step_links() {
-	echo "## コマンドのリンク（$BIN_DIR）"
+	echo "## コマンドのリンク（${BIN_DIR}）"
 	for src in "$REPO"/bin/*; do
 		[ -f "$src" ] && [ -x "$src" ] || continue
 		if [ "$uninstall" = 1 ]; then unlink_one "$src" "$BIN_DIR/${src##*/}"; else link_one "$src" "$BIN_DIR/${src##*/}"; fi
@@ -154,7 +154,7 @@ step_links() {
 # ---- hooks ------------------------------------------------------------------
 
 step_hooks() {
-	echo "## Claude Code の hook（$SETTINGS: $hook_parts）"
+	echo "## Claude Code の hook（$SETTINGS: ${hook_parts}）"
 	set -- --settings "$SETTINGS" --repo "$REPO" --parts "$hook_parts"
 	[ "$uninstall" = 1 ] && set -- "$@" --uninstall
 	[ "$DRY" = 1 ] && set -- "$@" --dry-run
@@ -206,29 +206,29 @@ _drop_include() {
 step_kitty() {
 	conf=$KITTY_DIR/kitty.conf
 	line="include $(kitty_include)"
-	echo "## kitty（$KITTY_DIR）"
+	echo "## kitty（${KITTY_DIR}）"
 	if [ -L "$conf" ] && [ "$(rp "$conf")" = "$(rp "$REPO/kitty/kitty.conf")" ]; then
 		note "= $conf はこのリポジトリの kitty/kitty.conf へのリンク（要る設定は入っている。触らない）"
 	elif [ "$uninstall" = 1 ]; then
 		if [ -f "$conf" ] && has_line "$conf" "$line"; then
-			note "- $conf から「$line」"
+			note "- $conf から「${line}」"
 			if [ "$DRY" = 0 ]; then
 				replace_file "$(rp "$conf")" _drop_include || fail "$conf を書き換えられない"
 			fi
 		else
-			note "= $conf に「$line」は無い"
+			note "= $conf に「${line}」は無い"
 		fi
 	elif [ -f "$conf" ] && has_line "$conf" "$line"; then
-		note "= $conf は「$line」を読み込んでいる"
+		note "= $conf は「${line}」を読み込んでいる"
 	elif [ -f "$conf" ] && grep -E -q '^[[:space:]]*include[[:space:]].*claude-kitty(-macos)?\.conf[[:space:]]*$' "$conf"; then
 		note "! $conf は別の場所の claude-kitty.conf を読み込んでいる。触らない（リポジトリを動かしたなら、その行を直す）"
 	else
-		note "+ $conf の末尾に「$line」"
+		note "+ $conf の末尾に「${line}」"
 		if [ -f "$conf" ]; then
 			# 末尾の include が後から効くので、同じキーの自分の設定は上書きされる。黙って変えないよう、先に見せる
 			for k in allow_remote_control listen_on enabled_layouts filter_notification; do
 				v=$(sed -n "s/^[[:space:]]*$k[[:space:]][[:space:]]*//p" "$conf" | tail -n 1)
-				[ -n "$v" ] && note "! いまの「$k $v」は claude-kitty.conf の値で上書きされる（残したいなら include の行の後ろに書き直す）"
+				[ -n "$v" ] && note "! いまの「$k ${v}」は claude-kitty.conf の値で上書きされる（残したいなら include の行の後ろに書き直す）"
 			done
 		fi
 		note "! 動いている kitty には、起動し直すまで効かない（allow_remote_control と listen_on は起動時にだけ読まれる）"
@@ -265,7 +265,7 @@ ours() {  # ours DEST GEN: install.sh が作ったもの（印がある）か、
 }
 
 step_systemd() {
-	echo "## systemd のユーザーユニット（$UNIT_DIR）"
+	echo "## systemd のユーザーユニット（${UNIT_DIR}）"
 	case "$OS" in
 	Linux) ;;
 	Darwin)
@@ -287,7 +287,7 @@ step_systemd() {
 		gen_unit "$src" "$gen" || { fail "$name を作れない"; continue; }
 		if [ "$uninstall" = 1 ]; then
 			if [ ! -e "$dest" ]; then
-				note "= $dest（入っていない）"
+				note "= ${dest}（入っていない）"
 			elif ours "$dest" "$gen"; then
 				case " $UNITS_ENABLE " in
 				*" $name "*)
@@ -308,12 +308,12 @@ step_systemd() {
 		if [ ! -e "$dest" ]; then
 			note "+ $dest"
 		elif [ "$(body "$dest")" = "$(body "$gen")" ]; then
-			note "= $dest（入っている）"; continue
+			note "= ${dest}（入っている）"; continue
 		elif grep -q -x -F "$UNIT_MARK" "$dest"; then
-			note "~ $dest（新しい中身にする）"
+			note "~ ${dest}（新しい中身にする）"
 			case "$name" in *.service) restart="$restart $name" ;; esac
 		else
-			note "= $dest（手で入れたもの。中身が違うので上書きしない。新しい版にするなら $src と見比べる）"; continue
+			note "= ${dest}（手で入れたもの。中身が違うので上書きしない。新しい版にするなら $src と見比べる）"; continue
 		fi
 		if [ "$DRY" = 0 ]; then
 			mkdir -p "$UNIT_DIR" && cp "$gen" "$dest.tmp.$$" && mv -f "$dest.tmp.$$" "$dest" || fail "$dest を書けない"
@@ -332,11 +332,11 @@ step_systemd() {
 			case " $restart " in
 			*" ${u%.timer}.service "*|*" $u "*)
 				if "$SYSTEMCTL" --user is-active --quiet "$u" 2>/dev/null; then
-					note "~ systemctl --user restart $u（ユニットを置き換えたため）"
+					note "~ systemctl --user restart ${u}（ユニットを置き換えたため）"
 					run "$SYSTEMCTL" --user restart "$u" || fail "$u を起動し直せない"
 				fi ;;
 			esac
-			note "= $u（enable 済み）"
+			note "= ${u}（enable 済み）"
 		else
 			note "+ systemctl --user enable --now $u"
 			run "$SYSTEMCTL" --user enable --now "$u" >/dev/null 2>&1 || fail "$u を enable できない"
@@ -376,7 +376,7 @@ agent_gone() {  # agent_gone DOMAIN/LABEL
 }
 
 step_launchd() {
-	echo "## launchd の LaunchAgent（$AGENT_DIR）"
+	echo "## launchd の LaunchAgent（${AGENT_DIR}）"
 	case "$OS" in
 	Darwin) ;;
 	Linux) note "! Linux では launchd を使わないので飛ばす（常駐は tools/install.sh --systemd）"; return ;;
@@ -394,7 +394,7 @@ step_launchd() {
 		"$LAUNCHCTL" print "$domain/$label" >/dev/null 2>&1 && loaded=1
 		if [ "$uninstall" = 1 ]; then
 			if [ ! -e "$dest" ]; then
-				note "= $dest（入っていない）"
+				note "= ${dest}（入っていない）"
 			elif grep -q -x -F "$AGENT_MARK" "$dest" || [ "$(agent_body "$dest")" = "$(agent_body "$gen")" ]; then
 				if [ "$loaded" = 1 ]; then
 					note "- launchctl bootout $domain/$label"
@@ -410,21 +410,21 @@ step_launchd() {
 		if [ ! -e "$dest" ]; then
 			note "+ $dest"
 		elif [ "$(agent_body "$dest")" = "$(agent_body "$gen")" ]; then
-			note "= $dest（入っている）"
+			note "= ${dest}（入っている）"
 			if [ "$loaded" = 1 ]; then
-				note "= $label（launchctl に読み込み済み）"
+				note "= ${label}（launchctl に読み込み済み）"
 			else
 				note "+ launchctl bootstrap $domain $dest"
 				run "$LAUNCHCTL" bootstrap "$domain" "$dest" >/dev/null 2>&1 || fail "$label を読み込めない"
 			fi
 			continue
 		elif grep -q -x -F "$AGENT_MARK" "$dest"; then
-			note "~ $dest（新しい中身にする）"
+			note "~ ${dest}（新しい中身にする）"
 		else
-			note "= $dest（手で入れたもの。中身が違うので上書きしない。新しい版にするなら $src と見比べる）"; continue
+			note "= ${dest}（手で入れたもの。中身が違うので上書きしない。新しい版にするなら $src と見比べる）"; continue
 		fi
 		if [ "$loaded" = 1 ]; then
-			note "~ launchctl bootout $domain/$label（読み込み直すため）"
+			note "~ launchctl bootout $domain/${label}（読み込み直すため）"
 			run "$LAUNCHCTL" bootout "$domain/$label" >/dev/null 2>&1 || fail "$label を止められない"
 			[ "$DRY" = 1 ] || agent_gone "$domain/$label"
 		fi
@@ -432,7 +432,7 @@ step_launchd() {
 		if [ "$DRY" = 0 ]; then
 			mkdir -p "$AGENT_DIR" "$AGENT_LOG_DIR" && cp "$gen" "$dest.tmp.$$" && mv -f "$dest.tmp.$$" "$dest" ||
 				{ fail "$dest を書けない"; continue; }
-			"$LAUNCHCTL" bootstrap "$domain" "$dest" >/dev/null 2>&1 || fail "$label を読み込めない（launchctl bootstrap $domain $dest）"
+			"$LAUNCHCTL" bootstrap "$domain" "$dest" >/dev/null 2>&1 || fail "$label を読み込めない（launchctl bootstrap $domain ${dest}）"
 		fi
 	done
 }
@@ -451,7 +451,7 @@ steps() {
 
 action=入れる
 [ "$uninstall" = 1 ] && action=外す
-echo "# claude-kitty を$action（$REPO、$OS）"
+echo "# claude-kitty を${action}（${REPO}、${OS}）"
 DRY=1
 steps
 if [ "$FAILED" = 1 ]; then

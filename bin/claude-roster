@@ -36,8 +36,9 @@ from rundir import live_kitty_sockets, runtime_dir  # noqa: E402
 
 ENV = os.environ
 KITTEN = kitten_path(ENV)
-SESSIONS = Path(ENV.get("CLAUDE_SESSIONS_DIR") or Path.home() / ".claude/sessions")
-PROJECTS = Path(ENV.get("CLAUDE_PROJECTS_DIR") or Path.home() / ".claude/projects")
+CLAUDE_HOME = Path(ENV.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")  # Claude Code の設定の置き場（claude-wait と同じ）
+SESSIONS = Path(ENV.get("CLAUDE_SESSIONS_DIR") or CLAUDE_HOME / "sessions")
+PROJECTS = Path(ENV.get("CLAUDE_PROJECTS_DIR") or CLAUDE_HOME / "projects")
 RT = runtime_dir(ENV)  # 記録の置き場（claude-wait と同じ。lib/rundir.py）。kitty の socket は find_sockets で探す
 
 

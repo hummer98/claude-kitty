@@ -151,7 +151,9 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 |---|---|
 | `CLAUDE_KITTY_KITTY` / `CLAUDE_KITTY_KITTEN` | kitty / kitten の場所（既定は公式インストーラの `~/.local/kitty.app/bin/`、無ければ PATH、macOS は `/Applications/kitty.app/Contents/MacOS/`） |
 | `CLAUDE_KITTY_QDBUS` | KWin を呼ぶ qdbus の場所（既定は PATH の `qdbus`・`qdbus6`・`qdbus-qt6` の最初のもの） |
-| `CLAUDE_KITTY_CLASS` / `CLAUDE_KITTY_START_AS` | `claude-kitty` が起動する kitty の窓のクラス（既定 `kitty-claude`）と起動の形（既定は `kitty.maximize` で `maximized` か `normal`） |
+| `CLAUDE_KITTY_CLASS` / `CLAUDE_KITTY_START_AS` | `claude-kitty` が起動する kitty の窓のクラス（既定 `kitty-claude`。Linux だけ。macOS の kitty には `--class` が無い）と起動の形（既定は `kitty.maximize` で `maximized` か `normal`） |
+| `CLAUDE_KITTY_UNSET` | `claude-kitty` が kitty を起動する前に消す環境変数を足す（空白区切りで、名前か `FOO_*` の形の接頭辞）。`CLAUDE*`（`CLAUDE_KITTY_*`・`CLAUDE_VIEW_*` を除く）と、呼んだ側の端末のもの（`CMUX_*`・`C11_*`・`GHOSTTY_*`・`TMUX` など）は既定で消す |
+| `CLAUDE_KITTY_WAIT` | macOS で、起動した kitty がすぐに失敗していないかを見る秒数（既定 2） |
 | `CLAUDE_KITTY_BIN_DIR` | `tools/install.sh` と `claude-kitty doctor` が見るコマンドのリンクの場所（既定 `~/.local/bin`） |
 | `CLAUDE_CONFIG_DIR` | Claude Code の設定のフォルダ（既定 `~/.claude`。`settings.json` の hook をここで探す） |
 | `CLAUDE_GUARD_ALLOW` | claude-guard のガードを名前で通す（[guard-hook.md](guard-hook.md#通す道)） |

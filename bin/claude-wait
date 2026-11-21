@@ -35,7 +35,10 @@ import time
 from pathlib import Path
 
 INTERVAL = float(os.environ.get("CLAUDE_WAIT_INTERVAL", "2"))
-SESSIONS = Path(os.environ.get("CLAUDE_SESSIONS_DIR", Path.home() / ".claude/sessions"))
+# Claude Code は $CLAUDE_CONFIG_DIR（無ければ ~/.claude）の sessions/ に書く。待つ相手が別の CLAUDE_CONFIG_DIR で
+# 動いているときは、この claude-wait にも同じ値（か CLAUDE_SESSIONS_DIR）を渡すこと（見えない相手は待てず、2 か所で開く）
+SESSIONS = Path(os.environ.get("CLAUDE_SESSIONS_DIR")
+                or Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "sessions")
 CLAUDE = os.environ.get("CLAUDE_WAIT_CLAUDE") or "claude"  # テスト用: 偽の claude
 NEEDED_MISSES = 3
 TRACE = bool(os.environ.get("CLAUDE_WAIT_TRACE"))  # テスト用: 判定の変化を stderr に出す（固定の sleep で待たずに済むように）

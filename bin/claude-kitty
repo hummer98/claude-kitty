@@ -7,7 +7,7 @@
 # 無ければリポジトリの kitty/claude3.session。
 # claude-code の中から起動すると CLAUDE_* の環境変数を引き継ぎ、子の claude が
 # 「子セッション」扱いになって会話記録を保存しなくなるので、それらを消してから起動する。
-# 窓のクラスは $CLAUDE_KITTY_CLASS（既定 kitty-claude）、起動の形は $CLAUDE_KITTY_START_AS（既定は kitty.maximize が
+# 窓のクラスは $CLAUDE_KITTY_CLASS（既定 kitty-claude。Linux だけ。macOS の kitty には --class が無い）、起動の形は $CLAUDE_KITTY_START_AS（既定は kitty.maximize が
 # true なら maximized、そうでなければ normal）。
 # 試験用の kitty を別のクラスで起動したときは、本物の窓を動かさないよう KWin の移動をしない。
 # macOS: kitty の --detach は使えないので、nohup で切り離して起動する。kitty.maximize・kitty.desktop（KWin 用）は
@@ -47,12 +47,61 @@ if [ "$os" = Darwin ]; then
 	maximize=0 desktop=-
 fi
 if [ "${maximize:-0}" = 1 ]; then start_as=${CLAUDE_KITTY_START_AS:-maximized}; else start_as=${CLAUDE_KITTY_START_AS:-normal}; fi
-# この道具自身の設定（CLAUDE_KITTY_* / CLAUDE_VIEW_*）は残し、中の claude-view に届ける
-for v in $(env | grep -oE '^(CLAUDE[A-Z_]*|CLAUDECODE)=' | grep -vE '^CLAUDE_(KITTY|VIEW)_'); do unset "${v%=}"; done
+# この道具自身の設定（CLAUDE_KITTY_* / CLAUDE_VIEW_*）は残し、中の claude-view に届ける。
+# 呼んだ側の端末のものも消す（kitty は環境をそのまま各ペインに渡すので、中の道具が「まだその端末の中に居る」と読み違える）:
+# - CMUX_* / C11_* / GHOSTTY_*: cmux（c11）の中から起動すると、中の claude が c11 用の hook を動かして失敗する
+#   （「SessionStart hook failed」）。シェルは ghostty 用のシェル統合を読み込む
+# - TMUX / TMUX_PANE / TERM_PROGRAM / TERM_PROGRAM_VERSION: tmux や別の端末の中に居ると読まれる（kitty は TERM_PROGRAM を置かない）
+# - KITTY_WINDOW_ID / KITTY_LISTEN_ON / KITTY_PID / WINDOWID: 別の kitty の中から起動したときの、元の kitty のペインとソケット。
+#   新しい kitty がソケットを開かない設定だと残り、claude-state などが元の kitty のペインを塗る
+# ほかにも消すものは $CLAUDE_KITTY_UNSET に空白で区切って書く（名前か、「FOO_*」の形の接頭辞）
+unset_names="TMUX TMUX_PANE TERM_PROGRAM TERM_PROGRAM_VERSION KITTY_WINDOW_ID KITTY_LISTEN_ON KITTY_PID WINDOWID"
+unset_prefixes="CMUX_ C11_ GHOSTTY_"
+set -f  # 下の for は空白で区切るだけ（「*」をファイル名に広げない）
+for w in ${CLAUDE_KITTY_UNSET:-}; do
+	case $w in
+	*[!A-Za-z0-9_*]*|[0-9]*|'*') echo "claude-kitty: CLAUDE_KITTY_UNSET の「${w}」は名前か接頭辞（FOO_*）でないので使わない" >&2 ;;
+	*'*') case ${w%'*'} in *'*'*) echo "claude-kitty: CLAUDE_KITTY_UNSET の「${w}」は名前か接頭辞（FOO_*）でないので使わない" >&2 ;; *) unset_prefixes="$unset_prefixes ${w%'*'}" ;; esac ;;
+	*) unset_names="$unset_names $w" ;;
+	esac
+done
+for v in $(compgen -e); do  # export してある変数の名前（env の出力と違い、値の中の改行に惑わされない）
+	case $v in
+	CLAUDE_KITTY_*|CLAUDE_VIEW_*) continue ;;
+	CLAUDE*) unset "$v"; continue ;;
+	esac
+	for n in $unset_names; do [ "$v" = "$n" ] && unset "$v"; done
+	for n in $unset_prefixes; do case $v in "$n"*) unset "$v" ;; esac; done
+done
+unset unset_names unset_prefixes w n
+set +f
 cd ~ || exit 1
 if [ "$os" = Darwin ]; then
-	# --detach は macOS では使えない。端末を閉じても kitty が残るよう、nohup で切り離す
-	nohup "$kitty" --class "$class" --start-as "$start_as" --session "$session" </dev/null >/dev/null 2>&1 &
+	# --detach は macOS では使えない。端末を閉じても kitty が残るよう、nohup で切り離す。
+	# --class も渡さない: macOS の kitty には無く、「Unknown flag: --class use --help.」で終わる（0.51 で確認）。
+	# 背景で起動するので、そのままでは失敗しても黙って 0 で終わる。$CLAUDE_KITTY_WAIT 秒（既定 2）のうちに
+	# kitty が 0 以外で終わったら、kitty のエラーを出して 1 で終わる（動き続けていれば起動できたとみなす）
+	errf=$(mktemp "${TMPDIR:-/tmp}/claude-kitty.XXXXXX" 2>/dev/null) || { errf="${TMPDIR:-/tmp}/claude-kitty.$$.err"; (umask 077; : > "$errf") 2>/dev/null || errf=/dev/null; }
+	nohup "$kitty" --start-as "$start_as" --session "$session" </dev/null >/dev/null 2>"$errf" &
+	pid=$!
+	wait_s=${CLAUDE_KITTY_WAIT:-2}
+	case $wait_s in ''|*[!0-9]*) wait_s=2 ;; esac
+	i=0
+	while [ "$i" -lt $((wait_s * 10)) ]; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			wait "$pid"; rc=$?
+			if [ "$rc" != 0 ]; then
+				echo "claude-kitty: kitty が起動できなかった（終了コード ${rc}）:" >&2
+				[ "$errf" != /dev/null ] && sed 's/^/  /' "$errf" >&2
+				[ "$errf" != /dev/null ] && rm -f "$errf"
+				exit 1
+			fi
+			break
+		fi
+		sleep 0.1
+		i=$((i + 1))
+	done
+	[ "$errf" != /dev/null ] && rm -f "$errf"
 	exit 0
 fi
 "$kitty" --detach --class "$class" --start-as "$start_as" --session "$session"
@@ -63,7 +112,7 @@ qdbus=${CLAUDE_KITTY_QDBUS:-}
 if [ -z "$qdbus" ]; then
 	for q in qdbus qdbus6 qdbus-qt6; do command -v "$q" >/dev/null 2>&1 && { qdbus=$q; break; }; done
 fi
-[ -n "$qdbus" ] || { echo "claude-kitty: qdbus が無いので kitty.desktop（デスクトップ $desktop）へ移せない（KDE Plasma の KWin だけ）" >&2; exit 0; }
+[ -n "$qdbus" ] || { echo "claude-kitty: qdbus が無いので kitty.desktop（デスクトップ ${desktop}）へ移せない（KDE Plasma の KWin だけ）" >&2; exit 0; }
 js="${XDG_RUNTIME_DIR:-/tmp}/claude-kitty-desktop.$$.js"
 max=false
 [ "$maximize" = 1 ] && max=true
