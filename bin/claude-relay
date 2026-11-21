@@ -11,7 +11,7 @@
   claude-relay inbox [--role R] [--deliver] [--json]   受信箱を見る（--deliver は渡す文を出して delivered/ へ移す）
   claude-relay status [SESSION_ID]  ステータス行用「端末 mac-a から 1 通」（無ければ何も出さない）
   claude-relay log [-n N] [--json]  送受信の記録
-  claude-relay hook EVENT          Claude Code の hook（UserPromptSubmit / Stop）。何が起きても exit 0
+  claude-relay hook EVENT          Claude Code の hook（UserPromptSubmit / Stop / SessionStart）。何が起きても exit 0
   claude-relay recv --from NAME    sshd の強制コマンド（authorized_keys が呼ぶ。人は呼ばない）
 """
 import json
@@ -352,7 +352,16 @@ def cmd_status(a, env):
     role = (rec or {}).get("role")
     if not isinstance(role, str) or not relay.NAME_RE.match(role):
         return 0
-    sys.stdout.write(relay.summary(relay.inbox_items(env, role)))
+    items = relay.inbox_items(env, role)
+    text = relay.summary(items)
+    if items:
+        try:
+            unacked = relay.check_wakes(env, role)  # 送った知らせの受領を確かめる（常駐の見張りは無い）
+        except (relay.Refused, OSError, ValueError):
+            unacked = set()
+        if any(r["id"] in unacked for r in items):
+            text += "（起こす知らせが未受領）"
+    sys.stdout.write(text)
     return 0
 
 
@@ -369,6 +378,13 @@ def cmd_log(a, env):
         extra = f"  {r.get('reason')}" if r.get("reason") else (f"  {r.get('bytes')}B {r.get('head')}" if r.get("head") else "")
         if r.get("dir") == "deliver":
             who, extra = "渡した", f"  {r.get('count')} 通"
+        elif r.get("dir") == "wake":
+            # 起こす知らせの受領（acked = hook で渡した）・未受領（unacked）
+            who = "知らせ"
+            via = {"hook": "（hook で渡した）", "delivered": "（Stop・inbox --deliver などで渡った）"}.get(r.get("via"), "")
+            extra = f"  {len(r.get('ids') or [])} 通{via}" + (f"  {r.get('reason')}" if r.get("reason") else "")
+        if r.get("wake"):
+            extra += f"  起こす知らせ: {r.get('wake')}" + (f"（{r['wake_via']}）" if r.get("wake_via") else "")
         print(relay.clean(f"{r.get('at')}  {who}  {r.get('role') or '-'}  {r.get('result') or ''}{extra}"))
     return 0
 

@@ -38,7 +38,9 @@ PARTS = {
     "guard": [("PreToolUse", "Bash|Edit|Write|NotebookEdit", "claude-guard", ["hook"])],
     # 別の端末からのメッセージを受け取りの役割のセッションに渡す（docs/relay.md。--hooks=relay と明示したときだけ）
     "relay": [("UserPromptSubmit", None, "claude-relay", ["hook", "UserPromptSubmit"]),
-              ("Stop", None, "claude-relay", ["hook", "Stop"])],
+              ("Stop", None, "claude-relay", ["hook", "Stop"]),
+              # 起こすための socket を、始まったばかり（まだ 1 ターンもしていない）のセッションでも記録する
+              ("SessionStart", None, "claude-relay", ["hook", "SessionStart"])],
 }
 TIMEOUT = 10
 

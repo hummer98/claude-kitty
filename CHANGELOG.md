@@ -6,9 +6,27 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-relay`（第 2 段の 1 つ目）: 止まっている（入力待ちの）受け取りのセッションを起こす（[docs/relay.md](docs/relay.md#止まっているセッションを起こすsocket)）。別の端末のセッション同士が、人を介さずにやりとりできる。
+  - 受け取りの役割のセッションの hook が、Claude Code の cross-session messaging の socket（`CLAUDE_CODE_MESSAGING_SOCKET`・`CLAUDE_CODE_MESSAGING_TOKEN`）を `relay/wake/<役割>/<セッション id>.json`（0600）に記録する（同じ役割のセッションが複数あっても上書きし合わず、recv は新しく動いた方から試す）。
+  - `recv` が受信箱に置いたあと、その socket に短い知らせ（何通・どこから・印 `[relay-wake ids=…]`。本文は入れない）を送る。記録が無い・claude が終わっている・送れないときは第 1 段のまま（recv の結果は変えない）。成否と使った部品はログの `wake`・`wake_via` に残す。
+  - 知らせで始まったターンの UserPromptSubmit の hook が、本文を枠と注意書き付きでそのまま渡す（セッションが `inbox --deliver` を打たなくてよい）。渡ったことを受領（`wake acked`。hook で渡したか、Stop・`inbox --deliver` などで渡ったか）として id ごとに 1 度ログに残す。60 秒たっても渡っていなければ、次の `recv` か `status` のときに `wake unacked` を 1 度ログに出し、`status` に「（起こす知らせが未受領）」と付ける（常駐の見張りは無い）。起こすのは役割ごとに 10 分に 20 回まで（人がいないままの往復の歯止め）。
+  - 起こす方法は届け方の部品（`available` と `wake` だけを持つ。今は socket の 1 つ）に分け、上から試す。本文・受領・未受領は部品の外で扱う。
+  - 受け手の `crossSessionInbound` や権限モードによっては、知らせが保留（人の承認待ち）になることがある。
+
+### 変更
+
+- `tools/install.sh --hooks=relay` は SessionStart にも `claude-relay hook SessionStart` を足す（始まったばかりのセッションの socket も記録する）。
+
 ### 修正
 
 - `claude-relay`: 受信箱が空のとき、受け取りの役割のセッションの hook（UserPromptSubmit・Stop）が毎回「TypeError: cannot unpack non-iterable NoneType object」を `relay/errors.log` に残していた（hook は exit 0 なので動きには出ない）。`claude-relay inbox --deliver` は受信箱が空だとトレースバックで落ちていた。
+
+### 上げるときに手で行うこと
+
+- `--hooks=relay` を入れているなら、`tools/install.sh --hooks=relay` をもう一度（SessionStart の hook を足す。`claude-kitty doctor` は入れ直すまで「hook: claude-relay」を注意と出す）。
+- 止まっているセッションを自動で起こしたいなら、受け手のセッションが cross-session messaging を受け付ける設定か確かめる（`crossSessionInbound` が `hold` や権限モードによっては、知らせが人の承認待ちになる）。
 
 ## [0.7.0] - 2026-11-21
 

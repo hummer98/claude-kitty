@@ -613,6 +613,10 @@ def check_relay(ctx, rep):
     state, missing = M.status(data)["relay"]
     if state == "all":
         rep.ok("hook: claude-relay", "入っている")
+    elif state == "some" and missing == ["SessionStart"]:
+        # 0.7.0 で入れたまま。渡すのと起こすのは UserPromptSubmit・Stop で足りる（始まったばかりのセッションを起こせないだけ）
+        rep.warn("hook: claude-relay", "SessionStart が無い（始まってまだ 1 ターンもしていないセッションは起こせない）",
+                 "tools/install.sh --hooks=relay")
     elif state == "some":
         rep.ng("hook: claude-relay", f"一部だけ（無い: {', '.join(missing)}）", "tools/install.sh --hooks=relay")
     else:
