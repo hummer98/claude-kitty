@@ -1084,6 +1084,18 @@ class ShowOff(unittest.TestCase):
                 self.assertEqual(self.calls, [["xdg-open", want]], target)  # claude-browser は呼ばない
                 self.assertEqual(out, {"shown": "xdg-open", "target": want, "via": "browser.enabled: false"})
 
+    def test_other_kind_goes_to_xdg_open_like_outside_kitty(self):
+        pdf = self.d / "a.pdf"; pdf.write_bytes(b"%PDF")
+        self.conf({"enabled": False})
+        with mock.patch.object(self.show, "PLATFORM", "linux"):
+            code, out = self.show.show(str(pdf), self.env, None, run=self.fake_run)
+        self.assertEqual((code, self.calls), (0, [["xdg-open", str(pdf)]]))
+        self.conf({})  # オンなら今まで通り「開き方が分からない種類」
+        self.calls.clear()
+        code, out = self.show.show(str(pdf), self.env, None, run=self.fake_run)
+        self.assertEqual((code, self.calls), (1, []))
+        self.assertIn("開き方が分からない", out["error"])
+
     def test_macos_uses_open(self):
         self.conf({"enabled": False})
         with mock.patch.object(self.show, "Kitten", self.no_kitten), mock.patch.object(self.show, "PLATFORM", "darwin"):

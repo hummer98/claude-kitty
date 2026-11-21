@@ -99,7 +99,7 @@ def setup_browser(env=None, strict=True):
         if strict:
             die(str(e))  # 壊れた設定のまま、別のブラウザ・別のプロファイルで開かない
         print(f"claude-browser: {e}（既定で続ける）", file=sys.stderr)
-        conf = {"command": None, "profile_root": None}
+        conf = {"enabled": True, "command": None, "profile_root": None}
     import shutil
     BROWSER = find_browser(conf, env, Path.home(), lambda n: shutil.which(n, path=env.get("PATH")),
                            os.path.exists, flatpak_has, os.uname().sysname)

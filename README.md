@@ -238,7 +238,7 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - 入力先は変えない（overlay も常に `--keep-focus`。ユーザーが打っている途中の文字が overlay に吸われないように）。自分のペインが表示されていないタブにあれば、その旨を `note` に書く。
 - 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確認できないときも同じ）。
 - kitty の外では `xdg-open`（macOS は `open`）に渡す。
-- 設定の `browser.enabled` が `false` なら、kitty の中でも HTML・画像・URL を `xdg-open`（macOS は `open`）に渡す（結果の `via` が `"browser.enabled: false"`）。
+- 設定の `browser.enabled` が `false` なら、kitty の中でも HTML・画像・URL（ほかの種類のファイルも、kitty の外と同じく）を `xdg-open`（macOS は `open`）に渡す（結果の `via` が `"browser.enabled: false"`）。
 - overlay は重ねた先のペインと同じ window group に入るので、claude-view は並べ替えの対象に数えない。
 
 ## claude-relay（端末をまたぐ連絡）
