@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### 修正
+
+- `claude-relay`: 受信箱が空のとき、受け取りの役割のセッションの hook（UserPromptSubmit・Stop）が毎回「TypeError: cannot unpack non-iterable NoneType object」を `relay/errors.log` に残していた（hook は exit 0 なので動きには出ない）。`claude-relay inbox --deliver` は受信箱が空だとトレースバックで落ちていた。
+
 ## [0.7.0] - 2026-11-21
 
 ### 追加

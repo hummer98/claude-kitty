@@ -715,7 +715,7 @@ def take(env, role, budget=CONTEXT_BUDGET, now=None, timeout=10.0):
     with locked(root, timeout=timeout):
         items = inbox_items(env, role)
         if not items:
-            return None
+            return None, 0  # 呼ぶ側（hook・inbox --deliver）は 2 つに分けて受ける
         dd = delivered_dir(env, role)
         text, n = compose(items, budget, delivered=lambda r: str(dd / f"{r['id']}.json"))
         mkdir_private(dd)
