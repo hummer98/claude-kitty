@@ -159,6 +159,40 @@ class Doctor(unittest.TestCase):
         items = self.by_name(self.w.ctx(CLAUDE_LANG_CHECK_LANGUAGE=None))
         self.assertEqual(items["hook: claude-lang-check の言語"]["status"], "warn")
 
+    def test_model_policy_rows(self):
+        name = "モデルの切り替え"
+        cfg = self.w.root / "config.json"
+        settings = self.w.home / ".claude/settings.json"
+        items = self.by_name(self.w.ctx())                       # 設定なし = 無効。hook は入っている（FakeWorld は全部入れる）
+        self.assertEqual(items[name]["status"], "ok")
+        self.assertIn("無効", items[name]["detail"])
+        self.assertIn("何もしない", items[name]["detail"])
+        _l, data = M.install({}, str(ROOT), ["state", "guard"])
+        settings.write_text(json.dumps(data))
+        items = self.by_name(self.w.ctx())
+        self.assertEqual((items[name]["status"], items[name]["detail"]), ("ok", "無効（model_policy.enabled が false）"))
+        self.assertNotIn("hook: claude-presence（モデルの切り替え）", items)   # 使う人だけのもの（注意を出さない）
+        cfg.write_text('{"model_policy": {"enabled": true}}')
+        items = self.by_name(self.w.ctx())
+        self.assertEqual(items[name]["status"], "ng")
+        self.assertIn("--hooks=model", items[name]["fix"])
+        self.assertEqual(items["設定: model_policy"]["status"], "ok")
+        _l, data = M.install({}, str(ROOT), ["state", "guard", "model"])
+        settings.write_text(json.dumps(data))
+        items = self.by_name(self.w.ctx())
+        self.assertEqual(items[name]["status"], "ok")
+        self.assertIn("20 分", items[name]["detail"])
+        self.assertIn("haiku", items[name]["detail"])
+        _l, data = M.install({}, str(ROOT), ["guard", "model"])  # 人の入力を記録する claude-state が無い
+        settings.write_text(json.dumps(data))
+        items = self.by_name(self.w.ctx())
+        self.assertEqual(items[name]["status"], "ng")
+        self.assertIn("--hooks=state", items[name]["fix"])
+        cfg.write_text('{"model_policy": {"enabled": "yes"}}')
+        items = self.by_name(self.w.ctx())
+        self.assertEqual(items["設定: model_policy"]["status"], "ng")
+        self.assertNotIn(name, items)
+
     def test_old_kitty_without_pairs(self):
         self.w.answers["ls"] = (0, json.dumps(LS_OLD))
         items = self.by_name(self.w.ctx())
@@ -278,7 +312,7 @@ class ConfigExample(unittest.TestCase):
 
     def test_every_section_present(self):
         self.assertEqual(set(self.data), {"view", "kitty", "browser", "state", "lang", "guard_hook", "session_stats", "roster",
-                                          "relay"})
+                                          "relay", "model_policy"})
 
     def test_loaders_read_example(self):
         from config import load_roster_config, load_state_config, load_view_config
@@ -315,6 +349,10 @@ class ConfigExample(unittest.TestCase):
         self.assertEqual(rl["peers"], self.data["relay"]["peers"])
         self.assertEqual({k: rl[k] for k in self.data["relay"] if k not in ("receivers",)},
                          {k: v for k, v in self.data["relay"].items() if k != "receivers"})
+        from config import load_model_policy
+        from presence import DEFAULT_MODEL_POLICY
+        self.assertEqual(load_model_policy(self.env, self.PATH), self.data["model_policy"])
+        self.assertEqual(self.data["model_policy"], DEFAULT_MODEL_POLICY)  # 写しただけでは切り替えない（既定と同じ）
 
     def test_example_guard_blocks_nothing_when_copied(self):
         import guardhook as gh
@@ -352,6 +390,9 @@ class ConfigExample(unittest.TestCase):
         from config import DEFAULT_RELAY
         for k, v in DEFAULT_RELAY.items():
             self.assertEqual(default_of(k, "relay"), f"`{json.dumps(v)}`", k)
+        from presence import DEFAULT_MODEL_POLICY
+        for k, v in DEFAULT_MODEL_POLICY.items():
+            self.assertEqual(default_of(k, "model_policy"), f"`{json.dumps(v, ensure_ascii=False)}`", k)
         self.assertEqual(default_of("left", "view"), f"`{json.dumps(DEFAULT_VIEW['left'])}`")
 
 

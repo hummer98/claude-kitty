@@ -1498,7 +1498,7 @@ class HookInstall(unittest.TestCase):
     def test_install_sh_all_does_not_include_relay(self):
         text = (ROOT / "tools/install.sh").read_text()
         self.assertIn("hook_parts=state,guard;", text)
-        self.assertIn('ok={"state","lang","guard","relay"}', text)
+        self.assertIn('ok={"state","lang","guard","relay","model"}', text)
 
 
 if __name__ == "__main__":

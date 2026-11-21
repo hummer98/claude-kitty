@@ -93,7 +93,8 @@ class MergeHooks(unittest.TestCase):
         lines2, again = M.install(new, "/other", ["state", "lang", "guard"])
         self.assertEqual(again, new)
         self.assertTrue(all(line.startswith("= ") for line in lines2))
-        self.assertEqual(M.status(new), dict({p: ("all", []) for p in M.PARTS}, relay=("none", ["UserPromptSubmit", "Stop", "SessionStart"])))
+        self.assertEqual(M.status(new), dict({p: ("all", []) for p in M.PARTS}, relay=("none", ["UserPromptSubmit", "Stop", "SessionStart"]),
+                                             model=("none", ["PreToolUse"])))
 
     def test_parts_are_selectable(self):
         _lines, new = M.install({}, "/r", ["guard"])
@@ -334,6 +335,27 @@ class Install(unittest.TestCase):
         self.assertEqual(self.run_install("--hooks=", "--yes").returncode, 2)       # 空の指定は誤り
         self.run_install("--all", "--uninstall", "--yes")                 # 外すときの --all は lang も外す
         self.assertEqual(json.loads(self.settings.read_text()), {})
+
+    def test_model_only_when_named(self):
+        # model（離席中のモデルの切り替え）は relay と同じく --hooks=model と明示したときだけ。--all には入らない
+        r = self.run_install("--hooks", "--yes")
+        self.assertEqual(M.status(json.loads(self.settings.read_text()))["model"][0], "none")
+        self.assertNotIn("claude-presence", r.stdout)
+        r = self.run_install("--hooks=model", "--yes")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        data = json.loads(self.settings.read_text())
+        self.assertEqual(M.status(data)["model"], ("all", []))
+        g = [g for g in data["hooks"]["PreToolUse"] if g.get("matcher") == "Agent|Task"]
+        self.assertEqual(g[0]["hooks"], [{"type": "command", "command": f"{REPO}/bin/claude-presence hook", "timeout": 10}])
+        self.assertEqual(M.status(data)["state"][0], "all")  # --hooks で入れたものは残る
+        self.assertIn("= ", self.run_install("--hooks=model", "--dry-run").stdout)  # 2 回目は足さない
+        r = self.run_install("--hooks=model", "--uninstall", "--yes")
+        st = M.status(json.loads(self.settings.read_text()))
+        self.assertEqual((st["model"][0], st["state"][0]), ("none", "all"))
+        self.run_install("--hooks=model", "--yes")
+        self.run_install("--all", "--uninstall", "--yes")              # 外すときの --all は model も外す
+        self.assertEqual(json.loads(self.settings.read_text()), {})
+        self.assertEqual(M.parse_parts(""), ["state", "lang", "guard"])
 
     def test_select_parts(self):
         r = self.run_install("--hooks=state,guard", "--yes")

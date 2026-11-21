@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """~/.claude/settings.json の hooks に、claude-kitty の hook を足す・外す・調べる（tools/install.sh と claude-kitty doctor が使う）。
 
-  python3 tools/merge_hooks.py --settings PATH --repo DIR [--parts state,lang,guard,relay] [--uninstall] [--dry-run] [--check]
+  python3 tools/merge_hooks.py --settings PATH --repo DIR [--parts state,lang,guard,relay,model] [--uninstall] [--dry-run] [--check]
 
 - 既存のキーと既存の hook は消さない。同じ道具の同じ hook（下の「同じ」）が既にあれば足さない。
 - 「同じ」は command の最初の語のファイル名と、残りの引数で比べる（`claude-state hook Stop` と
@@ -41,7 +41,10 @@ PARTS = {
               ("Stop", None, "claude-relay", ["hook", "Stop"]),
               # 起こすための socket を、始まったばかり（まだ 1 ターンもしていない）のセッションでも記録する
               ("SessionStart", None, "claude-relay", ["hook", "SessionStart"])],
+    # 離席中のサブエージェントのモデルの切り替え（設定 model_policy。--hooks=model と明示したときだけ）
+    "model": [("PreToolUse", "Agent|Task", "claude-presence", ["hook"])],
 }
+OPTIONAL = ("relay", "model")  # 省いたときには入れない（使う人だけのもの）
 TIMEOUT = 10
 
 
@@ -236,8 +239,8 @@ def write(path, data, now=None):
 
 
 def parse_parts(text):
-    # 省いたときは relay（使う人だけのもの）を除いた全部
-    parts = [p.strip() for p in (text or "").split(",") if p.strip()] or [p for p in PARTS if p != "relay"]
+    # 省いたときは relay・model（使う人だけのもの）を除いた全部
+    parts = [p.strip() for p in (text or "").split(",") if p.strip()] or [p for p in PARTS if p not in OPTIONAL]
     bad = [p for p in parts if p not in PARTS]
     if bad:
         raise ValueError(f"知らない hook: {', '.join(bad)}（使えるのは {', '.join(PARTS)}）")

@@ -82,5 +82,11 @@
     "peers": {
       "mac-a": {"host": "mac-a.local", "user": "taro", "port": 22}
     }
+  },
+  "model_policy": {
+    "enabled": false,
+    "away_minutes": 20,
+    "away_model": "haiku",
+    "keep": ["review", "レビュー", "評価", "verify", "検証", "調べ", "guide"]
   }
 }

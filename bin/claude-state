@@ -187,12 +187,38 @@ def _apply(event, payload, env, now, d, sid, wid, sock):
 
 def cmd_hook(event, env):
     """hook 本体。何が起きても exit 0、stdout には何も出さない（UserPromptSubmit では文脈に入るため）。"""
+    payload, result = {}, None
     try:
         text = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()  # 大きな tool_response でも切らない
-        apply(event, parse_hook_input(text), env)
+        payload = parse_hook_input(text)
+        result = apply(event, payload, env)
     except BaseException as e:  # noqa: BLE001 — hook は Claude Code を止めない
         log_error(env, event, f"{type(e).__name__}: {e}")
+    if event == "UserPromptSubmit":
+        try:
+            note_presence(payload, env, result)
+        except BaseException as e:  # noqa: BLE001
+            log_error(env, event, f"presence: {type(e).__name__}: {e}")
     return 0
+
+
+def note_presence(payload, env, result, now=None):
+    """人が打った入力なら、その時刻を全セッション共通の記録に書く（claude-presence の在席の判定に使う。lib/presence.py）。
+
+    色の記録（apply）の後に呼ぶ: 役割はその記録から取る。kitty の外のセッションでも書く（人がいることに変わりはない）。
+    書かないもの: 機械の入力（通知・他のセッションからのメッセージ・claude-relay の知らせ）、CLAUDE_KITTY_STATE=off の
+    セッション、入れ子の claude（ツールの中から動かした claude -p など）。何を決めたかを返す（テスト用）。"""
+    from presence import is_human, record_human, session_role
+    sid = payload.get("session_id")
+    if result in ("off", "nested claude") or not valid_session_id(sid):
+        return "skip"
+    if not is_human(payload.get("prompt"), conf(env)["notice"]):
+        return "machine"
+    if result not in ("working", "waiting", "done", "idle", "end") and who(env)[1]:
+        return "nested"  # apply が入れ子かを確かめる前に終わった（kitty の外・変化なし・失敗など）
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    record_human(env, sid, session_role(env, sid), cwd, now)
+    return "human"
 
 
 def log_error(env, event, msg):
