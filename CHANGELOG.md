@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-22
+
 ### 追加
 
 - `claude-guard`: `commands` の `{"program"}` の項目に `allow_owner`（起動した担当だけ通す例外）。道具が書く起動の記録（`{"v":1,"owner","pid",…}`）の owner と、コマンドの `--owner X` / `--owner=X`（か前に付けた環境変数）が同じで、記録の pid がそのガードの `process` に当たるプロセスとして動いていて、セッションの役割（claude-state の記録の `role`）も X のときだけ、その項目の形を通す。旗（`claude-guard on`）・ロック（`acquire`）の間は「全員を止める」ので使わない（process だけで働いているときに効く）。役割が分からないセッション・記録が無い・壊れている・pid が死んでいる・別のプロセスのときは今までどおり止める。`claude-guard status` に記録の owner と pid の状態を出す（[docs/guard-hook.md](docs/guard-hook.md#起動した担当だけ通すallow_owner)）。
@@ -286,7 +288,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/hummer98/claude-kitty/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/hummer98/claude-kitty/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/hummer98/claude-kitty/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/hummer98/claude-kitty/compare/v0.6.2...v0.7.0
