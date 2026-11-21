@@ -831,8 +831,8 @@ def record_wake(env, role, sid, claude=None, now=None):
     now = time.time() if now is None else now
     token = env.get("CLAUDE_CODE_MESSAGING_TOKEN") or None
     cpid = claude if claude is not None else claude_ancestor()
-    if not isinstance(cpid, int) or isinstance(cpid, bool) or cpid <= 0:
-        return False
+    if not isinstance(cpid, int) or isinstance(cpid, bool) or cpid <= 0 or socket_pid(path) not in (None, cpid):
+        return False  # socket の名前の pid が違う（親の socket を継いだなど）記録は、使うときに消すだけなので書かない
     rec = {"role": role, "session_id": sid, "socket": path, "token": token,
            "claude_pid": cpid, "claude_start": proc.start_time(cpid)}
     p = wake_dir(env, role) / f"{sid}.json"

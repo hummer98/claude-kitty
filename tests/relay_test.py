@@ -676,6 +676,17 @@ class WakeSocket(RelayBase):
         self.assertIn("secret-body-xyz", r.stdout)
         self.assertIsNone(self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env()))
 
+    def test_hook_with_pid_named_socket_wakes(self):
+        # Claude Code と同じ cc-socks/<claude の pid>.sock の形で、hook の記録から recv の知らせまで通る
+        srv = FakeMessagingSocket(name=f"{self.w.claude().pid}.sock")
+        self.addCleanup(srv.close)
+        self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env(path=srv.path))
+        self.assertEqual(self.newest()["claude_pid"], self.w.claude().pid)
+        r = self.w.cli("a", "send", "b", "hi")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(srv.done.wait(10))
+        self.assertEqual(self.last_log()["wake"], "sent")
+
     def test_without_token_sends_only_user_line(self):
         self.w.hook("b", "Stop", {"session_id": "sid-b"}, **self.sock_env(token=None))
         self.assertIsNone(self.newest()["token"])
@@ -796,6 +807,9 @@ class WakeSocket(RelayBase):
         R.record_wake(dict(self.env, **self.sock_env(path=mine.path)), "main", "sid-b", claude=os.getpid())
         self.assertEqual(R.wake_role(self.env, "main")[0], "sent")
         self.assertTrue(mine.done.wait(10))
+        # 記録するときも、名前の pid が違えば書かない
+        self.assertFalse(R.record_wake(dict(self.env, **self.sock_env(path=other.path)), "main", "sid-c", claude=os.getpid()))
+        self.assertFalse(self.rec_path("sid-c").exists())
         self.assertEqual(R.socket_pid("/run/user/1000/cc-socks/212265.sock"), 212265)
         for p in ("/x/msg.sock", "/x/12a.sock", "/x/12.sock.old", "/x/.12.sock", None):
             self.assertIsNone(R.socket_pid(p), p)

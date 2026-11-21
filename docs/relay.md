@@ -136,7 +136,7 @@ claude-relay: 別の端末から 1 通のメッセージが届いた。
 
 Claude Code は、各セッションの hook と Bash に `CLAUDE_CODE_MESSAGING_SOCKET`（Unix socket のパス。Linux では `/run/user/<uid>/cc-socks/<pid>.sock` など）と `CLAUDE_CODE_MESSAGING_TOKEN` を渡す（[cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging.md)）。その socket に改行区切りの JSON で `{"type":"auth","token":"…"}`（token があるとき）と `{"type":"user","message":{"role":"user","content":"…"}}` を送ると、そのセッションに「別のセッションからのメッセージ」として届く。作業中ならツールの合間に、止まっていれば新しいターンが始まる。
 
-1. **記録**: 受け取りの役割のセッションの hook（UserPromptSubmit・Stop・SessionStart）が、そのセッションの socket のパスと token を `relay/wake/<役割>/<セッション id>.json`（0600）に書く。祖先の claude の pid と起動時刻・更新時刻も残す。同じ役割のセッションがいくつあっても互いに上書きしない（統括のペインで人が動かした `claude -p` などが後から記録しても、それが終われば本命を起こせる）。中身が同じなら書かない（10 分ごとに更新時刻だけ新しくする）。受け取りの役割でないセッション・セッション id の無い hook・socket の無い環境（古い Claude Code）・`relay.enabled` が false・祖先の claude の pid が分からないときは書かない（pid が分からないと、使うときに pid の使い回しを見分けられない）。使うときは、記録の claude の pid が生きていて起動時刻も記録と同じで、socket のファイル名が `<pid>.sock` の形（Claude Code の `cc-socks/<claude の pid>.sock`）ならその pid とも同じことを確かめる。違う記録（claude が終わった・pid が使い回された・pid の無い古い記録）は使わずに消す（pid が使い回されると、同じパスの socket を同じユーザーの別の claude が作っていて、そちらに知らせが届きうる）。
+1. **記録**: 受け取りの役割のセッションの hook（UserPromptSubmit・Stop・SessionStart）が、そのセッションの socket のパスと token を `relay/wake/<役割>/<セッション id>.json`（0600）に書く。祖先の claude の pid と起動時刻・更新時刻も残す。同じ役割のセッションがいくつあっても互いに上書きしない（統括のペインで人が動かした `claude -p` などが後から記録しても、それが終われば本命を起こせる）。中身が同じなら書かない（10 分ごとに更新時刻だけ新しくする）。受け取りの役割でないセッション・セッション id の無い hook・socket の無い環境（古い Claude Code）・`relay.enabled` が false・祖先の claude の pid が分からない・socket の名前の pid と違うときは書かない（pid が分からないと、使うときに pid の使い回しを見分けられない）。使うときは、記録の claude の pid が生きていて起動時刻も記録と同じで、socket のファイル名が `<pid>.sock` の形（Claude Code の `cc-socks/<claude の pid>.sock`）ならその pid とも同じことを確かめる。違う記録（claude が終わった・pid が使い回された・pid の無い古い記録）は使わずに消す（pid が使い回されると、同じパスの socket を同じユーザーの別の claude が作っていて、そちらに知らせが届きうる）。
 2. **起こす**: `recv` が受信箱に置き、ペインに印を付けたあと（ロックの外で）、届け方の部品を上から試して短い知らせを送る（今の部品は socket の 1 つだけ。下の「届け方の部品」。socket の部品は、新しく動いたセッションの記録から順に試し、送れたところで止める）。本文は入れない。1 行目に、機械的に拾える印と受信箱のメッセージの id（今受信箱にある分。新しい方から 50 通まで）を入れる:
    ```
    claude-relay: 別の端末から 1 通届いた [relay-wake ids=20261121T101200123456-mac-a]
@@ -144,7 +144,7 @@ Claude Code は、各セッションの hook と Bash に `CLAUDE_CODE_MESSAGING
    ```
 3. **渡す**: socket から届いたメッセージでも、受け手のセッションでは UserPromptSubmit の hook が走り、`prompt` に知らせの文がそのまま入る（Claude Code 2.1.330 で実測）。relay の UserPromptSubmit の hook は今までどおり受信箱の分を `additionalContext` として `<relay-message>` の枠と注意書き付きで渡し、delivered/ へ移す。つまり知らせで始まったターンでは、セッションが `inbox --deliver` を打たなくても本文が渡る。作業中のセッションに届いた（ツールの合間に入った）ときなどは、Stop の hook か `inbox --deliver` で渡る。どれで渡っても delivered/ へ移るので二重には渡らない。
 4. **受領**: delivered/ へ移ったことが受領。id ごとに 1 度だけログに `wake acked` を出す。知らせの印の id のうち、その UserPromptSubmit で渡したものは `via: hook`（hook で渡した）、Stop の hook や `inbox --deliver` で渡ったものは、次に確かめたときに `via: delivered`。印の id は形を確かめ、受信箱に実在して今渡したものだけを数える（人が印を打っても、偽の id は何も起こさない。印の無い普通の入力でも今どおり受信箱の分を渡す）。
-5. **未受領**: 送った知らせの id は `relay/wake/<役割>.pending.json` に id ごとに（最初に送った時刻で）控え、次の `recv` と `claude-relay status` のときに確かめる（常駐の見張りは無い。続けて届いて 2 通目の知らせに 1 通目の id が入っても、id ごとに 1 度だけ判定する）。ステータス行に `claude-relay status` を入れていないと、未受領の記録は次の `recv` まで出ない。送ってから 60 秒たってもまだ受信箱にあれば、ログに `wake unacked`（保留・拒否・形の変化の疑い）を 1 度だけ出し、`status` に「（起こす知らせが未受領）」と付ける。あとは第 1 段のまま（ペインの色・Stop の hook）。渡ったら控えから消える。
+5. **未受領**: 送った知らせの id は `relay/wake/<役割>.pending.json` に id ごとに（最初に送った時刻で）控え、次の `recv` と `claude-relay status` のときに確かめる（常駐の見張りは無い。続けて届いて 2 通目の知らせに 1 通目の id が入っても、id ごとに 1 度だけ判定する）。ステータス行に `claude-relay status` を入れていないと、未受領の記録は次の `recv`（など）まで出ない。送ってから 60 秒たってもまだ受信箱にあれば、ログに `wake unacked`（保留・拒否・形の変化の疑い）を 1 度だけ出し、`status` に「（起こす知らせが未受領）」と付ける。あとは第 1 段のまま（ペインの色・Stop の hook）。渡ったら控えから消える。
 6. **送れないとき**: 使える部品が無い（記録が無い・記録の claude が終わっている）・送れない（socket が無い／socket でない／接続できない・3 秒で送り終わらない）ときは、何もせず第 1 段の動き（ペインの色）のまま。recv の結果（`ok delivered` / `ok queued`）は変えない。
 7. 届くたびに 1 通送る（続けて届けば知らせも続く。先の知らせで渡り済みなら、後の知らせの hook は何も渡さない）。ただし役割ごとに 10 分に 20 回まで（人がいないままセッション同士が返事を続けたときの歯止め）。超えたら起こさず `skipped: 上限` として第 1 段のまま。
 
@@ -213,7 +213,7 @@ printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 | 起こすための socket と token・送った知らせの控え | `$XDG_STATE_HOME/claude-kitty/relay/wake/<役割>/<セッション id>.json`（0600）・`wake/<役割>.pending.json`・`wake/<役割>.sent.json`（起こした時刻。回数の上限に使う） |
 | 受け取りの登録 | `~/.ssh/authorized_keys` の `… claude-relay:<名前>` の行 |
 
-claude-kitty が作るフォルダは 0700 で作る（無い親も 0700。既にあるフォルダの権限は変えない）。delivered/ は自動では消さない（何を渡したかの控え）。要らなくなったら手で消してよい。
+claude-kitty が作るフォルダは 0700 で作る（無い親も、`~/.local` などを含めて全部 0700。既にあるフォルダの権限は変えない）。delivered/ は自動では消さない（何を渡したかの控え）。要らなくなったら手で消してよい。
 
 ## 安全の考え方
 
