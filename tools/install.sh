@@ -5,10 +5,12 @@
 #
 # 部品（何も書かなければ --all）:
 #   --links            bin/ の全コマンドを ~/.local/bin にリンクする（既にある別のファイルは上書きしない）
-#   --hooks[=LIST]     ~/.claude/settings.json に hook を足す。LIST は state,lang,guard,relay から選ぶ（既定は state,guard）
+#   --hooks[=LIST]     ~/.claude/settings.json に hook を足す。LIST は state,lang,guard,relay,model から選ぶ（既定は state,guard）
 #                      state = claude-state（状態の色）、guard = claude-guard、lang = claude-lang-check
 #                      （返答の言語を調べる。--hooks=lang と明示したときだけ入れる。言語は設定の lang.language で決める）、
-#                      relay = claude-relay（別の端末からのメッセージを渡す。--hooks=relay と明示したときだけ。docs/relay.md）
+#                      relay = claude-relay（別の端末からのメッセージを渡す。--hooks=relay と明示したときだけ。docs/relay.md）、
+#                      model = claude-presence（離席中のサブエージェントのモデルの切り替え。--hooks=model と明示したときだけ。
+#                      設定 model_policy.enabled も要る。docs/config.md）
 #   --kitty            kitty.conf の末尾に「include <リポジトリ>/kitty/claude-kitty.conf」を足し、
 #                      watcher と claude3.session のリンクを ~/.config/kitty に張る
 #   --systemd          contrib/systemd のユニットを ~/.config/systemd/user に写して enable --now（Linux だけ）
@@ -27,7 +29,7 @@
 # ~/Library/LaunchAgents）。
 
 usage() {
-	sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
@@ -69,10 +71,10 @@ for a in "$@"; do
 	esac
 done
 [ "$any" = 1 ] || { do_links=1 do_hooks=1 do_kitty=1 do_systemd=$all_systemd do_launchd=$all_launchd; }
-# lang（返答の言語の検査）と relay（端末をまたぐ連絡）は使う人だけが --hooks=lang / --hooks=relay で入れる。
+# lang（返答の言語の検査）・relay（端末をまたぐ連絡）・model（モデルの切り替え）は使う人だけが --hooks=lang などで入れる。
 # 外すときは、--all で全部の hook を外す
 if [ -z "$hook_parts" ] && [ "$hooks_named" = 0 ]; then
-	if [ "$uninstall" = 1 ]; then hook_parts=state,lang,guard,relay; else hook_parts=state,guard; fi
+	if [ "$uninstall" = 1 ]; then hook_parts=state,lang,guard,relay,model; else hook_parts=state,guard; fi
 fi
 
 # 道具は python3 の 3.9 以降で動く（macOS の Command Line Tools の /usr/bin/python3 が 3.9）
@@ -84,8 +86,8 @@ if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2
 fi
 # 部品の名前は先に確認する（見せたあとで知らない名前で止まらないように）
 if [ "$do_hooks" = 1 ]; then
-	python3 -c 'import sys; ok={"state","lang","guard","relay"}; p=[x for x in sys.argv[1].split(",") if x]; sys.exit(0 if p and set(p)<=ok else 1)' "$hook_parts" ||
-		{ echo "install.sh: --hooks= に使えるのは state,lang,guard,relay: $hook_parts" >&2; exit 2; }
+	python3 -c 'import sys; ok={"state","lang","guard","relay","model"}; p=[x for x in sys.argv[1].split(",") if x]; sys.exit(0 if p and set(p)<=ok else 1)' "$hook_parts" ||
+		{ echo "install.sh: --hooks= に使えるのは state,lang,guard,relay,model: $hook_parts" >&2; exit 2; }
 fi
 
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/claude-kitty-install.XXXXXX") || exit 1

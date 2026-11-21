@@ -25,7 +25,8 @@ sys.path.insert(0, str(REPO / "tools"))
 UNITS = ["claude-state-watch.service", "claude-roster-save.timer", "claude-session-stats.timer"]
 AGENTS = ["claude-kitty.state-watch", "claude-kitty.roster-save", "claude-kitty.session-stats"]
 MIN_PYTHON = (3, 9)  # macOS の Command Line Tools の /usr/bin/python3 が 3.9
-HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-check", "guard": "claude-guard", "relay": "claude-relay"}
+HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-check", "guard": "claude-guard", "relay": "claude-relay",
+               "model": "claude-presence（モデルの切り替え）"}
 
 
 class Ctx:
@@ -307,8 +308,8 @@ def check_hooks(ctx, rep):
         rep.ng("settings.json", str(e), "JSON を直す（tools/install.sh はこのままでは書き換えない）")
         return
     for part, (state, missing) in M.status(data).items():
-        if part == "relay":
-            continue  # 使う人だけのもの。設定に relay の節があるときに check_relay が調べる
+        if part in ("relay", "model"):
+            continue  # 使う人だけのもの。relay は check_relay、model は check_model_policy が調べる
         name = f"hook: {HOOK_LABELS[part]}"
         if state == "none":
             rep.warn(name, "入っていない", f"使うなら tools/install.sh --hooks={part}")
@@ -453,6 +454,8 @@ def check_config(ctx, rep):
     if uses_relay(path):
         from config import load_relay_config
         strict("relay", lambda: load_relay_config(ctx.env, path))
+    from config import load_model_policy
+    strict("model_policy", lambda: load_model_policy(ctx.env, path))
 
 
 # ---- デスクトップ・Chrome ------------------------------------------------------
@@ -638,8 +641,41 @@ def check_relay(ctx, rep):
         rep.warn("hook: claude-relay", "入っていない（届いたものがセッションに渡らない）", "tools/install.sh --hooks=relay")
 
 
+# ---- model_policy（離席中のサブエージェントのモデルの切り替え） ----------------------------------
+
+def check_model_policy(ctx, rep):
+    """有効か、hook（claude-presence の PreToolUse と、人の入力を記録する claude-state の UserPromptSubmit）が入っているか。"""
+    from config import load_model_policy
+    import merge_hooks as M
+    name = "モデルの切り替え"
+    try:
+        pol = load_model_policy(ctx.env)
+    except ValueError:
+        return  # 「設定: model_policy」の行で NG にする
+    try:
+        data = M.load(ctx.settings)
+    except M.Broken:
+        return  # settings.json の行で NG にする
+    st = M.status(data)
+    hook = st["model"][0]
+    lost = hook_programs_missing(ctx, M, data, "model") if hook != "none" else []
+    if not pol["enabled"]:
+        rep.ok(name, "無効（model_policy.enabled が false）" + ("。hook は入っているが何もしない" if hook != "none" else ""))
+        return
+    what = f"有効（{pol['away_minutes']:g} 分だれも打たなければ、実装のサブエージェントを {pol['away_model']} に）"
+    if hook == "none":
+        rep.ng(name, f"{what}。だが hook が入っていない（切り替わらない）", "tools/install.sh --hooks=model")
+    elif lost:
+        rep.ng(name, f"{what}。だが hook の道具が見つからない: {', '.join(lost)}", "tools/install.sh --links")
+    elif "UserPromptSubmit" in st["state"][1]:
+        rep.ng(name, f"{what}。だが claude-state の UserPromptSubmit の hook が無い（人が打った時刻を記録できず、切り替わらない）",
+               "tools/install.sh --hooks=state")
+    else:
+        rep.ok(name, f"{what}。hook も入っている")
+
+
 CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_systemd, check_config, check_desktop,
-          check_relay]
+          check_relay, check_model_policy]
 MARK = {"ok": "OK  ", "ng": "NG  ", "warn": "注意", "skip": "--  "}
 
 

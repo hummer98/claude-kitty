@@ -324,6 +324,49 @@ def load_relay_config(env, path=None):
     return out
 
 
+MODEL_NAME = r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$"
+
+
+def load_model_policy(env, path=None):
+    """離席中のサブエージェントのモデルの切り替え（claude-presence）の設定 {"enabled", "away_minutes", "away_model", "keep"}。
+
+      {"model_policy": {"enabled": true, "away_minutes": 20, "away_model": "haiku", "keep": ["review", "レビュー"]}}
+
+    既定は無効（enabled: false）。壊れていれば ValueError（hook は書き換えずに通す）。"""
+    import re
+    from presence import DEFAULT_MODEL_POLICY
+    path = Path(path) if path else config_path(env)
+    out = {k: (list(v) if isinstance(v, list) else v) for k, v in DEFAULT_MODEL_POLICY.items()}
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return out
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    mp = data.get("model_policy", {}) if isinstance(data, dict) else {}
+    if mp is None:
+        mp = {}
+    if not isinstance(mp, dict):
+        raise ValueError(f"{path} の model_policy がオブジェクトでない")
+    unknown = sorted(set(mp) - set(DEFAULT_MODEL_POLICY))
+    if unknown:
+        raise ValueError(f"{path} の model_policy に知らない項目: {', '.join(unknown)}")
+    e = mp.get("enabled", out["enabled"])
+    if not isinstance(e, bool):
+        raise ValueError(f"{path} の model_policy.enabled は true か false: {e!r}")
+    m = mp.get("away_minutes", out["away_minutes"])
+    if isinstance(m, bool) or not isinstance(m, (int, float)) or not 1 <= m <= 7 * 24 * 60:
+        raise ValueError(f"{path} の model_policy.away_minutes は 1〜10080 の数（分）: {m!r}")
+    am = mp.get("away_model", out["away_model"])
+    if not (isinstance(am, str) and re.match(MODEL_NAME, am)):
+        raise ValueError(f"{path} の model_policy.away_model はモデル名（\"haiku\" など）: {am!r}")
+    k = mp.get("keep", out["keep"])
+    if not isinstance(k, list) or not all(isinstance(x, str) and x for x in k):
+        raise ValueError(f"{path} の model_policy.keep は空でない文字列のリスト: {k!r}")
+    out.update(enabled=e, away_minutes=m, away_model=am, keep=list(k))
+    return out
+
+
 if __name__ == "__main__":
     # bin/claude-kitty（bash）用: "kitty-launch" で「デスクトップの番号（無ければ -） 最大化（1/0）」を 1 行出す。
     # 設定が壊れていれば stderr に理由を出し、既定（移さない・最大化しない）を出す（起動は止めない）

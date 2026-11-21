@@ -3252,6 +3252,7 @@ SIDE_TESTS = {
     "browser_test": "Browser",
     "macos_test": "Mac",
     "relay_test": "Relay",
+    "presence_test": "Presence",
 }
 
 

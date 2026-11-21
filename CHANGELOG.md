@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-presence`（新しいコマンド）と設定 `model_policy`（既定は無効）: 人がいるかを最後に人が打ってからの時間で決め、離席中（既定 20 分）は実装のサブエージェント（Agent ツール）の `model` を軽いもの（既定 `haiku`）に変える。離席中の作業はトークンの少ない方で、人がいるときは呼び出しどおり（速さ優先）にするため（[docs/config.md](docs/config.md#model_policyclaude-presence-離席中のサブエージェントのモデル)）。
+  - 記録: claude-state の UserPromptSubmit の hook が、人の入力のときだけ時刻・セッション・役割を `<置き場>/claude-presence/last.json` に書く（全セッション共通の 1 つ）。背景の作業の完了の通知・セッション間メッセージ・claude-relay の起こす知らせ・`state.notice` に当たるもの・入れ子の claude は数えない。
+  - 切り替え: PreToolUse の hook（`claude-presence hook`、matcher `Agent|Task`）が `hookSpecificOutput.updatedInput` で `model` だけを変え、`additionalContext` で一言返し、`switches.jsonl` に残す。`keep` の語（レビュー・評価・調べものなど）を含むもの、`subagent_type` が `claude-code-guide`・`Explore`・`Plan`・`web-fetch`・`fork` のもの、`model` が `fable` のもの、記録が無いとき、例外のときは変えない。英字の `keep` の語は単語として探す（`guide` は `guideline` に当てない）。同じセッションの同じ prompt を 300 秒以内に書き換えていたら、出し直しとみてもう変えない（auto mode は `permissionDecision` なしの `updatedInput` を断ることがあり、元の model のままの出し直しとのくり返しを止めるため）。
+  - `claude-presence [--json] [--recent N]` で最後の入力からの分数・判定・設定・hook・直近の切り替えを見る。`claude-kitty doctor` に「モデルの切り替え」と「設定: model_policy」の行。
+  - `tools/install.sh --hooks=model` で hook を入れる（`--all` には入らない。`--uninstall` で外せる）。
+
+### 上げるときに手で行うこと
+
+- 使うときだけ: 設定に `"model_policy": {"enabled": true}` を書き、`tools/install.sh --hooks=model`。
+
 ## [0.7.3] - 2026-11-22
 
 ### 追加

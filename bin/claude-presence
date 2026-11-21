@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""人がいるか（最後に人が打ってからの時間）を見せ、離席中はサブエージェントのモデルを切り替える。
+
+  claude-presence [--json] [--recent N]   最後に人が打ってからの分数・在席/離席・どのセッションか・設定・直近の切り替え
+  claude-presence hook                    PreToolUse の hook（matcher は Agent|Task。tools/install.sh --hooks=model）
+
+人が打った時刻は claude-state の UserPromptSubmit の hook が記録する（人の入力のときだけ。lib/presence.py）。
+hook は設定 model_policy.enabled が true のときだけ、離席中（away_minutes 分以上だれも打っていない）の実装の
+呼び出しの model を away_model に書き換える（updatedInput）。在席・記録が無い・レビューや調べもの・設定が壊れている・
+何かが失敗したときは何もしない（呼び出しどおりに通す）。詳しくは docs/config.md の model_policy。
+"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+
+def cmd_hook(env):
+    """何が起きても exit 0。書き換えるときだけ stdout に JSON を出す。"""
+    try:
+        text = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+        from presence import run_hook
+        out = run_hook(text, env)
+    except BaseException as e:  # noqa: BLE001 — hook は Claude Code を止めない
+        out = None
+        try:
+            from presence import log_error
+            log_error(env, "hook", f"{type(e).__name__}: {e}")
+        except BaseException:  # noqa: BLE001
+            pass
+    if out:
+        sys.stdout.write(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+def hook_installed(env):
+    """settings.json に claude-presence の hook があるか（"all" / "some" / "none"、読めなければ None）。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import merge_hooks as M
+    base = Path(env["CLAUDE_CONFIG_DIR"]) if env.get("CLAUDE_CONFIG_DIR") else Path.home() / ".claude"
+    try:
+        return M.status(M.load(base / "settings.json"))["model"][0]
+    except M.Broken:
+        return None
+
+
+def status(env, recent=5, now=None):
+    from config import load_model_policy
+    from presence import idle_minutes, is_away, load_last, presence_dir, recent_switches
+    now = time.time() if now is None else now
+    last = load_last(env)
+    try:
+        policy, error = load_model_policy(env), None
+    except ValueError as e:
+        from presence import DEFAULT_MODEL_POLICY
+        policy, error = dict(DEFAULT_MODEL_POLICY, enabled=False), str(e)
+    m = idle_minutes(last, now)
+    return {"last": last, "idle_minutes": None if m is None else round(m, 1),
+            "away": is_away(last, now, policy) if last else None,
+            "policy": policy, "policy_error": error, "hook": hook_installed(env),
+            "recent": recent_switches(env, recent), "dir": str(presence_dir(env))}
+
+
+def fmt_time(t):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+
+
+def format_status(s):
+    p = s["policy"]
+    out = []
+    last = s["last"]
+    if not last:
+        out.append("最後の人の入力: 記録が無い（claude-state の UserPromptSubmit の hook が、人が打ったときに書く）")
+        out.append("判定: 分からない（切り替えない）")
+    else:
+        who = f"session {last.get('session_id') or '?'}" + (f"・役割 {last['role']}" if last.get("role") else "")
+        out.append(f"最後の人の入力: {s['idle_minutes']:g} 分前（{fmt_time(last['at'])}、{who}）")
+        out.append(f"判定: {'離席' if s['away'] else '在席'}（離席とみなすのは {p['away_minutes']:g} 分から）")
+    if s["policy_error"]:
+        out.append(f"モデルの切り替え: 設定が読めないので無効（{s['policy_error']}）")
+    elif p["enabled"]:
+        out.append(f"モデルの切り替え: 有効。離席中の実装のサブエージェントは {p['away_model']}（変えない語: {', '.join(p['keep'])}）")
+    else:
+        out.append("モデルの切り替え: 無効（model_policy.enabled が false。docs/config.md）")
+    hook = {"all": "入っている", "some": "一部だけ", "none": "入っていない（tools/install.sh --hooks=model）",
+            None: "settings.json が読めない"}[s["hook"]]
+    out.append(f"hook: {hook}")
+    if s["recent"]:
+        out.append("直近の切り替え:")
+        for r in s["recent"]:
+            who = r.get("role") or r.get("session_id") or "?"
+            out.append(f"  {r.get('at', '?')}  {who}  {r.get('from') or '（指定なし）'} → {r.get('to')}  {r.get('description') or ''}".rstrip())
+    else:
+        out.append("直近の切り替え: 無い")
+    return "\n".join(out)
+
+
+def main(argv=None):
+    env = os.environ
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ["hook"]:  # hook は Agent を呼ぶたびに走るので、argparse を読み込まない
+        return cmd_hook(env)
+    if argv == ["--version"]:
+        from version import handle_version
+        handle_version(argv, "claude-presence")
+        return 0
+    import argparse
+    ap = argparse.ArgumentParser(prog="claude-presence", description="人がいるか（最後に人が打ってからの時間）と、モデルの切り替え")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--recent", type=int, default=5, help="出す直近の切り替えの数（既定 5）")
+    a = ap.parse_args(argv)
+    s = status(env, max(0, a.recent))
+    print(json.dumps(s, ensure_ascii=False) if a.json else format_status(s))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

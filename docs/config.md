@@ -1,6 +1,6 @@
 # 設定ファイル（config.json）
 
-claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`）から読みます。
+claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`）から読みます。
 **どの節も、どの項目も省けます。** ファイルが無ければ、すべて下の表の既定値で動きます。
 
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
@@ -159,6 +159,23 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `max_bytes` | `16384` | 1 通の本文の上限（UTF-8 のバイト数。1〜1048576） |
 | `rate` | `{"count": 30, "per_seconds": 600}` | 送り元ごとの通数の上限（`per_seconds` 秒に `count` 通） |
 | `peers` | `{}` | 送る相手: 名前 → `{"host", "user", "port"}`（`port` の既定は 22）。名前は英数字と `. _ -`（64 字まで） |
+
+## model_policy（claude-presence: 離席中のサブエージェントのモデル）
+
+人がいないとき（離席中）の作業はゆっくりでよくトークンの少ない方を、人がいるときは呼び出しどおり（速さ優先）にする。**既定は無効**。使うには `enabled: true` と、`tools/install.sh --hooks=model`（Agent ツールの PreToolUse の hook。`--all` には入らない）が要る。人が打った時刻は claude-state の UserPromptSubmit の hook（`--hooks=state`）が記録する。
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `enabled` | `false` | `true` で切り替える。`false` なら hook は何もしない |
+| `away_minutes` | `20` | 最後に人が打ってからこれだけ（分。1〜10080）たったら離席とみなす |
+| `away_model` | `"haiku"` | 離席中の実装のサブエージェントの `model`。Agent ツールの `model` に書ける別名（`haiku`・`sonnet`・`opus` など）を書く |
+| `keep` | `["review", "レビュー", "評価", "verify", "検証", "調べ", "guide"]` | Agent の呼び出しの `description` か `prompt` にこのどれかがあれば変えない（レビュー・評価・調べもの）。英数字だけの語は単語として探す（大文字・小文字を区別しない。`guide` は `guideline` に当たらない）。ほかは部分一致。prompt の全体を見るので、実装の依頼に「検証してからコミット」などと書くと変わらない |
+
+- 人の入力の記録: `<置き場>/claude-presence/last.json`（置き場は `$XDG_RUNTIME_DIR`、無ければ `/tmp/claude-kitty-<uid>`）。全セッション共通の 1 つで、時刻・セッション・役割（claude-state の記録の `role`）・cwd。人の入力でないものは書かない: 頭が `<task-notification`（背景の作業の完了）・`<agent-message`（サブエージェントの報告）・`<system-reminder` のもの、`<cross-session-message`（Claude Code のセッション間メッセージ）か `[relay-wake ids=`（claude-relay の起こす知らせ）を含むもの、`state.notice` に当たるもの、`CLAUDE_KITTY_STATE=off` のセッション、入れ子の claude（ツールから動かした `claude -p` など）。印の一覧は `lib/presence.py` の `MACHINE_PREFIXES`・`MACHINE_MARKS`（claude-kitty の道具が socket に直接送る文には、このどれかを入れる）。
+- 書き換えるのは離席中の実装の呼び出しだけ。変えないもの: 在席中、記録が無い（一度も人が打っていない）、`keep` の語を含む、`subagent_type` が `claude-code-guide`・`Explore`・`Plan`・`web-fetch`・`fork`、`model` が `fable` か既に `away_model`、設定が壊れている、hook の途中で何かが失敗した。
+- 書き換えは PreToolUse の `hookSpecificOutput.updatedInput`（入力の全体を置き換えるので、ほかの項目は写す）。`permissionDecision` は付けない（許可の判断は今までどおり）。呼んだ側には `additionalContext` で一言返し、`<置き場>/claude-presence/switches.jsonl` に時刻・セッション・役割・元と新しい model・description を残す。
+- auto mode の注意: Claude Code の docs によると、auto mode で `permissionDecision` なしの `updatedInput` を返すと、呼び出しが「a hook changed this call's input after auto mode reviewed it」で断られることがある。そのときは Claude が書き換えた形（`model: "haiku"`）で出し直せば通る（既に `away_model` なので hook は変えない）。元の model のまま出し直したときも、同じセッションの同じ prompt を 300 秒以内に書き換えていれば、もう変えずに通す（書き換えと断りのくり返しを止めるため）。実機の auto mode ではまだ確かめていない。
+- `claude-presence [--json] [--recent N]` で、最後に人が打ってからの分数・在席/離席・どのセッションか・設定・hook・直近の切り替えを見る。`claude-kitty doctor` の「モデルの切り替え」の行が、有効か・hook が入っているかを出す。
 
 ## 設定ファイルの外のもの
 
