@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-guard`: `commands` の `{"program"}` の項目に `allow_owner`（起動した担当だけ通す例外）。道具が書く起動の記録（`{"v":1,"owner","pid",…}`）の owner と、コマンドの `--owner X` / `--owner=X`（か前に付けた環境変数）が同じで、記録の pid がそのガードの `process` に当たるプロセスとして動いていて、セッションの役割（claude-state の記録の `role`）も X のときだけ、その項目の形を通す。旗（`claude-guard on`）・ロック（`acquire`）の間は「全員を止める」ので使わない（process だけで働いているときに効く）。役割が分からないセッション・記録が無い・壊れている・pid が死んでいる・別のプロセスのときは今までどおり止める。`claude-guard status` に記録の owner と pid の状態を出す（[docs/guard-hook.md](docs/guard-hook.md#起動した担当だけ通すallow_owner)）。
+
+### 修正
+
+- `claude-guard`: コマンドの名前を変数に入れた形（`T="python3 /x/tools/svcctl.py --owner a"; $T quit`）を見逃していた。値を 1 語のまま置き換えていたので、プログラム名が `svcctl.py --owner a` になって当たらなかった。同じコマンドの中で前に代入した変数（`T=…;`・`export T=…`・`&&` でつないだもの）がコマンドの位置に `$T` / `${T}` で来たら、値を語に分けた形と分けない形（`"$T"`。bash では 1 語で動く）の両方で読み、どちらかが止める形なら止める（`S="/opt/my tools/svcctl"; "$S" deploy` も止める）。コマンド置換・関数・外の環境変数は今までどおり読まない。
+
 ## [0.7.2] - 2026-11-22
 
 ### 追加

@@ -29,7 +29,7 @@
 
 - 文字列: 語の並びの頭が一致（`"git push"` は `git push origin main` に当たる。最初の語はファイル名で比べる）。
 - `{"regex": "..."}`: 単純なコマンド 1 つ（`&&` や `|` で区切った 1 つ。前の `VAR=値` と `env` / `timeout` などは外し、最初の語はファイル名にする）の文字列に `re.search`。
-- `{"program": "<正規表現>", "value_options": ["--owner"], "block": ["deploy", {"sub": "config", "if_any": ["--set"]}, {"sub": "reset", "unless_any": ["--dry-run"]}]}`: プログラム名（ファイル名。`python3 x/svcctl.py` の形は `svcctl.py`）に当たり、最初のサブコマンドが `block` にあれば止める。`value_options` は値をとる全体のオプション（サブコマンドを見つけるために飛ばす）。`if_any` はそのフラグがあるときだけ、`unless_any` はそのフラグがあれば通す。
+- `{"program": "<正規表現>", "value_options": ["--owner"], "block": ["deploy", {"sub": "config", "if_any": ["--set"]}, {"sub": "reset", "unless_any": ["--dry-run"]}]}`: プログラム名（ファイル名。`python3 x/svcctl.py` の形は `svcctl.py`）に当たり、最初のサブコマンドが `block` にあれば止める。`value_options` は値をとる全体のオプション（サブコマンドを見つけるために飛ばす）。`if_any` はそのフラグがあるときだけ、`unless_any` はそのフラグがあれば通す。`allow_owner` を足すと、起動した担当だけを通す（[下](#起動した担当だけ通すallow_owner)）。
 
 ## 判定
 
@@ -46,6 +46,7 @@
 注釈は語の頭の `#` だけ（`a#b` は注釈でない）。`2>/dev/null` の `2` は引数に数えない。バッククォートと `$(...)` の中も読む。`then` `do` `else` `{` `!` などの予約語は外して後ろのコマンドを見る（`for x in ...` の頭は見ない）。
 
 - **cd を追う**: `cd X`（`pushd`）の後のコマンドは X で動くとみる（`cd <保護したパス> && git pull` を捕まえるため）。サブシェル `( ... )` の中の cd は外に持ち出さない。`~`、`$HOME`、同じコマンドの中で代入した変数（`D=...; cd "$D"`）は展開する。
+- **コマンドの位置の変数**: 同じ Bash のコマンドの中で前に代入した変数（`T=…;`・`T="…";`・`export T=…`・`&&` や改行でつないだもの）が、コマンドの位置に語まるごとの `$T` / `${T}` で来たら、値を語に分けて（シェルの引用の規則で）読む。`T="python3 /x/svcctl.py --owner a"; $T deploy` は `svcctl.py deploy` として見る。前に付けたもの（`timeout 5 $T`・`X=1 $T`）や `python3 $T` の後ろでも同じ。引数の位置の `$T` は今までどおり値 1 語のまま置き換える。展開しないもの: コマンド置換で作った値（`T=$(…)`）、関数、このコマンドの中で代入していない変数（hook の環境の変数は値 1 語として置き換えるだけで分けない）、サブシェル `( … )` の中の代入、前の Bash の呼び出しで代入したもの。引用の有無は（語に分けた後では）読めない。`"$T"` は bash では分けずに 1 語で動く（`S="/opt/my tools/svcctl"; "$S" deploy` は動く）ので、コマンドの位置の変数は分けた形と分けない形の両方で読み、どちらかが止める形なら止める。分けない形のプログラム名は `svcctl.py --owner a` のようになるので、`program` を `^svcctl(\\.py)?$` のように `$` まで書けば当たらない。`$` で終わらない正規表現だと分けない形にも当たり、そこでは名乗りが読めないので、`$T` に `--owner X` を入れた形は `allow_owner` の例外にならない。
 - **パスへの書き込み**（`paths` の下に当たるもの）:
   - git の `merge` `pull` `checkout` `switch` `restore` `reset` `commit` `rebase` `cherry-pick` `revert` `am` `apply` `clean` `mv` `rm` `stash`（`list` / `show` は除く）`bisect` `submodule`（`status` などは除く）`sparse-checkout` `checkout-index` `read-tree -u`。場所は cwd、`-C` / `--work-tree` / `--git-dir`、前に付けた `GIT_WORK_TREE=` / `GIT_DIR=`。`clone` / `init` / `worktree add` / `archive -o` / `format-patch` は行き先で見る。`status` `log` `diff` `show` `add` `branch` `tag` などは通す。
   - `mkdir` `rm` `rmdir` `mv` `touch` `unlink` `truncate` `shred` `chmod` `chown` `chgrp` `tee` `patch`: 引数のどれか。
@@ -74,6 +75,32 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 1. 環境変数 `CLAUDE_GUARD_ALLOW=<名前>`（カンマ区切り可）か `all`（`1` も all）。hook のプロセスの環境にあれば全部、Bash のコマンドの前に付ければそのコマンドだけ（`CLAUDE_GUARD_ALLOW=app-running svcctl deploy a`）、`export CLAUDE_GUARD_ALLOW=...` ならその後のコマンド。
 2. 許可のファイル: `claude-guard allow <名前|all> --minutes 30 --reason "e2e"`。`$XDG_RUNTIME_DIR/claude-guard/<名前>.allow` に期限と理由を書く。期限が過ぎれば無効。`claude-guard revoke <名前|all>` で消す。
 3. ロックの持ち主（下）。
+4. 起動した担当（`commands` の `{"program"}` の項目の `allow_owner`。下）。その項目の形だけを通す。旗・ロックの間は使わない。
+
+### 起動した担当だけ通す（allow_owner）
+
+道具（例: ゲームを外から動かす `svcctl`）が「誰が起動したか」をファイルに記録するなら、起動した担当だけは、ガードが働いている間もその項目の形（`quit` など）を使える。ほかの担当は今までどおり止まる。
+
+```json
+{"program": "^svcctl(\\.py)?$", "value_options": ["--owner"], "block": ["quit", "restart"],
+ "allow_owner": {"file": "$XDG_RUNTIME_DIR/svcctl/launched.json", "option": "--owner", "env": "SVCCTL_OWNER"}}
+```
+
+| 項目 | 中身 |
+|---|---|
+| `file` | 起動の記録。絶対パス・`~/…`・`$XDG_RUNTIME_DIR/<フォルダ>/…`（`${XDG_RUNTIME_DIR}` も可）。`XDG_RUNTIME_DIR` が無い（か空）なら `/tmp/<フォルダ>-<uid>/…`（記録を書く道具も同じ決まりにする） |
+| `option` | コマンドが担当の名前を渡すオプション。サブコマンドより前の `--owner X` か `--owner=X`（最後のもの）。`value_options` に自動で足す |
+| `env` | 担当の名前の環境変数。`option` が無いときに見る: 前に付けた `SVCCTL_OWNER=X`（`env SVCCTL_OWNER=X` も）、同じコマンドの中で `export` したもの、hook の環境にあるもの。`export` しない代入（`SVCCTL_OWNER=X; svcctl …`）は子に渡らないので見ない。`env -u` / `unset` で消したものも見ない |
+| `same_role` | 既定 `true`: セッションの役割（kitty のペインの user var `role`）も X と同じことを求める。`false` で見ない |
+
+`option` と `env` の少なくとも 1 つが要る。記録のファイルの形は `{"v": 1, "owner": "<担当>", "pid": <整数>, "started_at": <epoch>, "cmd": "launch"}`（`started_at` と `cmd` は見ない）。通すのは次が全部そろうときだけ:
+
+1. コマンドが名乗る担当 X（`option` が先、無ければ `env`）が、記録の `owner` と同じ。
+2. 記録が自分の普通のファイル（リンクでない）で、形が正しい（`v` が 1、`owner` が空でない文字列、`pid` が正の整数）。
+3. その `pid` が動いていて、引数（`pgrep -f` と同じく空白でつないだもの）が、そのガードの `process` のどれかに当たる（pid の使い回しや、残った古い記録を効かせないため。macOS は `lib/proc.py` で読む）。
+4. `same_role` なら、セッションの役割が X。役割は claude-state の記録（`$XDG_RUNTIME_DIR/claude-state/<session_id>.json` の `role`）から読む（hook を遅くしないよう kitty には聞かない）。**役割が分からないセッション（記録が無い・ペインに role が無い・kitty の外）は通さない**: 例外は止めを緩める側なので、確かでないときは今までの止める側に倒す。kitty の外で使うなら `"same_role": false`。
+
+記録が無い・読めない・壊れている・どれかが合わないときは例外にならず、今までどおり止める。設定の誤り（`file` の形が違う、`option` / `env` が無いなど）は、その例外を使わずに「問題:」に出す。`allow_owner` は `process` のあるガードの `commands` の `{"program"}` の項目にだけ書ける。例外はその項目の `block` 全部に効く。起動した担当にも一部（`load` など）は止めたいなら、項目を 2 つに分け、`allow_owner` は通してよいサブコマンド（`quit` など）の項目にだけ書く。例外が外すのは項目の形の理由だけ（同じコマンドの保護したパスへの書き込みは止める）。**旗（`claude-guard on <名前>`）・ロック（`acquire`）が立っている間は例外を使わない**（旗は「全員を止める」ため。process も同時に動いていても止める）。例外が効くのは、旗もロックも無く、`process`（か `command`）で働いているときだけ。`claude-guard status` は旗の間「旗（ロック）の間は使わない」と出す。
 
 理由の文には通す道を書かない（止められたサブエージェントが自分で外さないように）。外すのは依頼主か統括の判断。
 
@@ -95,6 +122,7 @@ $ claude-guard status
 app-running: 働いている（プロセス ^\./fullscreen-app）、条件 process/旗、止めるもの paths 1・commands 1、許可あり（残り 25 分、e2e）
 deploy: 働いている（旗（残り 12 分、持ち主 5d0c…）、v1.4 を出す）、条件 旗、止めるもの paths 1・commands 2・例外 1
 device-test: 働いていない、条件 command/旗、止めるもの paths 1・commands 0
+game: 働いている（プロセス ^\./game）、条件 process/旗、止めるもの paths 1・commands 1、起動した担当の例外（/run/user/1000/svcctl/launched.json）: owner probe、pid 4242 が動いている → probe は通す（役割も同じとき）
 問題: guard_hook.guards.broken.process の正規表現が読めない: …
 ```
 
@@ -143,7 +171,8 @@ claude-guard release deploy-prod
 
 - 止めるのは Claude Code のツール呼び出し（Bash / Edit / Write / NotebookEdit）だけ。人の手、CI、cron、ほかの道具は止めない。ロックは、ほかの道具も `claude-guard acquire` を呼ぶときだけ排他になる。
 - サブエージェントの中のツール呼び出しにも効く（設定ファイルの hook はサブエージェントの中でも同じように動き、入力に `agent_id` / `agent_type` が付く。公式の hooks の説明）。
-- Bash はシェルの静的な読みなので、見えない書き込み（スクリプトの中、alias、`eval`）がある。
+- Bash はシェルの静的な読みなので、見えない書き込み（スクリプトの中、alias、`eval`）がある。コマンドの名前を変数に入れた形は、同じコマンドの中で代入したものだけ読む（上の「コマンドの位置の変数」）。
+- `allow_owner` の担当の名前は自己申告（`--owner`）と役割の照合で、なりすましは防がない（うっかり別の担当のものを止めることを防ぐ）。
 - 速さ: 止める候補が無ければ Python の起動だけ（手元で約 0.03 秒）。候補があれば pgrep を 1 回（手元で 0.06 秒前後。pgrep 自体が 0.03 秒）。
 - hook の `timeout` は、候補に当たるガードの `command_timeout` の合計と pgrep（打ち切り 5 秒）より長くする。超えると Claude Code が hook を打ち切り、そのときは止めずに通る。
 

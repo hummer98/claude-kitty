@@ -15,7 +15,9 @@ PreToolUse hook（Bash / Edit / Write / NotebookEdit）から呼ぶ。判定は 
        "paths": ["~/lab/config"],                      書き込みを止めるパス
        "commands": ["git push", {"regex": "^deploy\\\\b"},
                     {"program": "^svcctl(\\\\.py)?$", "value_options": ["--owner"],
-                     "block": ["deploy", {"sub": "config", "if_any": ["--set"]}]}],
+                     "block": ["deploy", {"sub": "config", "if_any": ["--set"]}],
+                     "allow_owner": {"file": "$XDG_RUNTIME_DIR/svcctl/launched.json",
+                                     "option": "--owner", "env": "SVCCTL_OWNER"}}],   起動した担当だけ通す
        "allow_commands": ["git push --dry-run"],       例外として通す形
        "message": "{name} が働いています（{reason}）。後で行ってください。"}}}}
 
@@ -25,6 +27,8 @@ PreToolUse hook（Bash / Edit / Write / NotebookEdit）から呼ぶ。判定は 
 通す道（e2e など）:
   - 環境変数 CLAUDE_GUARD_ALLOW=<名前>（カンマ区切り可）か all。hook のプロセスの環境か、Bash のコマンドの前に付けた形
   - 許可のファイル $XDG_RUNTIME_DIR/claude-guard/<名前>.allow（claude-guard allow。期限まで有効）
+  - {"program"} の項目の allow_owner: 起動の記録のファイルの owner と、コマンドの --owner X（か前に付けた環境変数）が
+    同じで、記録の pid がそのガードの process に当たるプロセスとして動いていて、セッションの役割も X なら、その項目では止めない
 """
 import json
 import os
@@ -80,6 +84,13 @@ SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 PYTHON = re.compile(r"^(python|pypy)[0-9.]*$")
 ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 VAR = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+# 語がまるごと $T / ${T} のもの。同じコマンドの中で代入した T なら、コマンドの位置に来たとき値を語に分ける
+VARREF = re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$")
+# その語の目印（値の頭に付ける）。コマンドの位置なら _unwrap が語に分け、引数の位置なら外して値 1 語のままにする
+SPLIT = "\x04"
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+RUNTIME_PREFIXES = ("$XDG_RUNTIME_DIR/", "${XDG_RUNTIME_DIR}/")
+LAUNCH_MAX_BYTES = 64 * 1024
 OPCHARS = ";&|()<>\n"
 
 
@@ -134,10 +145,51 @@ def _strings(value):
     return None
 
 
-def _compile_entry(e, where, problems):
-    """commands / allow_commands の 1 つを ("prefix", [語]) / ("regex", re) / ("program", dict) にする。"""
+def _allow_owner(v, where, problems):
+    """{"program"} の項目の allow_owner を読む。誤りがあれば None（例外にしない = 今までどおり止める）。"""
+    if not isinstance(v, dict):
+        problems.append(f"{where} はオブジェクト。この例外は使わない")
+        return None
+    f = v.get("file")
+    if not isinstance(f, str) or not f.strip():
+        problems.append(f"{where}.file（起動の記録のファイル）が無い。この例外は使わない")
+        return None
+    rest = next((f[len(p):] for p in RUNTIME_PREFIXES if f.startswith(p)), None)
+    if rest is not None:
+        if "/" not in rest.strip("/") or "$" in rest:
+            problems.append(f"{where}.file は $XDG_RUNTIME_DIR/<フォルダ>/<名前> の形（無いときは /tmp/<フォルダ>-<uid>/<名前>）: "
+                            f"{f!r}。この例外は使わない")
+            return None
+    elif "$" in f or not (f.startswith("~") or os.path.isabs(f)):
+        problems.append(f"{where}.file は絶対パス・~ で始める・$XDG_RUNTIME_DIR/ で始めるのどれか: {f!r}。この例外は使わない")
+        return None
+    opt, name = v.get("option"), v.get("env")
+    if opt is not None and not (isinstance(opt, str) and re.fullmatch(r"--?[A-Za-z0-9][A-Za-z0-9_-]*", opt)):
+        problems.append(f"{where}.option は - で始めるオプションの名前: {opt!r}。この例外は使わない")
+        return None
+    if name is not None and not (isinstance(name, str) and ENV_NAME.match(name)):
+        problems.append(f"{where}.env は環境変数の名前: {name!r}。この例外は使わない")
+        return None
+    if opt is None and name is None:
+        problems.append(f"{where} に option も env も無い（担当の名前をどこから読むか）。この例外は使わない")
+        return None
+    same = v.get("same_role", True)
+    if not isinstance(same, bool):
+        problems.append(f"{where}.same_role は true / false: {same!r}。この例外は使わない")
+        return None
+    return {"file": f, "option": opt, "env": name, "same_role": same}
+
+
+def _compile_entry(e, where, problems, owner_ok=False):
+    """commands / allow_commands の 1 つを ("prefix", [語]) / ("regex", re) / ("program", dict) にする。
+
+    owner_ok は commands の項目（allow_owner を書いてよい所）。"""
     if isinstance(e, str) and e.strip():
         return ("prefix", e.split())
+    if isinstance(e, dict) and "allow_owner" in e and not (owner_ok and isinstance(e.get("program"), str)
+                                                           and not isinstance(e.get("regex"), str)):
+        problems.append(f"{where}.allow_owner は commands の {{\"program\"}} の項目でだけ使える。この例外は使わない")
+        e = {k: x for k, x in e.items() if k != "allow_owner"}
     if isinstance(e, dict) and isinstance(e.get("regex"), str):
         try:
             return ("regex", re.compile(e["regex"]))
@@ -170,12 +222,15 @@ def _compile_entry(e, where, problems):
                 block[b["sub"]] = (tuple(if_any), tuple(unless_any))
             else:
                 problems.append(f"{where}.block[{i}] は文字列か {{\"sub\": ...}}")
-        return ("program", {"program": prog, "value_options": set(vopts), "block": block})
+        owner = _allow_owner(e["allow_owner"], f"{where}.allow_owner", problems) if "allow_owner" in e else None
+        if owner and owner["option"]:
+            vopts = list(vopts) + [owner["option"]]      # 担当の名前のオプションは値をとる（サブコマンドと取り違えない）
+        return ("program", {"program": prog, "value_options": set(vopts), "block": block, "allow_owner": owner})
     problems.append(f"{where} は文字列・{{\"regex\"}}・{{\"program\", \"block\"}} のどれか")
     return None
 
 
-def _entries(value, where, problems):
+def _entries(value, where, problems, owner_ok=False):
     if value is None:
         return []
     if not isinstance(value, list):
@@ -183,7 +238,7 @@ def _entries(value, where, problems):
         return []
     out = []
     for i, e in enumerate(value):
-        c = _compile_entry(e, f"{where}[{i}]", problems)
+        c = _compile_entry(e, f"{where}[{i}]", problems, owner_ok)
         if c:
             out.append(c)
     return out
@@ -235,7 +290,10 @@ def _guard(name, sec, problems, home):
             problems.append(f"{where}.paths は絶対パスか ~ で始める: {p!r}")
             continue
         g["paths"].append(os.path.normpath(full))
-    g["commands"] = _entries(sec.get("commands"), f"{where}.commands", problems)
+    g["commands"] = _entries(sec.get("commands"), f"{where}.commands", problems, owner_ok=True)
+    if not g["process"] and any(k == "program" and s["allow_owner"] for k, s in g["commands"]):
+        problems.append(f"{where}: allow_owner は process（記録の pid のプロセスを確認する正規表現）のあるガードでだけ効く。"
+                        "この例外は使わない")
     g["allow_commands"] = _entries(sec.get("allow_commands"), f"{where}.allow_commands", problems)
     msg = sec.get("message", "")
     if not isinstance(msg, str):
@@ -649,6 +707,20 @@ def _expand(word, vars_):
     return VAR.sub(lambda m: vars_.get(m.group(1) or m.group(2), m.group(0)), word)
 
 
+def _split_value(value):
+    """コマンドの位置に来た変数の値を語に分ける（シェルの引用の規則。読めなければ空白で）。"""
+    import shlex
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        words = value.split()
+    return [w.replace(SPLIT, "") for w in words]
+
+
+def _unmark(words):
+    return [w[len(SPLIT):] if w.startswith(SPLIT) else w for w in words]
+
+
 def _split_assignments(words):
     """先頭の NAME=VALUE を外す。(assignments, rest)"""
     assigns = {}
@@ -662,11 +734,26 @@ def _split_assignments(words):
     return assigns, words[i:]
 
 
-def _unwrap(words):
+def _var_word(word, split):
+    """コマンドの位置の $T の値。split なら語に分け、そうでなければ 1 語（"$T" の形。空なら語にならないとみる）。"""
+    value = word[len(SPLIT):]
+    if split:
+        return _split_value(value)
+    value = value.replace(SPLIT, "")
+    return [value] if value else []
+
+
+def _unwrap(words, split=True):
     """予約語（then / do / ! など）と env / nohup / timeout などを外し、python3 x.py の形は x.py をプログラムとみる。
-    (words, assigns)。for / case の頭は語の並びでコマンドでないので、空にする。"""
+    (words, assigns)。for / case の頭は語の並びでコマンドでないので、空にする。
+
+    split はコマンドの位置の $T（目印 SPLIT の付いた語）を語に分けるか。引用の有無（$T か "$T" か）は shlex の後で
+    読めないので、呼ぶ側が両方で読む。"""
     assigns = {}
     while words:
+        if words[0].startswith(SPLIT):          # T="python3 x.py"; $T quit の $T
+            words = _var_word(words[0], split) + words[1:]
+            continue
         name = os.path.basename(words[0])
         if words[0] in RESERVED:
             words = words[1:]
@@ -682,10 +769,16 @@ def _unwrap(words):
             vopts = WRAPPERS[name]
             i = 1
             while i < len(words):
-                w = words[i]
+                w = words[i][len(SPLIT):] if words[i].startswith(SPLIT) else words[i]   # timeout $D の $D は値で見る
                 m = ASSIGN.match(w)
                 if name == "env" and m:
                     assigns[m.group(1)] = m.group(2)
+                    i += 1
+                elif name == "env" and w in ("-u", "--unset") and i + 1 < len(words):
+                    assigns[_unmark([words[i + 1]])[0]] = ""     # 消した変数は空とみる（担当の名乗りを消す）
+                    i += 2
+                elif name == "env" and w.startswith("--unset="):
+                    assigns[w.split("=", 1)[1]] = ""
                     i += 1
                 elif w.startswith("-"):
                     i += 2 if (w in vopts and "=" not in w) else 1
@@ -704,6 +797,9 @@ def _unwrap(words):
                     return words, assigns       # -m mod や -c '...' は中身を読まない
                 i += 2 if words[i] in PYTHON_VALUE_OPTS else 1
             if i < len(words):
+                if words[i].startswith(SPLIT):      # python3 $T quit の $T（値に引数が入っていれば分ける）
+                    words = words[:i] + _var_word(words[i], split) + words[i + 1:]
+                    continue
                 return words[i:], assigns
         break
     return words, assigns
@@ -798,6 +894,143 @@ def match_entry(entry, words):
     return f"{prog} {sub}"
 
 
+def option_value(args, option, value_opts=()):
+    """サブコマンドより前の全体のオプションから option の値（--owner X か --owner=X。最後のもの）。無ければ None。
+    match_entry がサブコマンドを探すのと同じ読み方（value_opts は値をとるオプション）。"""
+    val = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == option:
+            val = args[i + 1] if i + 1 < len(args) else None
+            i += 2
+        elif a.startswith(option + "="):
+            val = a.split("=", 1)[1]
+            i += 1
+        elif a in value_opts:
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            break
+    return val
+
+
+# ---- 起動した担当だけ通す例外（allow_owner） -----------------------------------
+
+def launch_file(raw, env):
+    """allow_owner.file を実際のパスにする。$XDG_RUNTIME_DIR/<フォルダ>/… は、XDG_RUNTIME_DIR が無い（か空）なら
+    /tmp/<フォルダ>-<uid>/…（tf3ctl など書く側と同じ決まり）。~ は HOME。"""
+    for pre in RUNTIME_PREFIXES:
+        if raw.startswith(pre):
+            rest = raw[len(pre):].lstrip("/")
+            base = env.get("XDG_RUNTIME_DIR")
+            if base:
+                return os.path.join(base, rest)
+            folder, _, tail = rest.partition("/")
+            return os.path.join("/tmp", f"{folder}-{os.getuid()}", tail)
+    if raw == "~" or raw.startswith("~/"):
+        return (env.get("HOME") or os.path.expanduser("~")) + raw[1:]
+    return raw
+
+
+def read_launch_record(path, patterns):
+    """(記録の dict, None) か、例外にならないとき (読めた分の dict か None, 理由)。
+
+    通すのは: 自分の普通のファイルで、{"v": 1, "owner": 空でない文字列, "pid": 正の整数} の形で、その pid が動いていて、
+    引数（pgrep -f と同じく空白でつないだもの）が patterns のどれかに当たるときだけ（pid の使い回し・古い記録を効かせない）。"""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        return None, "記録のファイルが無い"
+    except OSError as e:
+        return None, f"記録のファイルを読めない（{e.strerror or e}）"
+    try:
+        import stat
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            return None, "記録のファイルが自分の普通のファイルでない"
+        raw = os.read(fd, LAUNCH_MAX_BYTES + 1)
+    except OSError as e:
+        return None, f"記録のファイルを読めない（{e.strerror or e}）"
+    finally:
+        os.close(fd)
+    try:
+        data = json.loads(raw.decode("utf-8")) if len(raw) <= LAUNCH_MAX_BYTES else None
+    except (ValueError, UnicodeDecodeError):
+        data = None
+    if not isinstance(data, dict) or data.get("v") != 1:
+        return None, "記録のファイルの形が違う"
+    owner, pid = data.get("owner"), data.get("pid")
+    if not isinstance(owner, str) or not owner or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None, "記録のファイルの形が違う"
+    import proc
+    argv = proc.argv(pid)
+    if argv is None:
+        if proc.alive(pid):
+            return data, f"pid {pid} の引数を読めない"
+        return data, f"pid {pid} が動いていない"
+    line = " ".join(argv)
+    if not any(re.search(p, line) for p in patterns):
+        return data, f"pid {pid} は別のプロセス（引数が process に当たらない）"
+    return data, None
+
+
+def session_role(env, session):
+    """セッションの役割（kitty のペインの user var role）。claude-state の記録（ファイル 1 つ）から読む。
+    kitty には聞かない（hook を遅くしない）。分からなければ None。"""
+    if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session):
+        return None
+    try:
+        from rundir import runtime_dir
+        data = json.loads((runtime_dir(env, create=False) / "claude-state" / f"{session}.json").read_text())
+    except (OSError, ValueError, ImportError):
+        return None
+    role = data.get("role") if isinstance(data, dict) else None
+    return role if isinstance(role, str) and role else None
+
+
+class Context:
+    """1 回の判定で共有するもの（hook の環境・セッション）と、記録・役割の読みの控え（同じコマンドの中で 1 度だけ読む）。"""
+
+    def __init__(self, env, session=None, owner_ok=True):
+        self.env = env
+        self.session = session
+        self.owner_ok = owner_ok                  # allow_owner を使うか（旗・ロックで働いている間は使わない）
+        self._launch = {}
+        self._role = None
+        self._role_read = False
+
+    def launch(self, guard, owner_spec):
+        path = launch_file(owner_spec["file"], self.env)
+        key = (guard["name"], path)
+        if key not in self._launch:
+            self._launch[key] = (read_launch_record(path, guard["process"]) if guard["process"]
+                                 else (None, "ガードに process が無い"))
+        return self._launch[key]
+
+    def role(self):
+        if not self._role_read:
+            self._role, self._role_read = session_role(self.env, self.session), True
+        return self._role
+
+
+def claimed_owner(owner_spec, words, assigns, vars_, exported, value_opts):
+    """コマンドが名乗る担当。option（--owner X / --owner=X）が先、無ければ env（前に付けた X=…、export したもの・
+    hook の環境にあるもの）。名乗らなければ None。"""
+    if owner_spec["option"]:
+        v = option_value(words[1:], owner_spec["option"], value_opts)
+        if v is not None:
+            return v or None
+    name = owner_spec["env"]
+    if name:
+        if name in assigns:
+            return assigns[name] or None
+        if name in exported:
+            return vars_.get(name) or None
+    return None
+
+
 def _shell_c(args):
     """bash -c / -lc / -ec などの中身の文字列。無ければ None。"""
     for i, a in enumerate(args):
@@ -811,13 +1044,16 @@ def _shell_c(args):
 class Analyzer:
     """1 回分のコマンドを 1 つのガードについて読み、止める理由を集める。cwd は cd を追う（cd X && ... の形のため）。"""
 
-    def __init__(self, guard, cwd, env, depth=0):
+    def __init__(self, guard, cwd, env, depth=0, ctx=None):
         self.guard = guard
+        self.ctx = ctx or Context(env)
         self.roots = Roots(guard["paths"])
         self.cwd = cwd or os.getcwd()
         self.home = env.get("HOME") or os.path.expanduser("~")
         self.vars = {k: v for k, v in env.items() if isinstance(v, str)}
         self.vars.setdefault("HOME", self.home)
+        self.exported = set(self.vars)            # 子のプロセスに渡る変数（hook の環境にあるもの + export したもの）
+        self.local = set()                        # このコマンドの中で代入した変数（コマンドの位置の $T を語に分ける）
         self.allowed = set()                      # export CLAUDE_GUARD_ALLOW=... の後
         self.reasons = []
         self.depth = depth
@@ -833,6 +1069,19 @@ class Analyzer:
         if what not in self._paths:
             self._paths.append(what)
 
+    def child(self):
+        """bash -c の中身・コマンド置換・ヒアドキュメントの本文を読む Analyzer（変数と cwd を引き継ぐ）。"""
+        sub = Analyzer(self.guard, self.cwd, {}, self.depth + 1, self.ctx)
+        sub.vars, sub.home, sub.allowed = dict(self.vars), self.home, set(self.allowed)
+        sub.exported, sub.local = set(self.exported), set(self.local)
+        return sub
+
+    def expand_word(self, w):
+        m = VARREF.match(w)
+        if m and (m.group(1) or m.group(2)) in self.local:
+            return SPLIT + self.vars.get(m.group(1) or m.group(2), "")
+        return _expand(w, self.vars)
+
     def lets_through(self, names):
         return bool(names & {"all", self.guard["name"]})
 
@@ -841,10 +1090,10 @@ class Analyzer:
         self.subs = []
         for item in segments(tokenize(command, self.subs)):
             if item[0] == "push":
-                stack.append((self.cwd, dict(self.vars), set(self.allowed)))
+                stack.append((self.cwd, dict(self.vars), set(self.allowed), set(self.exported), set(self.local)))
             elif item[0] == "pop":
                 if stack:
-                    self.cwd, self.vars, self.allowed = stack.pop()
+                    self.cwd, self.vars, self.allowed, self.exported, self.local = stack.pop()
             else:
                 self.segment(item[1], item[2])
         return self.reasons
@@ -859,8 +1108,7 @@ class Analyzer:
             for m in list(SUB_IN_WORD.finditer(w)) + list(SUB_LINE.finditer(w)):
                 n = int(m.group(1))
                 if n < len(self.subs) and self.depth < 4:
-                    sub = Analyzer(self.guard, self.cwd, {}, self.depth + 1)
-                    sub.vars, sub.home, sub.allowed = dict(self.vars), self.home, set(self.allowed)
+                    sub = self.child()
                     for r in sub.run(self.subs[n][0]):
                         if r not in self.reasons:
                             self.reasons.append(r)
@@ -878,29 +1126,50 @@ class Analyzer:
             words, redirs = self.substitutions(words), self.substitutions(redirs)
             if not words and not redirs:
                 return
-        words = [_expand(w, self.vars) for w in words]
+        words = [self.expand_word(w) for w in words]
         assigns, rest = _split_assignments(words)
         if not rest:
             self.vars.update(assigns)          # X=val だけの行は、後のコマンドの変数になる
+            self.local |= set(assigns)
             self.allowed |= allow_names(assigns.get(ALLOW_ENV))
             return
-        rest, more = _unwrap(rest)
+        raw = rest
+        rest, more = _unwrap(raw)
+        rest = _unmark(rest)                   # 引数の位置の $T は値 1 語のまま（今までどおり）
         assigns.update(more)
+        # コマンドの位置の $T は、"$T"（分けない）でも bash は動く。引用の有無は読めないので、分けない形でも読み、
+        # どちらかが止める形なら止める（S="/opt/my tools/svcctl"; "$S" deploy を見逃さない）
+        alt, alt_more = _unwrap(raw, split=False)
+        alt = _unmark(alt)
         self._paths, self._cmds = [], []
         for r in redirs:
             if self.protected(r):
                 self.add(f"保護したパスへのリダイレクト（> {r}）")
+        cmds = []
+        if alt != rest and alt:
+            saved = (self.cwd, dict(self.vars), set(self.allowed), set(self.exported), set(self.local))
+            self.command(alt, dict(assigns, **alt_more))
+            self.stdin_bodies(alt, bodies)     # "$S" <<'EOF'（S が空白入りの bash）の本文も読む
+            self.cwd, self.vars, self.allowed, self.exported, self.local = saved   # 状態（cd・export）は分けた形のだけ残す
+            cmds = self.allowed_cmds(alt)
+        self._cmds = []
         if rest:
             self.command(rest, assigns)
             self.stdin_bodies(rest, bodies)
+        cmds += [c for c in self.allowed_cmds(rest) if c not in cmds]
         if self.lets_through(self.allowed | allow_names(assigns.get(ALLOW_ENV))):
             return
-        # allow_commands はコマンドの形の理由だけを消す（git push --dry-run > <保護したパス> は止める）
-        if self._cmds and rest and any(match_entry(e, rest) for e in self.guard["allow_commands"]):
-            self._cmds = []
-        for r in self._paths + self._cmds:
+        for r in self._paths + cmds:
             if r not in self.reasons:
                 self.reasons.append(r)
+
+    def allowed_cmds(self, rest):
+        """いまの self._cmds から、allow_commands に当たる形の理由を外したもの。
+
+        allow_commands はコマンドの形の理由だけを消す（git push --dry-run > <保護したパス> は止める）。"""
+        if self._cmds and rest and any(match_entry(e, rest) for e in self.guard["allow_commands"]):
+            return []
+        return list(self._cmds)
 
     def stdin_bodies(self, words, bodies):
         """bash <<'EOF' … や ssh host <<'EOF' … は、本文をコマンドとして動かす。本文を bash -c の中身と同じに読む。"""
@@ -911,8 +1180,7 @@ class Analyzer:
             return
         for n in bodies:
             if n < len(self.subs) and self.subs[n][0].strip():
-                sub = Analyzer(self.guard, self.cwd, {}, self.depth + 1)
-                sub.vars, sub.home, sub.allowed = dict(self.vars), self.home, set(self.allowed)
+                sub = self.child()
                 for r in sub.run(self.subs[n][0]):
                     self.add(r)
 
@@ -932,23 +1200,46 @@ class Analyzer:
                 m = ASSIGN.match(a)
                 if m:
                     self.vars[m.group(1)] = m.group(2)
+                    self.local.add(m.group(1))
+                    self.exported.add(m.group(1))
                     if m.group(1) == ALLOW_ENV:
                         self.allowed |= allow_names(m.group(2))
             return
+        if name == "unset":
+            for a in args:
+                if ENV_NAME.match(a):
+                    self.vars.pop(a, None)
+                    self.exported.discard(a)
+                    self.local.discard(a)
         if name in SHELLS:
             inner = _shell_c(args)
             if inner is not None and self.depth < 3:
-                sub = Analyzer(self.guard, self.cwd, {}, self.depth + 1)
-                sub.vars, sub.home, sub.allowed = dict(self.vars), self.home, set(self.allowed)
+                sub = self.child()
                 for r in sub.run(inner):
                     self.add(r)
                 return
         for e in self.guard["commands"]:
             hit = match_entry(e, words)
-            if hit and hit not in self._cmds:
+            if hit and hit not in self._cmds and not self.owner_passes(e, words, assigns):
                 self._cmds.append(hit)
         if self.roots.forms:
             self.writes(name, args, assigns)
+
+    def owner_passes(self, entry, words, assigns):
+        """allow_owner の例外に当たるか（起動した担当が、自分で起動したものに対して使うとき）。"""
+        kind, spec = entry
+        o = spec.get("allow_owner") if kind == "program" else None
+        if not o or not self.ctx.owner_ok:
+            return False
+        claimed = claimed_owner(o, words, assigns, self.vars, self.exported, spec["value_options"])
+        if not claimed:
+            return False
+        rec, why = self.ctx.launch(self.guard, o)
+        if why or not rec or rec["owner"] != claimed:
+            return False
+        if o["same_role"]:
+            return self.ctx.role() == claimed     # 役割が分からないセッションは通さない（今までどおり止める）
+        return True
 
     def writes(self, name, args, assigns):
         if name == "git":
@@ -1313,8 +1604,8 @@ def active(guard, env, probe=Probe, now=None, assume=False):
 
 # ---- 判定 ------------------------------------------------------------------
 
-def find_reasons(guard, tool, tool_input, cwd, env):
-    """1 つのガードについて、止める候補の理由のリスト（働いているかは見ない）。"""
+def find_reasons(guard, tool, tool_input, cwd, env, session=None, owner_ok=True):
+    """1 つのガードについて、止める候補の理由のリスト（働いているかは見ない）。owner_ok は allow_owner を使うか。"""
     if tool in FILE_TOOLS:
         roots = Roots(guard["paths"])
         p = tool_input.get(FILE_TOOLS[tool]) or tool_input.get("file_path") or tool_input.get("notebook_path")
@@ -1327,7 +1618,7 @@ def find_reasons(guard, tool, tool_input, cwd, env):
         cmd = tool_input.get("command")
         if not isinstance(cmd, str) or not cmd.strip():
             return []
-        return Analyzer(guard, cwd, env).run(cmd)
+        return Analyzer(guard, cwd, env, ctx=Context(env, session, owner_ok)).run(cmd)
     return []
 
 
@@ -1364,11 +1655,11 @@ def evaluate(data, env, probe=Probe, now=None, path=None, assume=False):
     for g in guards:
         if not g["enabled"] or allowed & {"all", g["name"]}:
             continue
-        if session:
-            flag = read_state(env, g["name"], "on", now)
-            if flag and flag.get("owner") == session:
-                continue                  # ロックの持ち主（デプロイしている本人）は、このガードでは止めない
-        reasons = find_reasons(g, tool, tool_input, cwd, env)
+        flag = read_state(env, g["name"], "on", now)
+        if session and flag and flag.get("owner") == session:
+            continue                      # ロックの持ち主（デプロイしている本人）は、このガードでは止めない
+        # 旗・ロックは「全員を止める」。allow_owner（起動した担当の例外）は process だけで働いているときに使う
+        reasons = find_reasons(g, tool, tool_input, cwd, env, session, owner_ok=not flag)
         if not reasons:
             continue                      # 止める候補が無ければ、働く条件も調べない（pgrep を呼ばない）
         if read_state(env, g["name"], "allow", now) or read_state(env, "all", "allow", now):
@@ -1400,6 +1691,33 @@ def decide(stdin_text, env, probe=Probe, now=None, path=None):
 
 # ---- status ----------------------------------------------------------------
 
+def owner_status(guard, env, now=None):
+    """allow_owner の例外ごとに（記録のファイルごとに 1 つ）、記録の owner と pid が動いているか。"""
+    out, seen = [], set()
+    flagged = bool(read_state(env, guard["name"], "on", now))
+    ctx = Context(env)
+    for kind, spec in guard["commands"]:
+        o = spec.get("allow_owner") if kind == "program" else None
+        if not o:
+            continue
+        path = launch_file(o["file"], env)
+        if path in seen:
+            continue
+        seen.add(path)
+        rec, why = ctx.launch(guard, o)
+        head = f"起動した担当の例外（{path}）: "
+        if flagged:
+            out.append(head + "旗（ロック）の間は使わない（全員を止める）")
+        elif rec and not why:
+            out.append(head + f"owner {rec['owner']}、pid {rec['pid']} が動いている → {rec['owner']} は通す"
+                       + ("（役割も同じとき）" if o["same_role"] else ""))
+        elif rec:
+            out.append(head + f"owner {rec['owner']}、{why} → 例外にならない")
+        else:
+            out.append(head + f"{why} → 例外にならない")
+    return out
+
+
 def status_lines(env, probe=Probe, now=None, path=None):
     """統括が読む用に、ガードごとに 1 行。設定の問題は最後に「問題:」で出す（保護が外れたことに気づけるよう）。"""
     now = time.time() if now is None else now
@@ -1424,6 +1742,7 @@ def status_lines(env, probe=Probe, now=None, path=None):
             parts.append(f"許可あり（残り {_minutes_left(allow['until'], now)} 分、{allow.get('reason', '')}）")
         if env_allowed & {"all", g["name"]}:
             parts.append(f"{ALLOW_ENV} で通す")
+        parts.extend(owner_status(g, env, now))
         lines.append("、".join(parts))
     for p in problems:
         lines.append(f"問題: {p}")
