@@ -492,6 +492,20 @@ class Hooks(RelayBase):
                            capture_output=True, text=True, env=self.w.env("b"), timeout=30)
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
+    def test_empty_inbox_is_not_an_error(self):
+        # 受信箱が空のとき take() が None だけを返し、受け取りの役割のセッションの hook が毎回
+        # 「TypeError: cannot unpack non-iterable NoneType object」を errors.log に残していた（hook は exit 0 なので
+        # 上の test_stop_blocks_once… の 3 回目も素通りしていた）。inbox --deliver はトレースバックで落ちていた
+        env = self.w.env("b")
+        self.assertIsNone(R.hook_output("Stop", {"session_id": "sid-b"}, env))
+        self.assertIsNone(R.hook_output("UserPromptSubmit", {"session_id": "sid-b"}, env))
+        for ev in ("UserPromptSubmit", "Stop"):
+            self.assertIsNone(self.w.hook("b", ev, {"session_id": "sid-b"}))
+        self.assertFalse((R.state_root(env) / "errors.log").exists())
+        r = self.w.cli("b", "inbox", "--deliver", "--role", "main")
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
     def test_many_messages_fit_budget(self):
         self.w.set_relay("b", max_bytes=8000)
         for i in range(4):
