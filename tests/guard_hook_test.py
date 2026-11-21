@@ -572,7 +572,9 @@ class VarCommand(Base):
                   'S="/opt/my tools/svcctl.py"; python3 "$S" deploy s1',
                   'S=/opt/svcctl; $S deploy s1',
                   'S=/opt/svcctl; "$S" deploy s1',
-                  'D=5; timeout $D svcctl deploy s1'):
+                  'D=5; timeout $D svcctl deploy s1',
+                  'S="/opt/my tools/bash"; "$S" -c "svcctl deploy s1"',
+                  'S="/opt/my tools/bash"; "$S" <<\'EOF\'\nsvcctl deploy s1\nEOF'):   # 本文を動かす（レビューの指摘）
             self.assertIsNotNone(self.bash(c), c)
         tf3["app-running"]["commands"].append({"program": "^tf3ctl(\\.py)?$", "value_options": ["--owner"],
                                                "block": ["quit"]})

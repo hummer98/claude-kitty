@@ -1149,6 +1149,7 @@ class Analyzer:
         if alt != rest and alt:
             saved = (self.cwd, dict(self.vars), set(self.allowed), set(self.exported), set(self.local))
             self.command(alt, dict(assigns, **alt_more))
+            self.stdin_bodies(alt, bodies)     # "$S" <<'EOF'（S が空白入りの bash）の本文も読む
             self.cwd, self.vars, self.allowed, self.exported, self.local = saved   # 状態（cd・export）は分けた形のだけ残す
             cmds = self.allowed_cmds(alt)
         self._cmds = []
