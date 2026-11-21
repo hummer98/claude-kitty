@@ -3,6 +3,20 @@
 [![version](https://img.shields.io/github/v/tag/hummer98/claude-kitty?label=version&sort=semver)](CHANGELOG.md)
 [![test](https://github.com/hummer98/claude-kitty/actions/workflows/test.yml/badge.svg)](https://github.com/hummer98/claude-kitty/actions/workflows/test.yml)
 
+## なぜ作ったか
+
+Claude Code のセッションを何人も並べ、役割を分けて働かせています。人と話すのは「統括」のセッションで、作業はほかのセッション（サーヴァント）に振る形です。人数が増えると、困るのはコードよりも、人とセッションの間のやりとりでした。
+
+- **誰が何を待っているのか分からない。** 端末のタブや窓が並ぶだけでは、質問して止まっているのか、終わって報告を待っているのか、まだ作業中なのかが見えません。返事を待たせたまま、何十分も気づかないことがありました。そこで、状態をペインの背景色で見せるようにしました（`claude-state`）。
+- **画面を並べ直すのが人の仕事になる。** 話す相手が変わるたびに、マウスでペインを動かすのは手間です。統括のセッションが役割名で並べ替えるので、「この 2 人を右に出して」と頼むだけで済みます（`claude-view`）。
+- **別の端末のセッションと話せない。** 別のプロジェクトへの導入の手伝いのように、端末をまたいで、別の claude.ai アカウントのセッションとも連絡したい場面が出てきました。Claude Code 自身のセッション間の連絡は、同じアカウントの中に限られます。そこで、互いに承認した端末の間でだけ、ssh でメッセージを渡すようにしました（`claude-relay`）。止まって入力を待っているセッションも起こして渡すので、人を介さずにやりとりできます。
+
+どれも、人がペインを見張ったり、手で動かしたり、伝言したりしていたことです。それを道具に任せ、人は判断が要るところだけを見ればよいようにする。それがこの道具の集まりの目的です。
+
+おまけとして、セッションが自分のペインの上に Chrome を重ねて Web アプリを確かめる道具（`claude-browser`・`claude-show`）も入っています。
+
+## 概要
+
 版の番号は [VERSION](VERSION)（各コマンドの `--version` も同じ）。変更の履歴は [CHANGELOG.md](CHANGELOG.md)（上げるときに手で行うことも版ごとに書いている）、issue と PR の出し方は [CONTRIBUTING.md](CONTRIBUTING.md)。
 運用の約束（体制・注意の守り方・安全・レビュー・略号）は [PRACTICES.md](PRACTICES.md)。
 複数の [Claude Code](https://docs.claude.com/en/docs/claude-code) セッションを、[kitty](https://sw.kovidgoyal.net/kitty/) の 1 つの窓にペインとして並べて動かすための小さな道具の集まり。
