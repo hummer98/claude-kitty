@@ -70,5 +70,15 @@
     "ignore": ["scratch"],
     "generations": 5,
     "keep_absent_hours": 24
+  },
+  "relay": {
+    "enabled": true,
+    "name": "linux-desk",
+    "receivers": ["left"],
+    "max_bytes": 16384,
+    "rate": {"count": 30, "per_seconds": 600},
+    "peers": {
+      "mac-a": {"host": "mac-a.local", "user": "taro", "port": 22}
+    }
   }
 }

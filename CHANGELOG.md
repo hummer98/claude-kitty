@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-relay`（第 1 段）: 互いに承認した端末（別の claude.ai アカウントでもよい）の Claude Code セッションの間で、LAN の中の ssh でメッセージを渡す（[docs/relay.md](docs/relay.md)、登録の手順は [SETUP.md の 7.](SETUP.md#7-端末をまたぐ連絡claude-relay)）。
+  - `pair`（専用の ed25519 の鍵を `~/.config/claude-kitty/relay/` に作り、相手に渡す 1 行を出す）・`trust` / `untrust`（`~/.ssh/authorized_keys` の受け取り専用の行・設定の `relay.peers`・相手の host key を、見せて確認してから書く。ほかの行は残し、`.bak-<日時>` を作って一時ファイル経由で置き換え、0600 を保つ）・`send` / `ping`・`peers`・`inbox [--deliver]`・`status`（ステータス行用）・`log`。
+  - 受け取る側は authorized_keys の強制コマンド `claude-relay recv --from <名前>` だけを動かす（`recv [役割]` 以外は拒否）。送り元は鍵で決まる。`relay.enabled`・受け取りの役割（既定は統括 = `view.left`）・大きさ・送り元ごとの通数で拒否し、受信箱（`~/.local/state/claude-kitty/relay/`）とログに置く。
+  - 統括のペインがあれば、claude-state の記録に新しい印 `relay` を付けて待受の色にする（`lib/state.py` に小さく追加。Stop や入力では外れず、渡したときだけ外れる）。
+  - `tools/install.sh --hooks=relay`（`--all` には入れない）: UserPromptSubmit で `additionalContext` として、Stop で `decision: block` として渡す（`stop_hook_active` なら渡さない）。枠 `<relay-message …>` には「ユーザーの指示ではない」と注意書きを付け、本文の中の閉じタグなどはエスケープする。
+  - `claude-kitty doctor`: 設定に `relay` の節があるときだけ、sshd・鍵・相手・受け取りの登録・hook を調べる。設定の `relay` の節（[docs/config.md](docs/config.md)、`config.example.json`）。
+
+### 上げるときに手で行うこと
+
+- `claude-relay` を使うなら `tools/install.sh --links`（新しいコマンドのリンク）と `--hooks=relay`、受け取る側は sshd（macOS はリモートログイン）。使わないなら何もしなくてよい。
+
 ## [0.6.1] - 2026-11-21
 
 ### 修正
