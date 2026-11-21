@@ -12,6 +12,8 @@
   文字が、別の窓に入ってしまわないように）。
 - 保護する窓（view.guard、全画面のアプリや発表中の画面など）が前面なら何もしないで、その旨を返す（exit 2）。
 - kitty の外では xdg-open（macOS は open）に渡す。
+- 設定の browser.enabled が false なら、kitty の中でも HTML・画像・URL を xdg-open（macOS は open）に渡す
+  （結果の shown がそのコマンド、via が "browser.enabled: false"）。
 - Flatpak / Snap の Chrome から見えない場所の HTML は、claude-browser がアプリから見える場所に写して開く
   （結果の target は元のファイルのまま、staged が表示用のコピー。呼び直すと写し直す）。画像は kitty の overlay なので写さない。
 使う kitten @ は ls・launch だけ（close 系と send-text は使わない）。
@@ -26,7 +28,7 @@ from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
-from config import kitten_path, load_view_config  # noqa: E402
+from config import kitten_path, load_browser_config, load_view_config  # noqa: E402
 from guard import guarded_in_front  # noqa: E402
 from kstate import Kitten  # noqa: E402
 from state import find_window  # noqa: E402
@@ -40,6 +42,28 @@ PLATFORM = sys.platform
 def opener(platform=None):
     """kitty の外で開くコマンド（macOS は open、ほかは xdg-open）。"""
     return "open" if (PLATFORM if platform is None else platform) == "darwin" else "xdg-open"
+
+
+def browser_off(env):
+    """設定の browser.enabled が false か。設定が壊れていれば False（今まで通り: HTML は claude-browser が
+    設定の誤りを出して止まり、画像は kitty の overlay で開く）。"""
+    try:
+        return not load_browser_config(env)["enabled"]
+    except ValueError:
+        return False
+
+
+def os_open(kind, val, run, extra=None):
+    """OS の既定のアプリ（xdg-open / open）で開く。kitty の外と、browser.enabled が false のとき。"""
+    cmd = opener()
+    try:
+        r = run([cmd, val if kind == "url" else str(val)], capture_output=True, text=True)
+    except OSError as e:
+        return 1, {"error": f"{cmd} を動かせない: {e}", "target": str(val), **(extra or {})}
+    out = {"shown": cmd, "target": str(val), **(extra or {})}
+    if r.returncode:
+        out["error"] = ((r.stderr or "") + (r.stdout or "")).strip() or f"{cmd} が {r.returncode} で終わった"
+    return (0 if r.returncode == 0 else 1), out
 
 
 def classify(target):
@@ -102,12 +126,9 @@ def show(target, env, ratio, run=subprocess.run, active_pid=None):
         return 2, {"skipped": why, "target": str(val)}
     wid, sock = env.get("KITTY_WINDOW_ID"), env.get("KITTY_LISTEN_ON")
     if not wid or not sock:
-        cmd = opener()
-        try:
-            r = run([cmd, val if kind == "url" else str(val)], capture_output=True, text=True)
-        except OSError as e:
-            return 1, {"error": f"{cmd} を動かせない: {e}", "target": str(val)}
-        return (0 if r.returncode == 0 else 1), {"shown": cmd, "target": str(val)}
+        return os_open(kind, val, run)
+    if browser_off(env):  # ブラウザの使い方を自分で決めている人: 画像も含めて OS の既定のアプリに任せる
+        return os_open(kind, val, run, {"via": "browser.enabled: false"})
     if kind in ("url", "html"):
         url = val if kind == "url" else val.as_uri()
         cmd = [str(BROWSER), "open", url, "--area", "others", "--mode", "show", "--focus", "none"]

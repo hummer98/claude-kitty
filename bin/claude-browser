@@ -21,6 +21,7 @@ kitty は縮めない（縮めると全ペインの claude-code が再描画で�
 Flatpak / Snap の Chrome から見えない場所の file:// は、アプリから見える場所に写して開く（lib/sandboxfs.py）。
 窓の配置は KDE Plasma の KWin。macOS は試験的に、kitty の窓の矩形を CoreGraphics（lib/macwin.py）で読み、
 Chrome の窓を CDP の Browser.setWindowBounds で置く（「常に最前面」は無い。置けなければ普通の窓のまま開く）。
+設定の browser.enabled が false なら、close のほかは何もしないで stderr に 1 行出し、終了コード 3 で終わる。
 """
 import argparse
 import json
@@ -37,7 +38,7 @@ HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
 import proc  # noqa: E402
 from browser import SEARCHED, find_browser  # noqa: E402
-from config import kitten_path, load_browser_config, load_view_config  # noqa: E402
+from config import config_path, kitten_path, load_browser_config, load_view_config  # noqa: E402
 from core import (choose_key, kitty_pid_from_socket, ledger_touch,  # noqa: E402
                   parse_journal, profile_processes, resolve_pane, resolve_place_opts)
 from geometry import (fit_correction, others_area_fraction, right_area_fraction,  # noqa: E402
@@ -63,6 +64,7 @@ STATE_DIR = runtime_dir() / "claude-browser"
 PLATFORM = sys.platform  # テストで偽の OS にするため
 CDP = HERE / "lib" / "cdp.mjs"
 PLACE_KEYS = ("mode", "ratio", "over", "focus", "area")  # 既定と引き継ぎは core.resolve_place_opts
+OFF_EXIT = 3  # browser.enabled が false で何もしなかった（1 は失敗、claude-show の 2 は保護する窓）
 SETTLE = 0.4  # 配置してから、窓の大きさが落ち着くまで待つ秒数（Chrome が自分で大きさを戻すことがある）
 
 
@@ -105,6 +107,16 @@ def setup_browser(env=None, strict=True):
     PROFILE_ROOT = BROWSER["profile_root"]
     LEDGER = PROFILE_ROOT / "ledger.json"
     return BROWSER
+
+
+def browser_enabled(env=None):
+    """設定の browser.enabled。設定が壊れていれば True（壊れた設定の扱いは setup_browser に任せる:
+    open / move は止め、ほかは知らせて既定で続ける）。"""
+    env = os.environ if env is None else env
+    try:
+        return load_browser_config(env)["enabled"]
+    except ValueError:
+        return True
 
 
 # ---------- state / process ----------
@@ -619,6 +631,12 @@ def main(argv=None):
     p = sub.add_parser("note"); p.add_argument("text")
     p = sub.add_parser("shot"); p.add_argument("file")
     args = ap.parse_args(argv)
+    # オフでも close だけは通す: 前に開いた Chrome（claude-browser のプロファイルのものだけ）を、オンに戻さずに
+    # 片づけられるように。新しく起動することはない
+    if args.cmd != "close" and not browser_enabled():
+        print(f"claude-browser: browser.enabled が false なのでオフ（Chrome を起動・操作しない。設定: "
+              f"{config_path(os.environ)}）", file=sys.stderr)
+        sys.exit(OFF_EXIT)
     setup_browser(strict=args.cmd in ("open", "move"))
 
     if args.cmd == "list":

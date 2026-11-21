@@ -34,6 +34,7 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 
 | 項目 | 既定 | 意味 |
 |---|---|---|
+| `enabled` | `true` | `false` でブラウザの機能を止める（ブラウザの使い方を自分で決めているとき）。`claude-browser` は `close` のほか（`open`・`move`・`shot`・`url`・`status`・`list`・`profiles`・`note`）を何もしないで、stderr に「browser.enabled が false なのでオフ」と 1 行出し、**終了コード 3** で終わる（`--help`・`--version` は今まで通り）。`close` だけは、前に開いた claude-browser の Chrome を片づけられるよう動く（新しく起動はしない）。`claude-show` は HTML・画像・URL を OS の既定のアプリ（`xdg-open`、macOS は `open`）で開き、結果の JSON の `shown` がそのコマンド、`via` が `"browser.enabled: false"` になる。`claude-kitty doctor` は Chrome を探さず「browser: オフ（browser.enabled: false）」と出す（node も調べない）。`true` / `false` 以外は設定の誤り（`claude-kitty doctor` の「設定: browser」が NG。claude-browser の `open`・`move` は止まり、ほかは今まで通り知らせて既定で続ける） |
 | `command` | `null`（自動で探す） | Chrome（Chromium）の起動のコマンド。文字列のリストで、引数も足せる（`["google-chrome", "--ozone-platform=wayland"]`、`["flatpak", "run", "com.google.Chrome"]` など）。プロファイル・CDP のポート・`--class` などの引数は claude-browser が後ろに足す |
 | `profile_root` | `null`（下の置き場） | プロファイルと台帳（`ledger.json`）を置くフォルダ。`~` を使える |
 

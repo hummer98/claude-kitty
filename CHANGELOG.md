@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### 追加
+
+- 設定 `browser.enabled`（既定 `true`）: `false` でブラウザの機能（おまけの `claude-browser`・`claude-show` の Chrome）を止める。ブラウザの使い方を自分で決めている人の邪魔をしないため（[docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)）。
+  - `claude-browser` は `close` のほかを何もしないで、stderr に 1 行出して終了コード 3 で終わる（`close` は前に開いた Chrome を片づけるためだけに動く）。
+  - `claude-show` は HTML・画像・URL を OS の既定のアプリ（`xdg-open`、macOS は `open`）で開く（結果の `via` が `"browser.enabled: false"`）。
+  - `claude-kitty doctor` は Chrome を探さず「browser: オフ（browser.enabled: false）」と出し、node も調べない。
+
 ## [0.7.1] - 2026-11-22
 
 ### 追加
