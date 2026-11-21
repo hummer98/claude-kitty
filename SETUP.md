@@ -232,7 +232,7 @@ claude-relay trust mac-a mac-a.local hanako 'ssh-ed25519 AAAA…'   # 先方か�
 ### 4. hook を入れ、確かめる
 
 ```sh
-~/claude-kitty/tools/install.sh --hooks=relay    # 受け取る側。UserPromptSubmit と Stop に claude-relay hook を足す
+~/claude-kitty/tools/install.sh --hooks=relay    # 受け取る側。UserPromptSubmit・Stop・SessionStart に claude-relay hook を足す
 claude-kitty doctor                             # relay: sshd・鍵・送る相手・受け取りの登録・hook
 claude-relay ping mac-a                         # 「届く: mac-a/main は受け取れる」
 claude-relay send mac-a "テストです"              # 先方の統括のペインが待受の色になり、統括が次のターンで読む
@@ -240,6 +240,7 @@ claude-relay log                                # 送受信の記録
 ```
 
 - 受け取るのは統括（`view.left`、既定 `main`）の役割のセッションだけ。統括が kitty の中にいなければ受信箱に置かれ、統括が動いたときに渡る。
+- 統括が止まっていても、hook が記録したセッションの socket に知らせが届いて起きる（統括が hook を 1 度通ったあと。受け手の `crossSessionInbound` の設定などで保留になることがある。[docs/relay.md](docs/relay.md#止まっているセッションを起こすsocket)）。0.7.0 で hook を入れたなら、SessionStart を足すため `--hooks=relay` をもう一度。
 - ステータス行に「端末 mac-a から 1 通」を出すなら、5. の例に `claude-relay status "$sid"` を足す（[docs/relay.md の「ステータス行」](docs/relay.md#ステータス行)）。
 - 止めるとき: 設定の `relay.enabled` を `false`（受け取らない）。相手を外すとき: `claude-relay untrust mac-a`。hook を外すとき: `tools/install.sh --hooks=relay --uninstall`。
 
