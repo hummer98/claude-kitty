@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-21
+
 ### 変更
 
 - `claude-state`: 手の待受（`claude-state waiting`）の消え方を変えた。前は人が打つまで消えず、他のセッションからのメッセージや背景の作業の通知で何ターンも作業して、最後は問いの無い報告で終わっても、問いを残したときの待受の色のままだった。今は付けたターンのものとし、付けたターンの Stop では残し、人が打てばすぐ消し、それ以外で始まった次のターン（通知のターンや、本体が自分で再開したターンも）はその Stop までに `claude-state waiting` が呼び直されなければその Stop で消す（Esc で止めたときは入力欄に戻った通知で。StopFailure では返答を書けていないので消さない）。まだ答えを待っているなら、そのターンの最後の返答でも呼び直す。次のターンで本体がツールを使い始めたら、その時点で消す（mac で使った PR #1 の直しと合わせた）。前の版の記録（manual に at だけ）は、次のターンの Stop で同じく消える。README・PRACTICES.md の説明も合わせた。
@@ -222,7 +224,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/hummer98/claude-kitty/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/hummer98/claude-kitty/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hummer98/claude-kitty/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hummer98/claude-kitty/compare/v0.4.0...v0.5.0
