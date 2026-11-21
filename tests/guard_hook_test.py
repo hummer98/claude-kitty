@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -514,6 +515,244 @@ class Lock(Base):
         gh.write_state(self.env, "deploy", "on", 10, "maintenance")
         self.assertIsNotNone(self.bash("git push", probe=fake_probe(), session="sA"))
         self.assertFalse(gh.acquire(self.env, "deploy", 10, "", "sA")[0])
+
+
+class VarCommand(Base):
+    """同じコマンドの中で代入した変数をコマンドの位置で使った形（T=...; $T quit）。値を語に分けて読む。"""
+
+    def test_assignment_forms_at_command_position(self):
+        for c in ('T="python3 /x/tools/svcctl.py --owner a"; $T deploy s1',
+                  "T='python3 /x/tools/svcctl.py'; $T deploy s1",
+                  "T=svcctl; $T deploy s1",
+                  "T=svcctl && ${T} deploy s1",
+                  'export T="python3 /x/svcctl.py --owner a"; $T deploy s1',
+                  'export T="python3 /x/svcctl.py" && $T --owner=a deploy s1',
+                  'T="python3 /x/svcctl.py"\n$T deploy s1',
+                  'T="python3 /x/svcctl.py"; timeout 5 $T deploy s1',
+                  'T="python3 /x/svcctl.py"; X=1 nohup $T deploy s1 &',
+                  'T="python3 \'/x y/svcctl.py\'"; $T deploy s1',          # 値の中の引用
+                  'T=/x/svcctl.py; python3 $T --owner a deploy s1',        # 前からあった引数の展開
+                  'T="python3 /x/svcctl.py"; if true; then $T deploy s1; fi',
+                  'T="python3 /x/svcctl.py"; bash -c "$T deploy s1"'):
+            self.assertIsNotNone(self.bash(c), c)
+
+    def test_several_assignments(self):
+        self.assertIsNotNone(self.bash("A=python3; B=/x/svcctl.py; $A $B deploy s1"))
+        self.assertIsNotNone(self.bash("P=python3 B=/x/svcctl.py; $P $B --owner a deploy s1"))
+        self.assertIsNotNone(self.bash("T=ls; T=svcctl; $T deploy s1"))          # 後の代入が効く
+        self.assertIsNone(self.bash("T=svcctl; T=ls; $T deploy s1"))
+
+    def test_not_expanded(self):
+        for c in ("$T deploy s1",                                  # 外の変数（このコマンドで代入していない）
+                  "T=$(echo svcctl); $T deploy s1",                # コマンド置換
+                  'f() { svcctl "$@"; }; f deploy s1',              # 関数の呼び出しは見えない
+                  "(T=svcctl); $T deploy s1",                       # サブシェルの代入は外に出ない
+                  "T=svcctl; echo $T deploy s1",                    # 引数の位置は値 1 語のまま
+                  'T="svcctl deploy"; printf %s "$T"',
+                  "T=svcctl ls; $T deploy s1"):                    # T=… cmd は代入でなく cmd の環境
+            self.assertIsNone(self.bash(c), c)
+        # hook の環境の変数は、前からどおり値 1 語として置き換えるだけ（語に分けない）
+        self.assertIsNotNone(self.bash("$T deploy s1", env=dict(self.env, T="svcctl")))
+        self.assertIsNone(self.bash("$T deploy s1", env=dict(self.env, T="python3 /x/svcctl.py --owner a")))
+
+    def test_empty_value_and_paths_still_expand(self):
+        self.assertIsNone(self.bash('T=""; $T ls'))
+        self.assertIsNotNone(self.bash(f"D={self.shared_dir}/m1; rm -rf $D"))
+        self.assertIsNotNone(self.bash(f'R="rm -rf"; $R {self.shared_dir}/m1'))
+
+
+class AllowOwner(Base):
+    """起動した担当だけ通す例外（commands の {"program"} の項目の allow_owner）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.rec_dir = self.run_dir / "svcctl"
+        self.rec_dir.mkdir()
+        self.rec = self.rec_dir / "launched.json"
+        self.write_owner_config()
+        self.argv = {4242: ["./fullscreen-app", "--x"]}
+        p1 = mock.patch("proc.argv", side_effect=lambda pid: self.argv.get(pid))
+        p2 = mock.patch("proc.alive", side_effect=lambda pid: pid in self.argv)
+        p1.start()
+        p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
+
+    def write_owner_config(self, **extra):
+        g = self.default_guards()
+        ao = {"file": "$XDG_RUNTIME_DIR/svcctl/launched.json", "option": "--owner", "env": "SVCCTL_OWNER"}
+        ao.update(extra)
+        g["app-running"]["commands"] = [
+            {"program": "^svcctl(\\.py)?$", "block": ["deploy", "quit"], "allow_owner": ao}]
+        self.write_config(g)
+
+    def launched(self, owner="probe", pid=4242, **kw):
+        self.rec.write_text(json.dumps(dict({"v": 1, "owner": owner, "pid": pid, "started_at": 1, "cmd": "launch"}, **kw)))
+
+    def role(self, session, role):
+        d = self.run_dir / "claude-state"
+        d.mkdir(exist_ok=True)
+        (d / f"{session}.json").write_text(json.dumps({"session_id": session, "role": role}))
+
+    def test_owner_passes(self):
+        self.launched()
+        self.role("s-probe", "probe")
+        for c in ("svcctl --owner probe quit", "python3 /x/svcctl.py --owner=probe quit",
+                  "SVCCTL_OWNER=probe svcctl quit", "env SVCCTL_OWNER=probe svcctl.py quit",
+                  "export SVCCTL_OWNER=probe; svcctl quit",
+                  'T="python3 /x/svcctl.py --owner probe"; $T quit'):
+            self.assertIsNone(self.bash(c, session="s-probe"), c)
+        env = dict(self.env, SVCCTL_OWNER="probe")                    # セッションの環境にある担当の名前
+        self.assertIsNone(self.bash("svcctl quit", session="s-probe", env=env))
+
+    def test_owner_mismatch_or_missing(self):
+        self.launched()
+        self.role("s-probe", "probe")
+        for c in ("svcctl --owner other quit", "svcctl quit", "svcctl --owner= quit",
+                  "SVCCTL_OWNER=probe svcctl --owner other quit",           # --owner が環境変数より先
+                  "svcctl quit --owner probe",                              # サブコマンドの後は全体のオプションでない
+                  "SVCCTL_OWNER=probe; svcctl quit"):                       # export していない代入は子に渡らない
+            self.assertIsNotNone(self.bash(c, session="s-probe"), c)
+        # 同じコマンドの中で、例外に当たるものと当たらないものが並んでいれば止める
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit && svcctl --owner x deploy", session="s-probe"))
+
+    def test_pid_dead_or_other_process(self):
+        self.role("s-probe", "probe")
+        self.launched(pid=999)                                              # 動いていない
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"))
+        self.argv[999] = ["/usr/bin/sleep", "100"]                         # pid の使い回し（別のプロセス）
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"))
+
+    def test_file_missing_or_broken(self):
+        self.role("s-probe", "probe")
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"))
+        for text in ("{", "[]", "null", json.dumps({"owner": "probe", "pid": 4242}),          # v が無い
+                     json.dumps({"v": 2, "owner": "probe", "pid": 4242}),
+                     json.dumps({"v": 1, "owner": "", "pid": 4242}),
+                     json.dumps({"v": 1, "owner": "probe", "pid": "4242"}),
+                     json.dumps({"v": 1, "owner": "probe", "pid": True}),
+                     json.dumps({"v": 1, "owner": "probe", "pid": -1})):
+            self.rec.write_text(text)
+            self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"), text)
+        self.rec.unlink()
+        self.rec.mkdir()                                                    # ファイルでない
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"))
+
+    def test_symlinked_record_is_not_trusted(self):
+        self.role("s-probe", "probe")
+        real = self.run_dir / "elsewhere.json"
+        real.write_text(json.dumps({"v": 1, "owner": "probe", "pid": 4242}))
+        self.rec.symlink_to(real)
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"))
+
+    def test_role_mismatch_or_unknown(self):
+        self.launched()
+        self.role("s-model", "model")
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-model"))   # 役割が違う
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-none"))    # 記録が無い
+        self.role("s-blank", None)
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-blank"))   # ペインに role が無い
+        self.assertIsNotNone(gh.evaluate({"tool_name": "Bash", "tool_input": {"command": "svcctl --owner probe quit"},
+                                          "cwd": str(self.real_home)}, self.env, fake_probe(process=True)))
+        self.write_owner_config(same_role=False)                            # 役割を見ない設定
+        self.assertIsNone(self.bash("svcctl --owner probe quit", session="s-none"))
+        self.assertIsNotNone(self.bash("svcctl --owner model quit", session="s-model"))
+
+    def test_only_that_entry_and_paths_still_blocked(self):
+        self.launched()
+        self.role("s-probe", "probe")
+        g = json.loads(self.cfg.read_text())["guard_hook"]["guards"]
+        g["app-running"]["commands"].append(                               # 例外の無い別の項目
+            {"program": "^svcctl$", "value_options": ["--owner"], "block": ["deploy"]})
+        self.write_config(g)
+        self.assertIsNone(self.bash("svcctl --owner probe quit", session="s-probe"))
+        self.assertIsNotNone(self.bash("svcctl --owner probe deploy", session="s-probe"))
+        self.assertIsNotNone(self.bash(f"svcctl --owner probe quit > {self.shared_dir}/x", session="s-probe"))
+
+    def test_without_xdg_runtime_dir(self):
+        env = {k: v for k, v in self.env.items() if k != "XDG_RUNTIME_DIR"}
+        self.assertEqual(gh.launch_file("$XDG_RUNTIME_DIR/svcctl/launched.json", env),
+                         f"/tmp/svcctl-{os.getuid()}/launched.json")
+        self.assertEqual(gh.launch_file("${XDG_RUNTIME_DIR}/svcctl/a/b.json", self.env),
+                         str(self.run_dir / "svcctl" / "a" / "b.json"))
+        self.assertEqual(gh.launch_file("~/r/launched.json", self.env), f"{self.real_home}/r/launched.json")
+
+    def test_value_option_added_for_subcommand(self):
+        # value_options に --owner を書かなくても、--owner の値をサブコマンドと取り違えない
+        self.assertIsNotNone(self.bash("svcctl --owner x quit"))
+        self.assertIsNone(self.bash("svcctl --owner quit status"))
+
+    def test_config_problems(self):
+        bad = [{"file": 3}, {"file": "rel/launched.json", "option": "--owner"},
+               {"file": "$HOME/x.json", "option": "--owner"}, {"file": "$XDG_RUNTIME_DIR/launched.json", "option": "--owner"},
+               {"file": "/r/x.json"}, {"file": "/r/x.json", "option": "owner"}, {"file": "/r/x.json", "env": "A-B"},
+               {"file": "/r/x.json", "option": "--owner", "same_role": "yes"}, "x"]
+        for ao in bad:
+            g = self.default_guards()
+            g["app-running"]["commands"] = [{"program": "^svcctl$", "value_options": ["--owner"], "block": ["quit"],
+                                             "allow_owner": ao}]
+            self.write_config(g)
+            _, problems = gh.load_guard_config(self.env)
+            self.assertTrue(any("allow_owner" in p for p in problems), ao)
+            self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"), ao)
+        g = self.default_guards()
+        ao = {"file": "/r/x.json", "option": "--owner"}
+        g["app-running"]["commands"] = [{"regex": "^svcctl quit", "allow_owner": ao}]
+        g["app-running"]["allow_commands"] = [{"program": "^svcctl$", "block": ["x"], "allow_owner": ao}]
+        g["deploy"]["commands"] = [{"program": "^svcctl$", "block": ["quit"], "allow_owner": ao}]    # process が無い
+        self.write_config(g)
+        _, problems = gh.load_guard_config(self.env)
+        text = "\n".join(problems)
+        self.assertIn("app-running.commands[0].allow_owner は commands の", text)
+        self.assertIn("app-running.allow_commands[0].allow_owner", text)
+        self.assertIn("deploy: allow_owner は process", text)
+
+    def test_status_shows_record(self):
+        lines, bad = gh.status_lines(self.env, fake_probe(process=True))
+        self.assertFalse(bad)
+        line = next(l for l in lines if l.startswith("app-running:"))
+        self.assertIn("記録のファイルが無い → 例外にならない", line)
+        self.launched()
+        line = next(l for l in gh.status_lines(self.env, fake_probe(process=True))[0] if l.startswith("app-running:"))
+        self.assertIn("owner probe、pid 4242 が動いている", line)
+        self.launched(pid=999)
+        line = next(l for l in gh.status_lines(self.env, fake_probe(process=True))[0] if l.startswith("app-running:"))
+        self.assertIn("owner probe、pid 999 が動いていない", line)
+        self.rec.write_text("{")
+        line = next(l for l in gh.status_lines(self.env, fake_probe(process=True))[0] if l.startswith("app-running:"))
+        self.assertIn("形が違う", line)
+
+    def test_real_process(self):
+        mock.patch.stopall()
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "claude-guard-owner-test"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        g = self.default_guards()
+        g["app-running"]["process"] = "claude-guard-owner-test"
+        g["app-running"]["commands"] = [{"program": "^svcctl$", "block": ["quit"],
+                                         "allow_owner": {"file": "$XDG_RUNTIME_DIR/svcctl/launched.json",
+                                                         "option": "--owner"}}]
+        self.write_config(g)
+        self.launched(pid=child.pid)
+        self.role("s-probe", "probe")
+        self.assertIsNone(self.bash("svcctl --owner probe quit", session="s-probe"))
+        self.launched(pid=os.getpid())                                       # 生きているが別のプロセス
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"))
+        # 本物の hook（proc を差し替えない）で、旗で働いているときも例外が効き、速い
+        self.launched(pid=child.pid)
+        gh.write_state(self.env, "app-running", "on", 5, "")
+        e = dict(os.environ, **self.env)
+        e.pop("CLAUDE_GUARD_ALLOW", None)
+
+        def run(c, sid):
+            return subprocess.run([sys.executable, str(BIN), "hook"], text=True, capture_output=True, env=e,
+                                  input=json.dumps(self.hook_input("Bash", {"command": c}, session=sid)))
+        t0 = time.monotonic()
+        r = run("svcctl --owner probe quit", "s-probe")
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        r = run("svcctl --owner probe quit", "s-other")
+        self.assertIn("deny", r.stdout)
 
 
 class Robustness(Base):

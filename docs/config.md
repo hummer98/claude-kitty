@@ -110,7 +110,7 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `command` | なし | 働く条件: 判定のコマンド（文字列は `sh -c`、リストはそのまま）。終了コード 0 なら働く |
 | `command_timeout` | `2` | `command` の打ち切り（秒、30 まで）。時間切れは働かないと数える |
 | `paths` | `[]` | 働いている間、書き込みを止めるパス（絶対パスか `~` で始める。その下も含む） |
-| `commands` | `[]` | 働いている間、止める Bash のコマンドの形（文字列 = 語の並びの頭、`{"regex": …}`、`{"program": …, "block": […]}`） |
+| `commands` | `[]` | 働いている間、止める Bash のコマンドの形（文字列 = 語の並びの頭、`{"regex": …}`、`{"program": …, "block": […]}`）。`{"program"}` の項目には `allow_owner`（起動の記録のファイルの owner と同じ担当だけ通す。[guard-hook.md](guard-hook.md#起動した担当だけ通すallow_owner)）を足せる |
 | `allow_commands` | `[]` | 例外として通すコマンドの形（書き方は `commands` と同じ） |
 | `message` | `""` | 止めたときの理由の文に足す一文。`{name}`・`{reason}`・`{condition}`・`{what}` を差し込める |
 

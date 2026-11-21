@@ -44,7 +44,8 @@
           "claude-view",
           {"regex": "^kitten @ (focus|resize|goto)"},
           {"program": "^svcctl(\\.py)?$", "value_options": ["--owner"],
-           "block": ["deploy", {"sub": "config", "if_any": ["--set"]}, {"sub": "reset", "unless_any": ["--dry-run"]}]}
+           "block": ["deploy", {"sub": "config", "if_any": ["--set"]}, {"sub": "reset", "unless_any": ["--dry-run"]}],
+           "allow_owner": {"file": "$XDG_RUNTIME_DIR/svcctl/launched.json", "option": "--owner", "env": "SVCCTL_OWNER"}}
         ],
         "allow_commands": ["claude-view status"],
         "message": "発表が終わるまで画面を動かさないでください（{name}: {condition}）。"

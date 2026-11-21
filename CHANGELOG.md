@@ -6,8 +6,13 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-guard`: `commands` の `{"program"}` の項目に `allow_owner`（起動した担当だけ通す例外）。道具が書く起動の記録（`{"v":1,"owner","pid",…}`）の owner と、コマンドの `--owner X` / `--owner=X`（か前に付けた環境変数）が同じで、記録の pid がそのガードの `process` に当たるプロセスとして動いていて、セッションの役割（claude-state の記録の `role`）も X のときだけ、その項目の形を通す。役割が分からないセッション・記録が無い・壊れている・pid が死んでいる・別のプロセスのときは今までどおり止める。`claude-guard status` に記録の owner と pid の状態を出す（[docs/guard-hook.md](docs/guard-hook.md#起動した担当だけ通すallow_owner)）。
+
 ### 修正
 
+- `claude-guard`: コマンドの名前を変数に入れた形（`T="python3 /x/tools/svcctl.py --owner a"; $T quit`）を見逃していた。値を 1 語のまま置き換えていたので、プログラム名が `svcctl.py --owner a` になって当たらなかった。同じコマンドの中で前に代入した変数（`T=…;`・`export T=…`・`&&` でつないだもの）がコマンドの位置に `$T` / `${T}` で来たら、値を語に分けて読む。コマンド置換・関数・外の環境変数は今までどおり読まない。
 - `claude-view equalize`・`add` などが、`claude-show` の画像（overlay）を重ねたペインを「kitty に見つからない」として止まることがあった。kitty（0.51 で確認）は window group の並びで overlay を先に置くことがあり、group の 2 つめ以降を overlay とみなしていたため本体が外れていた。group に window が 2 つ以上あるときは role を持つ window を本体とする（role を持つものが無い・2 つ以上なら従来どおり先頭）。
 
 ## [0.7.1] - 2026-11-22
