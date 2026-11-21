@@ -7,14 +7,16 @@
   書き換えたら `<置き場>/claude-presence/switches.jsonl` に残す。
 離席中の作業はゆっくりでよく（トークンが少ない方がよい）、人がいるときは速さを優先する、という利用者の要望から。
 """
+import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 
 # 人が打ったものでない入力の見分け方（実測した形）。
-# 頭に来るもの: 背景の作業の完了の通知、Claude Code のセッション間メッセージ
-MACHINE_PREFIXES = ("<task-notification", "<cross-session-message")
+# 頭に来るもの: 背景の作業の完了の通知、Claude Code のセッション間メッセージ、サブエージェントの報告、システムの注記
+MACHINE_PREFIXES = ("<task-notification", "<cross-session-message", "<agent-message", "<system-reminder")
 # 中にあれば人でないもの。claude-kitty の道具が Claude Code の socket に直接送る文には、必ずこのどれかを入れる
 # （claude-relay の起こす知らせ = lib/relay.py の wake_text。足したら tests の照合も足す）。
 # <cross-session-message は頭でなくても（前に空白・別の文があっても）人でないとみる（claude-state の判定と同じ）
@@ -29,6 +31,10 @@ DEFAULT_MODEL_POLICY = {"enabled": False, "away_minutes": 20, "away_model": "hai
 
 DIR_NAME = "claude-presence"
 LOG_MAX = 256 * 1024  # これを超えたら switches.jsonl.1 に回す
+# 同じセッションの同じ prompt を、これだけの秒数の間に書き換えていたら、もう書き換えない。auto mode では
+# permissionDecision なしの updatedInput の呼び出しが断られることがあり、元の model のまま出し直されると
+# 書き換え → 断られる、をくり返しうるため（2 回目は呼び出しどおりに通す）
+RETRY_SECONDS = 300
 
 
 def presence_dir(env=None):
@@ -111,11 +117,35 @@ def keep_reason(tool_input, policy):
         return f"model {model}"
     if model == policy["away_model"]:
         return "already"
-    text = " ".join(x for x in (tool_input.get("description"), tool_input.get("prompt")) if isinstance(x, str)).lower()
+    text = " ".join(x for x in (tool_input.get("description"), tool_input.get("prompt")) if isinstance(x, str))
     for w in policy["keep"]:
-        if w.lower() in text:
+        if keep_hit(w, text):
             return f"keep {w}"
     return None
+
+
+def keep_hit(word, text):
+    """keep の語が text にあるか。英数字だけの語は単語として（大文字・小文字を問わず。guide は guideline に当てない）、
+    ほかは部分一致（日本語には単語の区切りが無いため）。"""
+    if re.fullmatch(r"[A-Za-z0-9_-]+", word):
+        return re.search(rf"(?<![A-Za-z0-9]){re.escape(word)}(?![A-Za-z0-9])", text, re.I) is not None
+    return word.lower() in text.lower()
+
+
+def prompt_key(prompt):
+    return hashlib.sha256(prompt.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def recently_switched(env, sid, prompt, now):
+    """同じセッションの同じ prompt を RETRY_SECONDS 以内に書き換えたか（出し直しの呼び出し）。"""
+    key = prompt_key(prompt)
+    for r in reversed(recent_switches(env, 50)):
+        t = r.get("t")
+        if not isinstance(t, (int, float)) or isinstance(t, bool) or now - t > RETRY_SECONDS:
+            continue
+        if r.get("session_id") == sid and r.get("prompt_key") == key:
+            return True
+    return False
 
 
 def decide(payload, policy, last, now):
@@ -141,7 +171,8 @@ def hook_output(d):
     """PreToolUse の hook の stdout（permissionDecision は付けない: 許可の判断は今までどおり）。"""
     msg = (f"claude-presence: 人の入力が {int(d['idle_minutes'])} 分ないので、このサブエージェントの model を "
            f"{d['from'] or '（指定なし）'} から {d['to']} に変えた（設定 model_policy。離席中の実装はトークンの少ない方で）。"
-           f"auto mode で「a hook changed this call's input」と断られたら、同じ呼び出しを model: \"{d['to']}\" にして出し直す。")
+           f"auto mode で「a hook changed this call's input」と断られたら、同じ呼び出しを model: \"{d['to']}\" にして出し直す"
+           "（元の model のまま出し直したものは、もう変えない）。")
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": d["input"], "additionalContext": msg}}
 
 
@@ -221,11 +252,14 @@ def run_hook(text, env, now=None, policy_loader=None):
     if d is None:
         return None
     sid = payload.get("session_id")
+    if recently_switched(env, sid, payload["tool_input"]["prompt"], now):
+        return None
     try:
         append_switch(env, {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)), "t": now,
                             "session_id": sid, "role": session_role(env, sid), "agent_id": payload.get("agent_id"),
                             "from": d["from"], "to": d["to"], "description": d["description"],
-                            "idle_minutes": round(d["idle_minutes"], 1)})
+                            "idle_minutes": round(d["idle_minutes"], 1),
+                            "prompt_key": prompt_key(payload["tool_input"]["prompt"])})
     except Exception as e:  # noqa: BLE001 — ログが書けなくても切り替えは行う
         log_error(env, "hook", f"switches.jsonl に書けない: {type(e).__name__}: {e}")
     return hook_output(d)

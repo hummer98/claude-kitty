@@ -44,6 +44,8 @@ class HumanInput(unittest.TestCase):
                   '  \n<cross-session-message from="x">hi</cross-session-message>',
                   'note <cross-session-message from="x">hi</cross-session-message>',
                   "<task-notification><task-id>a</task-id></task-notification>",
+                  '<agent-message from="a1">[Subagent hand-back] 終わった</agent-message>',
+                  "<system-reminder>x</system-reminder>",
                   "claude-relay: 別の端末から 1 通届いた [relay-wake ids=r1]\n（…）"):
             self.assertFalse(P.is_human(p), p)
 
@@ -125,6 +127,14 @@ class Decide(unittest.TestCase):
         self.assertEqual(d["to"], "sonnet")
         self.assertIsNone(P.decide(agent(), dict(ON, away_minutes=60), last(59), NOW))
 
+    def test_keep_ascii_words_match_whole_words(self):
+        # 英字の語は単語として: guide は guideline に、review は preview に当たらない（実装の依頼を誤って残さない）
+        for ti in ({"prompt": "follow the guidelines in CONTRIBUTING"}, {"prompt": "add a preview pane"},
+                   {"description": "unverifyable"}):
+            self.assertIsNotNone(P.decide(agent(**ti), ON, last(60), NOW), ti)
+        for ti in ({"prompt": "see the guide."}, {"prompt": "(Review)"}, {"description": "code-review"}):
+            self.assertIsNone(P.decide(agent(**ti), ON, last(60), NOW), ti)
+
     def test_keep_words(self):
         for ti in ({"description": "Review the diff"}, {"description": "差分のレビュー"}, {"prompt": "結果を評価して"},
                    {"prompt": "VERIFY the fix"}, {"prompt": "動かして検証する"}, {"description": "API を調べる"},
@@ -177,6 +187,20 @@ class HookRun(unittest.TestCase):
         self.assertEqual({k: log[0][k] for k in ("session_id", "role", "from", "to", "description", "idle_minutes")},
                          {"session_id": "s1", "role": "dev-a", "from": "opus", "to": "haiku",
                           "description": "Implement the parser", "idle_minutes": 30.0})
+
+    def test_retry_of_same_call_is_not_switched_again(self):
+        # auto mode で断られて元の model のまま出し直されたとき、書き換えと断りをくり返さない
+        self.policy(enabled=True)
+        P.record_human(self.env, "s0", "main", None, now=NOW - 30 * 60)
+        call = json.dumps(agent(model="opus"))
+        self.assertIsNotNone(P.run_hook(call, self.env, now=NOW))
+        self.assertIsNone(P.run_hook(call, self.env, now=NOW + 10))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 20))  # 書き換えた形での出し直し
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus", prompt="別の作業")), self.env, now=NOW + 30))
+        other = dict(agent(model="opus"), session_id="s2")
+        self.assertIsNotNone(P.run_hook(json.dumps(other), self.env, now=NOW + 40))  # 別のセッション
+        self.assertIsNotNone(P.run_hook(call, self.env, now=NOW + P.RETRY_SECONDS + 1))  # 時間がたてば新しい呼び出し
+        self.assertEqual(len(P.recent_switches(self.env, 10)), 4)
 
     def test_nothing_when_disabled_present_or_broken(self):
         P.record_human(self.env, "s0", "main", None, now=NOW - 30 * 60)
@@ -305,6 +329,15 @@ class StateRecordsHuman(unittest.TestCase):
         self.assertIsNone(self.last())
         self.hook("UserPromptSubmit", "hi", sid="../x")  # 正しくない session id
         self.assertIsNone(self.last())
+
+    def test_broken_config_outside_kitty_is_quiet(self):
+        # 設定が壊れていても、kitty の外のプロンプトごとに警告を出さない（前の版と同じく静か）。記録はする
+        (self.d / "bad.json").write_text("{broken")
+        r = subprocess.run([sys.executable, str(STATE_BIN), "hook", "UserPromptSubmit"],
+                           input=json.dumps({"session_id": "sess-1", "prompt": "hi"}), capture_output=True, text=True,
+                           env=dict(self.env, KITTY_WINDOW_ID="", CLAUDE_KITTY_CONFIG=str(self.d / "bad.json")), timeout=20)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertEqual(self.last()["session_id"], "sess-1")
 
     def test_outside_kitty_is_recorded_without_role(self):
         self.hook("UserPromptSubmit", "hi", KITTY_WINDOW_ID="")

@@ -212,7 +212,11 @@ def note_presence(payload, env, result, now=None):
     sid = payload.get("session_id")
     if result in ("off", "nested claude") or not valid_session_id(sid):
         return "skip"
-    if not is_human(payload.get("prompt"), conf(env)["notice"]):
+    try:
+        notice = load_state_config(env)["notice"]
+    except ValueError:
+        notice = None  # 設定が壊れている: 通知の印は無しで見分ける（ここで警告を重ねて出さない。色の側が出す）
+    if not is_human(payload.get("prompt"), notice):
         return "machine"
     if result not in ("working", "waiting", "done", "idle", "end") and who(env)[1]:
         return "nested"  # apply が入れ子かを確かめる前に終わった（kitty の外・変化なし・失敗など）
