@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-22
+
 ### 追加
 
 - `claude-relay`（第 2 段の 1 つ目）: 止まっている（入力待ちの）受け取りのセッションを起こす（[docs/relay.md](docs/relay.md#止まっているセッションを起こすsocket)）。別の端末のセッション同士が、人を介さずにやりとりできる。
@@ -263,7 +265,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/hummer98/claude-kitty/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/hummer98/claude-kitty/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/hummer98/claude-kitty/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/hummer98/claude-kitty/compare/v0.6.0...v0.6.1
