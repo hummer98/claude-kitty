@@ -757,10 +757,16 @@ def _unwrap(words):
             vopts = WRAPPERS[name]
             i = 1
             while i < len(words):
-                w = words[i]
+                w = words[i][len(SPLIT):] if words[i].startswith(SPLIT) else words[i]   # timeout $D の $D は値で見る
                 m = ASSIGN.match(w)
                 if name == "env" and m:
                     assigns[m.group(1)] = m.group(2)
+                    i += 1
+                elif name == "env" and w in ("-u", "--unset") and i + 1 < len(words):
+                    assigns[_unmark([words[i + 1]])[0]] = ""     # 消した変数は空とみる（担当の名乗りを消す）
+                    i += 2
+                elif name == "env" and w.startswith("--unset="):
+                    assigns[w.split("=", 1)[1]] = ""
                     i += 1
                 elif w.startswith("-"):
                     i += 2 if (w in vopts and "=" not in w) else 1
@@ -1167,6 +1173,12 @@ class Analyzer:
                     if m.group(1) == ALLOW_ENV:
                         self.allowed |= allow_names(m.group(2))
             return
+        if name == "unset":
+            for a in args:
+                if ENV_NAME.match(a):
+                    self.vars.pop(a, None)
+                    self.exported.discard(a)
+                    self.local.discard(a)
         if name in SHELLS:
             inner = _shell_c(args)
             if inner is not None and self.depth < 3:

@@ -90,7 +90,7 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 |---|---|
 | `file` | 起動の記録。絶対パス・`~/…`・`$XDG_RUNTIME_DIR/<フォルダ>/…`（`${XDG_RUNTIME_DIR}` も可）。`XDG_RUNTIME_DIR` が無い（か空）なら `/tmp/<フォルダ>-<uid>/…`（記録を書く道具も同じ決まりにする） |
 | `option` | コマンドが担当の名前を渡すオプション。サブコマンドより前の `--owner X` か `--owner=X`（最後のもの）。`value_options` に自動で足す |
-| `env` | 担当の名前の環境変数。`option` が無いときに見る: 前に付けた `SVCCTL_OWNER=X`（`env SVCCTL_OWNER=X` も）、同じコマンドの中で `export` したもの、hook の環境にあるもの。`export` しない代入（`SVCCTL_OWNER=X; svcctl …`）は子に渡らないので見ない |
+| `env` | 担当の名前の環境変数。`option` が無いときに見る: 前に付けた `SVCCTL_OWNER=X`（`env SVCCTL_OWNER=X` も）、同じコマンドの中で `export` したもの、hook の環境にあるもの。`export` しない代入（`SVCCTL_OWNER=X; svcctl …`）は子に渡らないので見ない。`env -u` / `unset` で消したものも見ない |
 | `same_role` | 既定 `true`: セッションの役割（kitty のペインの user var `role`）も X と同じことを求める。`false` で見ない |
 
 `option` と `env` の少なくとも 1 つが要る。記録のファイルの形は `{"v": 1, "owner": "<担当>", "pid": <整数>, "started_at": <epoch>, "cmd": "launch"}`（`started_at` と `cmd` は見ない）。通すのは次が全部そろうときだけ:
@@ -100,7 +100,7 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 3. その `pid` が動いていて、引数（`pgrep -f` と同じく空白でつないだもの）が、そのガードの `process` のどれかに当たる（pid の使い回しや、残った古い記録を効かせないため。macOS は `lib/proc.py` で読む）。
 4. `same_role` なら、セッションの役割が X。役割は claude-state の記録（`$XDG_RUNTIME_DIR/claude-state/<session_id>.json` の `role`）から読む（hook を遅くしないよう kitty には聞かない）。**役割が分からないセッション（記録が無い・ペインに role が無い・kitty の外）は通さない**: 例外は止めを緩める側なので、確かでないときは今までの止める側に倒す。kitty の外で使うなら `"same_role": false`。
 
-記録が無い・読めない・壊れている・どれかが合わないときは例外にならず、今までどおり止める。設定の誤り（`file` の形が違う、`option` / `env` が無いなど）は、その例外を使わずに「問題:」に出す。`allow_owner` は `process` のあるガードの `commands` の `{"program"}` の項目にだけ書ける。旗で働いているときも、項目の形の理由だけを外す（同じコマンドの保護したパスへの書き込みは止める）。
+記録が無い・読めない・壊れている・どれかが合わないときは例外にならず、今までどおり止める。設定の誤り（`file` の形が違う、`option` / `env` が無いなど）は、その例外を使わずに「問題:」に出す。`allow_owner` は `process` のあるガードの `commands` の `{"program"}` の項目にだけ書ける。例外はその項目の `block` 全部に効く。起動した担当にも一部（`load` など）は止めたいなら、項目を 2 つに分け、`allow_owner` は通してよいサブコマンド（`quit` など）の項目にだけ書く。旗で働いているときも、項目の形の理由だけを外す（同じコマンドの保護したパスへの書き込みは止める）。
 
 理由の文には通す道を書かない（止められたサブエージェントが自分で外さないように）。外すのは依頼主か統括の判断。
 

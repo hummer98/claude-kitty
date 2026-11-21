@@ -536,6 +536,14 @@ class VarCommand(Base):
                   'T="python3 /x/svcctl.py"; bash -c "$T deploy s1"'):
             self.assertIsNotNone(self.bash(c), c)
 
+    def test_wrapper_arguments_from_variables(self):
+        # 前に付けたものの引数（timeout の時間など）に代入した変数を使っても、後ろのコマンドを見失わない（レビューの指摘）
+        for c in ("D=5; timeout $D svcctl deploy s1", "D=5; timeout -s KILL $D svcctl deploy s1",
+                  "D=1h; timeout ${D} svcctl deploy s1", "T=/x/svcctl.py; D=5; timeout $D python3 $T deploy s1",
+                  "F=/tmp/l; flock $F svcctl deploy s1", "N=5; nice -n $N svcctl deploy s1",
+                  "U=me; sudo -u $U svcctl deploy s1", "V=A=1; env $V svcctl deploy s1"):
+            self.assertIsNotNone(self.bash(c), c)
+
     def test_several_assignments(self):
         self.assertIsNotNone(self.bash("A=python3; B=/x/svcctl.py; $A $B deploy s1"))
         self.assertIsNotNone(self.bash("P=python3 B=/x/svcctl.py; $P $B --owner a deploy s1"))
@@ -611,7 +619,10 @@ class AllowOwner(Base):
         for c in ("svcctl --owner other quit", "svcctl quit", "svcctl --owner= quit",
                   "SVCCTL_OWNER=probe svcctl --owner other quit",           # --owner が環境変数より先
                   "svcctl quit --owner probe",                              # サブコマンドの後は全体のオプションでない
-                  "SVCCTL_OWNER=probe; svcctl quit"):                       # export していない代入は子に渡らない
+                  "SVCCTL_OWNER=probe; svcctl quit",                        # export していない代入は子に渡らない
+                  "export SVCCTL_OWNER=probe; env -u SVCCTL_OWNER svcctl quit",   # 消した名乗り
+                  "export SVCCTL_OWNER=probe; env --unset=SVCCTL_OWNER svcctl quit",
+                  "export SVCCTL_OWNER=probe; unset SVCCTL_OWNER; svcctl quit"):
             self.assertIsNotNone(self.bash(c, session="s-probe"), c)
         # 同じコマンドの中で、例外に当たるものと当たらないものが並んでいれば止める
         self.assertIsNotNone(self.bash("svcctl --owner probe quit && svcctl --owner x deploy", session="s-probe"))
@@ -667,6 +678,9 @@ class AllowOwner(Base):
         self.write_config(g)
         self.assertIsNone(self.bash("svcctl --owner probe quit", session="s-probe"))
         self.assertIsNotNone(self.bash("svcctl --owner probe deploy", session="s-probe"))
+        # 例外は項目の block 全部に効く（setUp の項目は deploy と quit）。絞るなら項目を分ける（この形）
+        self.write_owner_config()
+        self.assertIsNone(self.bash("svcctl --owner probe deploy", session="s-probe"))
         self.assertIsNotNone(self.bash(f"svcctl --owner probe quit > {self.shared_dir}/x", session="s-probe"))
 
     def test_without_xdg_runtime_dir(self):
