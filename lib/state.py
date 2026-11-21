@@ -256,6 +256,11 @@ def transition(prev, event, payload, now):
         # StopFailure（API のエラーなど）では返答を書けていないので、前のターンの手の待ちは次のターンまで残す
         drop(lambda k, w: w.get("agent") is None
              and (w.get("kind") != "manual" or (w.get("older") and event == "Stop")))
+        if event == "StopFailure":
+            # 残した印は「付けたターンのもの」に戻す（後の Esc の通知で外れないように。次のターンでまた older が付く）
+            for w in waits.values():
+                if w.get("agent") is None and w.get("kind") == "manual":
+                    w.pop("older", None)
         if isinstance(payload.get("background_tasks"), list):
             _reconcile(agents, payload["background_tasks"], now)
             running = set(running_agents(rec))
@@ -279,6 +284,7 @@ def transition(prev, event, payload, now):
             agents.pop(a, None)  # 前面のもの（と、Claude Code の内部のエージェント）は終われば消す
     elif event == "PreToolUse":
         busy()
+        # armed は PR #1 の版が書いた印（前の版の記録を読んだときのため。今の版は書かない）
         if a is None and ((waits.get("manual") or {}).get("older") or (waits.get("manual") or {}).get("armed")):
             del waits["manual"]  # 手の待ちを付けたターンの後で、本体が動き始めた
         key = _perm_key(a, payload)

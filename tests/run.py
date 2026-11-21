@@ -1584,6 +1584,31 @@ class StateInterruptsAndSessions(unittest.TestCase):
         _, rec = run_events([("UserPromptSubmit", {"prompt": peer_prompt("次")}), ("Stop", {})], prev=rec, t0=900)
         self.assertEqual((rec["state"], rec["waits"]), ("done", {}))
 
+    def test_manual_wait_kept_through_stop_failure_then_esc(self):
+        # StopFailure のあとに入力欄に戻った通知が来ても、残した印は消さない
+        _, rec = run_events([("UserPromptSubmit", {}), ("manual-waiting", {}), ("Stop", {}),
+                             ("UserPromptSubmit", {"prompt": peer_prompt("この件を進めて")}), ("StopFailure", {}),
+                             ("Notification", {"notification_type": "idle_prompt"})])
+        self.assertEqual((rec["state"], rec["reason"]), ("waiting", "manual"))
+
+    def test_manual_wait_reset_in_peer_turn_via_bash(self):
+        # いちばんよく通る列: 他のセッションのメッセージのターンで、Bash から claude-state waiting を呼び直す
+        prev = [("UserPromptSubmit", {}), ("manual-waiting", {}), ("Stop", {})]
+        _, rec = run_events(prev + [("UserPromptSubmit", {"prompt": peer_prompt("進めて")}), ("PreToolUse", BASH_A),
+                                    ("manual-waiting", {}), ("PostToolUse", BASH_A),
+                                    ("UserPromptSubmit", {"prompt": peer_prompt("追加")}), ("PreToolUse", BASH_B),
+                                    ("Stop", {})])
+        self.assertEqual((rec["state"], list(rec["waits"])), ("waiting", ["manual"]))
+
+    def test_legacy_armed_manual_cleared_by_main_tool(self):
+        # PR #1 の版が書いた armed の印: 本体のツールで外れ、サブエージェントのツールでは外れない
+        prev = {"state": "waiting", "reason": "manual", "since": 5, "main": False, "seen": False, "quiet": False,
+                "waits": {"manual": {"kind": "manual", "agent": None, "at": 5, "armed": True}}, "agents": {}}
+        r = transition(prev, "PreToolUse", dict(BASH_A, agent_id="x"), 10) or prev
+        self.assertIn("manual", r["waits"])
+        r = transition(prev, "PreToolUse", BASH_A, 10)
+        self.assertNotIn("manual", r["waits"])
+
     def test_legacy_manual_wait_without_turn(self):
         # 前の版の記録（manual に at だけ・state と reason だけ）: 付けたターンの Stop では残り、次のターンの Stop で消える
         for prev in ({"state": "waiting", "reason": "manual", "since": 5},
