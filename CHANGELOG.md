@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### 修正
+
+- `claude-view equalize`・`add` などが、`claude-show` の画像（overlay）を重ねたペインを「kitty に見つからない」として止まることがあった。kitty（0.51 で確認）は window group の並びで overlay を先に置くことがあり、group の 2 つめ以降を overlay とみなしていたため本体が外れていた。group に window が 2 つ以上あるときは role を持つ window を本体とする（role を持つものが無い・2 つ以上なら従来どおり先頭）。
+
 ## [0.7.1] - 2026-11-22
 
 ### 追加

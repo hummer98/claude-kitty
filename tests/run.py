@@ -1185,6 +1185,26 @@ class ClaudeViewCli(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("id:99", self.calls.read_text())
 
+    def test_overlay_first_in_group_keeps_role(self):
+        # 回帰: kitty 0.51 は group の先頭に overlay を置くことがある。本体の role を見失って
+        # 「kitty に見つからない」で止まっていた
+        d = Path(self.tmp.name)
+        ls = json.loads((Path(__file__).parent / "fixture_ls_all.json").read_text())
+        tab = ls[0]["tabs"][0]
+        tab["windows"].append({"id": 99, "user_vars": {}, "columns": 1, "lines": 1, "neighbors": {}})
+        groups = tab["layout_state"]["all_windows"]["window_groups"]
+        g = next(g for g in groups if 2 in g["window_ids"])
+        g["window_ids"].insert(0, 99)
+        fixture = d / "ls.json"; fixture.write_text(json.dumps(ls))
+        (d / "kitten").write_text(f"#!/bin/sh\necho \"$@\" >> {self.calls}\n"
+                                  f"case \"$*\" in *' ls') cat {fixture};; esac\n")
+        r = self.run_view("--dry-run", "restore")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("見つからない", r.stderr)
+        r = self.run_view("restore")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("id:99", self.calls.read_text())
+
     def test_bad_guard_regex_refused(self):
         # pgrep が失敗したのを「当たらない」と見なすと保護が黙って外れるので、止める
         for pat in ("[", "(?"):
@@ -1934,6 +1954,55 @@ class Overlay(unittest.TestCase):
         self.assertEqual(overlay_ids(tab), {13, 14})
         self.assertEqual(overlay_ids({}), set())
         self.assertEqual(overlay_ids({"layout_state": None}), set())
+
+    @staticmethod
+    def _tab(groups, windows):
+        return {"layout_state": {"all_windows": {"window_groups": groups}}, "windows": windows}
+
+    def test_overlay_first_in_group(self):
+        # kitty 0.51 で計測した形: overlay（20, 22）が group の先頭に来る
+        from view import overlay_ids
+        tab = self._tab([{"id": 165, "window_ids": [22, 19]}, {"id": 167, "window_ids": [20, 7]}],
+                        [{"id": 19, "user_vars": {"role": "mod-keeper"}}, {"id": 7, "user_vars": {"role": "aom-design"}},
+                         {"id": 20, "user_vars": {}}, {"id": 22, "user_vars": {}}])
+        self.assertEqual(overlay_ids(tab), {20, 22})
+
+    def test_main_first_in_group(self):
+        from view import overlay_ids
+        tab = self._tab([{"id": 1, "window_ids": [7, 20, 21]}, {"id": 2, "window_ids": [5]}],
+                        [{"id": 7, "user_vars": {"role": "a"}}, {"id": 20, "user_vars": {}},
+                         {"id": 21}, {"id": 5, "user_vars": {"role": "b"}}])
+        self.assertEqual(overlay_ids(tab), {20, 21})
+
+    def test_group_without_role_keeps_first(self):
+        from view import overlay_ids
+        tab = self._tab([{"id": 1, "window_ids": [8, 9]}], [{"id": 8, "user_vars": {}}, {"id": 9, "user_vars": {}}])
+        self.assertEqual(overlay_ids(tab), {9})
+
+    def test_group_with_two_roles_keeps_first(self):
+        from view import overlay_ids
+        tab = self._tab([{"id": 1, "window_ids": [8, 9]}],
+                        [{"id": 8, "user_vars": {"role": "a"}}, {"id": 9, "user_vars": {"role": "b"}}])
+        self.assertEqual(overlay_ids(tab), {9})
+
+    def test_broken_user_vars(self):
+        # user_vars が無い・None・dict でない window、windows 自体が壊れていても落ちない
+        from view import overlay_ids
+        groups = [{"id": 1, "window_ids": [30, 31]}]
+        self.assertEqual(overlay_ids(self._tab(groups, [{"id": 30}, {"id": 31, "user_vars": None}])), {31})
+        self.assertEqual(overlay_ids(self._tab(groups, [{"id": 30, "user_vars": "x"}, {"id": 31, "user_vars": {"role": "r"}}])), {30})
+        self.assertEqual(overlay_ids(self._tab(groups, ["junk", {"id": 31, "user_vars": {"role": "r"}}])), {30})
+        self.assertEqual(overlay_ids(self._tab(groups, None)), {31})
+        self.assertEqual(overlay_ids({"layout_state": {"all_windows": {"window_groups": groups}}}), {31})
+
+    def test_roster_keeps_main_behind_overlay(self):
+        # 回帰: overlay が先頭の group でも本体の role が名簿に入る（claude-view の「kitty に見つからない」と同じ原因）
+        from roster import build_roster
+        tab = self._tab([{"id": 165, "window_ids": [22, 19]}],
+                        [{"id": 19, "user_vars": {"role": "mod-keeper"}}, {"id": 22, "user_vars": {}}])
+        tab["title"] = "t"
+        r = build_roster([{"tabs": [tab]}], [], "nobody", lambda t, i: (0, 0, 1, 1))
+        self.assertEqual(r["sessions"]["mod-keeper"]["window_id"], 19)
 
 
 class StateNested(unittest.TestCase):

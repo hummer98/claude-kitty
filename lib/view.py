@@ -119,7 +119,26 @@ def overlay_ids(tab):
     """タブの中の overlay（claude-show の画像など）の window id。
 
     overlay は重ねた先のペインと同じ window group に入り、kitten @ ls ではふつうのペインと同じように
-    並ぶ（role も無い）。group の 2 つめ以降が overlay なので、並べ替えの対象から外すのに使う。
+    並ぶ（role も無い）。並べ替えの対象から外すのに使う。
+
+    group の並びの順は当てにならない（kitty 0.51 で overlay が先頭に来る group を計測した）ので、
+    window が 2 つ以上の group では role（user_vars の role）を持つ window を本体とし、残りを overlay とする。
+    - role を持つものがちょうど 1 つ: それが本体。
+    - role を持つものが無い（role の無いペインに重ねたとき）・2 つ以上（どれが本体か決められない）:
+      従来どおり先頭を本体にする（今まで動いていた形を変えない）。
     """
     groups = ((tab.get("layout_state") or {}).get("all_windows") or {}).get("window_groups") or []
-    return {i for g in groups for i in (g.get("window_ids") or [])[1:]}
+    has_role = set()
+    for w in tab.get("windows") or []:
+        uv = w.get("user_vars") if isinstance(w, dict) else None
+        if isinstance(uv, dict) and uv.get("role"):
+            has_role.add(w.get("id"))
+    out = set()
+    for g in groups:
+        ids = g.get("window_ids") or []
+        if len(ids) < 2:
+            continue
+        roled = [i for i in ids if i in has_role]
+        main = roled[0] if len(roled) == 1 else ids[0]
+        out.update(i for i in ids if i != main)
+    return out
