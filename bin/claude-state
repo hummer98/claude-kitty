@@ -2,7 +2,7 @@
 """Claude Code のセッションの状態（working / waiting / done / idle）を、kitty のペインの背景色で見せる。
 
   claude-state hook EVENT        Claude Code の hook から呼ぶ（stdin に hook の JSON）。決して失敗しない
-  claude-state waiting           「ふつうの文で問いを残した」と手で付ける（次の入力で working に戻る）
+  claude-state waiting           「ふつうの文で問いを残した」と手で付ける（人が打てば working に戻り、次のターンで呼び直さなければその終わりで消える）
   claude-state get [SESSION_ID]  状態を 1 語で出す（記録が無ければ空）
   claude-state paint SESSION_ID TEXT   TEXT を状態の色で出す（ステータス行用）
   claude-state list [--json] [--all]   統括用。1 行 1 セッションで role・状態・続いている時間

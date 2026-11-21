@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 変更
+
+- `claude-state`: 手の待受（`claude-state waiting`）の消え方を変えた。前は人が打つまで消えず、他のセッションからのメッセージや背景の作業の通知で何ターンも作業して、最後は問いの無い報告で終わっても、問いを残したときの待受の色のままだった。今は付けたターンのものとし、付けたターンの Stop では残し、人が打てばすぐ消し、それ以外で始まった次のターン（通知のターンや、本体が自分で再開したターンも）はその Stop までに `claude-state waiting` が呼び直されなければその Stop で消す（Esc で止めたときは入力欄に戻った通知で。StopFailure では返答を書けていないので消さない）。まだ答えを待っているなら、そのターンの最後の返答でも呼び直す。前の版の記録（manual に at だけ）は、次のターンの Stop で同じく消える。README・PRACTICES.md の説明も合わせた。
+
+### 修正
+
+- `claude-browser`・`claude-show`: Flatpak（や Snap）の Chrome で、サンドボックスから見えない場所（Flatpak の filesystems の許可の外など）の file:// を開くと「アクセスできませんでした」になっていた。サンドボックスの Chrome のときだけ、開く file:// が中から見えるかを判定し（Flatpak は `flatpak info --show-permissions` と override の filesystems: host・home・xdg-*・`~/…`・絶対パス・`!` の否定・`flatpak run --filesystem=`。Snap は home インターフェース。読めない・解釈できないときは見えない側）、見えなければ表示用のコピーを `~/.var/app/<アプリ ID>/claude-show/<ハッシュ>/`（Snap は `~/snap/<名前>/common/claude-show/<ハッシュ>/`）に写してそちらを開く。HTML は同じフォルダの中を指す相対参照の資源も同じ位置に写す（`../`・絶対パスの参照は写さず stderr に 1 行。合計 50MB を超えれば HTML だけ）。写しは 1 日で消し、呼び直すと毎回写し直す。元のファイルは動かさず、結果の JSON の `target` は元のまま、`staged` に写した先、`note` に「直すのは元のファイル」を入れる。ネイティブの Chrome では前と同じ。`claude-kitty doctor` の Chrome の行にも、サンドボックスのときはその旨を出す（ok のまま）。
+
 ## [0.6.1] - 2026-11-21
 
 ### 修正

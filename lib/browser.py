@@ -62,6 +62,17 @@ def snap_name(path):
     return os.path.basename(path) if path and str(path).startswith("/snap/") else None
 
 
+def sandbox_of(argv, resolved=None):
+    """そのコマンドの Chrome のサンドボックス: {"type": "flatpak", "id": アプリ ID} / {"type": "snap", "id": 名前} / None。
+
+    サンドボックスの Chrome はホームの一部しか読めないので、claude-browser は見えない file:// を写して開く（lib/sandboxfs.py）。"""
+    app = flatpak_app(argv or [])
+    if app:
+        return {"type": "flatpak", "id": app}
+    snap = snap_name(resolved or (argv[0] if argv else None))
+    return {"type": "snap", "id": snap} if snap else None
+
+
 def mac_app_paths(home, family="chrome"):
     """macOS の .app の実行ファイルの候補（/Applications、無ければ ~/Applications）。"""
     main = MAC_CHROME if family == "chrome" else MAC_CHROMIUM
@@ -101,7 +112,8 @@ def find_browser(conf, env, home, which, exists, flatpak_has, os_name="Linux"):
         root = conf.get("profile_root")
         root = (Path(os.path.expanduser(root)) if root
                 else default_profile_root(argv, env, home, resolved, family, os_name))
-        return {"command": argv, "kind": kind, "name": name, "profile_root": root, "configured": configured}
+        return {"command": argv, "kind": kind, "name": name, "profile_root": root, "configured": configured,
+                "sandbox": sandbox_of(argv, resolved)}
 
     if conf.get("command"):
         argv = list(conf["command"])
@@ -142,7 +154,7 @@ def find_browser(conf, env, home, which, exists, flatpak_has, os_name="Linux"):
             b = c(need_root)
             if b:
                 return b
-    return {"command": None, "kind": None, "name": None, "configured": False,
+    return {"command": None, "kind": None, "name": None, "configured": False, "sandbox": None,
             "profile_root": Path(os.path.expanduser(conf["profile_root"])) if conf.get("profile_root")
             else default_profile_root(None, env, home, os_name=os_name)}
 

@@ -54,6 +54,7 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 | それ以外 | `$XDG_DATA_HOME/claude-kitty/browser-profiles`（既定 `~/.local/share/claude-kitty/browser-profiles`。macOS は `$XDG_DATA_HOME` が無ければ `~/Library/Application Support/claude-kitty/browser-profiles`）。ネイティブの Chromium は同じ所の `chromium-profiles`（Chrome とは cookie の鍵が違うので共有しない） |
 
 どれを使っているかは `claude-browser status`（`browser` と `profile_root`）と `claude-kitty doctor`（「Chrome」の行）で分かります。
+Flatpak / Snap の Chrome（`command` に `flatpak run …` を書いたときも。`--filesystem=` の引数も判定に入る）から見えない場所の file:// は、表示用のコピーをアプリから見える場所に写して開きます（[README の claude-browser の節](../README.md#claude-browser)）。
 置き場を変えると、前のプロファイル（ログイン）と台帳は引き継がれません。窓の配置は KDE Plasma の KWin で、Chrome の窓は `--class=claude-browser-<名前>`（X11 では WM_CLASS、Wayland では app_id になる）で見分けます。macOS は試験的に、kitty の窓の位置を CoreGraphics で読み、Chrome の窓を CDP（`Browser.setWindowBounds`）で置きます（「常に最前面」は無い。置けなければ普通の窓のまま開く。[SETUP.md の macOS の節](../SETUP.md#macos-での導入)）。
 
 ## state（claude-state: 状態の色）

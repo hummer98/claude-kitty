@@ -478,7 +478,10 @@ def check_browser(ctx, rep):
         how = f"Snap の {b['name']}"
     else:
         how = cmd[0]
-    rep.ok("Chrome", f"{how}{'（設定の browser.command）' if b['configured'] else ''}、プロファイル {b['profile_root']}")
+    note = ""
+    if b["kind"] in ("flatpak", "snap"):  # 不具合ではないので ok のまま、開き方の違いを知らせる（lib/sandboxfs.py）
+        note = "。サンドボックスなのでホームの一部しか見えない。見えない場所の file:// は、アプリから見える場所に写して開く"
+    rep.ok("Chrome", f"{how}{'（設定の browser.command）' if b['configured'] else ''}、プロファイル {b['profile_root']}{note}")
 
 
 def check_desktop(ctx, rep):

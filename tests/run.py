@@ -1492,6 +1492,82 @@ class StateInterruptsAndSessions(unittest.TestCase):
         r = transition(r, "PostToolUse", dict(BASH_A, agent_id="a"), 1000)
         self.assertEqual(r["state"], "working")
 
+    def test_manual_wait_ends_with_the_next_turn(self):
+        # 回帰: 問いを残して waiting を付けたあと、人は打たず、他のセッションからのメッセージで何ターンも作業して、
+        # 最後は問いの無い報告で終わった。それでも付けたときの待受の色が残っていた
+        ask = [("UserPromptSubmit", {"prompt": "設計を考えて"}), ("manual-waiting", {}), ("Stop", {})]
+        for prompt in (peer_prompt("この件を進めて"), "<task-notification>\n<task-id>x</task-id>"):
+            sts, rec = run_events(ask + [("UserPromptSubmit", {"prompt": prompt}), ("PreToolUse", BASH_B),
+                                         ("PostToolUse", BASH_B), ("Stop", {})])
+            self.assertEqual(sts[2:5], ["waiting", "waiting", "waiting"], prompt)  # 付けたターンの Stop では残る
+            self.assertEqual((rec["state"], rec["waits"]), ("done", {}), prompt)
+            # そのターンで付け直せば、新しいターンの印として残る
+            sts, rec = run_events(ask + [("UserPromptSubmit", {"prompt": prompt}), ("manual-waiting", {}),
+                                         ("Stop", {})])
+            self.assertEqual((rec["state"], list(rec["waits"]), rec["waits"]["manual"].get("older")),
+                             ("waiting", ["manual"], None), prompt)
+            # 付け直したターンの次のターンでは、また消える
+            _, rec = run_events([("UserPromptSubmit", {"prompt": prompt}), ("Stop", {})], prev=rec, t0=500)
+            self.assertEqual(rec["state"], "done", prompt)
+        # 人が打てばすぐ消える（Stop を待たない）
+        sts, _ = run_events(ask + [("UserPromptSubmit", {"prompt": "続けて"})])
+        self.assertEqual(sts[-1], "working")
+
+    def test_manual_wait_ends_with_a_quiet_notice_turn(self):
+        # 通知で始まったターン（色を変えない）でもセッションは返答を書く: 最後の返答はもう問いでない
+        _, rec = run_events([("UserPromptSubmit", {}), ("manual-waiting", {}), ("Stop", {}),
+                             ("UserPromptSubmit", {"prompt": peer_prompt("【通知】x"), "_notice": True})])
+        self.assertEqual((rec["state"], rec["quiet"]), ("waiting", True))
+        st = transition(rec, "Stop", {}, 900)
+        self.assertEqual((st["state"], st["waits"]), ("done", {}))
+
+    def test_manual_wait_of_an_earlier_turn_ends_on_escape(self):
+        # Esc で止めると Stop が来ない。入力欄に戻った通知で、Stop と同じく前のターンの手の待ちを外す
+        _, rec = run_events([("UserPromptSubmit", {}), ("manual-waiting", {}), ("Stop", {}),
+                             ("UserPromptSubmit", {"prompt": peer_prompt("この件を進めて")}),
+                             ("Notification", {"notification_type": "idle_prompt"})])
+        self.assertEqual((rec["state"], rec["waits"]), ("idle", {}))
+
+    def test_manual_wait_ends_with_a_self_resumed_turn(self):
+        # UserPromptSubmit なしで本体が自分で再開したターン（背景の作業の完了など）も、新しいターン
+        ask = [("UserPromptSubmit", {}), ("manual-waiting", {}), ("Stop", {})]
+        _, rec = run_events(ask + [("PreToolUse", BASH_B), ("PostToolUse", BASH_B), ("Stop", {})])
+        self.assertEqual((rec["state"], rec["waits"]), ("done", {}))
+        _, rec = run_events(ask + [("PreToolUse", BASH_B), ("manual-waiting", {}), ("PostToolUse", BASH_B),
+                                   ("Stop", {})])
+        self.assertEqual((rec["state"], rec["reason"]), ("waiting", "manual"))
+        # 付けたターンの中のツールや、サブエージェントのツールでは消えない
+        _, rec = run_events([("UserPromptSubmit", {}), ("manual-waiting", {}), ("PreToolUse", BASH_B),
+                             ("PostToolUse", BASH_B), ("Stop", {}), ("PreToolUse", dict(BASH_B, agent_id="b")),
+                             ("Stop", {})])
+        self.assertEqual((rec["state"], rec["reason"]), ("waiting", "manual"))
+
+    def test_manual_wait_kept_through_a_mid_turn_prompt(self):
+        # ターンの途中に来た UserPromptSubmit（背景の作業の通知など）は新しいターンではない: 付けたターンの Stop で残る
+        _, rec = run_events([("UserPromptSubmit", {}), ("manual-waiting", {}),
+                             ("UserPromptSubmit", {"prompt": "<task-notification>\n<task-id>x</task-id>"}),
+                             ("Stop", {})])
+        self.assertEqual((rec["state"], rec["reason"]), ("waiting", "manual"))
+
+    def test_manual_wait_kept_through_stop_failure(self):
+        # StopFailure は返答を書けていない: 前のターンの手の待ちは残し、次のターンの Stop で外す
+        _, rec = run_events([("UserPromptSubmit", {}), ("manual-waiting", {}), ("Stop", {}),
+                             ("UserPromptSubmit", {"prompt": peer_prompt("この件を進めて")}), ("StopFailure", {})])
+        self.assertEqual((rec["state"], rec["reason"]), ("waiting", "manual"))
+        _, rec = run_events([("UserPromptSubmit", {"prompt": peer_prompt("次")}), ("Stop", {})], prev=rec, t0=900)
+        self.assertEqual((rec["state"], rec["waits"]), ("done", {}))
+
+    def test_legacy_manual_wait_without_turn(self):
+        # 前の版の記録（manual に at だけ・state と reason だけ）: 付けたターンの Stop では残り、次のターンの Stop で消える
+        for prev in ({"state": "waiting", "reason": "manual", "since": 5},
+                     {"state": "waiting", "reason": "manual", "since": 5, "main": False, "seen": False, "quiet": False,
+                      "waits": {"manual": {"kind": "manual", "agent": None, "at": 5}}, "agents": {}}):
+            st = transition(prev, "Stop", {}, 10) or prev  # 変わらなければ None
+            self.assertEqual(st["state"], "waiting")
+            sts, rec = run_events([("UserPromptSubmit", {"prompt": peer_prompt("この件を進めて")}), ("Stop", {})],
+                                  prev=st, t0=20)
+            self.assertEqual((sts, rec["waits"]), (["waiting", "done"], {}))
+
     def test_stop_drops_waits_of_agents_no_longer_running(self):
         _, rec = run_events([("UserPromptSubmit", {}), ("SubagentStart", {"agent_id": "a"}),
                              ("PermissionRequest", dict(BASH_A, agent_id="a")), ("Stop", {"background_tasks": []})])
@@ -2421,6 +2497,19 @@ class ClaudeStateCli(unittest.TestCase):
         self.assertEqual(self.cli("get", self.SID).stdout.strip(), "waiting")
         self.hook("UserPromptSubmit")
         self.assertEqual(self.state()["state"], "working")
+        self.assertEqual(self.titles(), [MARK + "standby", "standby"])
+
+    def test_manual_waiting_ends_after_a_peer_turn_without_it(self):
+        # 回帰: 問いを残したあと、他のセッションからのメッセージのターンが waiting を呼ばずに終われば done に戻る
+        self.hook("UserPromptSubmit")
+        self.cli("waiting", CLAUDE_CODE_SESSION_ID=self.SID)
+        self.hook("Stop")
+        self.assertEqual(self.state()["state"], "waiting")
+        self.hook("UserPromptSubmit", {"prompt": peer_prompt("この件を進めて")})
+        self.assertEqual(self.state()["state"], "waiting")
+        self.hook("Stop")
+        self.assertEqual((self.state()["state"], self.state()["waits"]), ("done", {}))
+        self.assertEqual(self.colors()[-1][-1], "background=#222b25")
         self.assertEqual(self.titles(), [MARK + "standby", "standby"])
 
     def test_manual_waiting_finds_session_by_window(self):

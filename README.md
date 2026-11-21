@@ -129,7 +129,9 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
 - `move …` / `close` / `shot FILE`（CDP）/ `url` / `status` / `list` / `profiles` / `note TEXT`
 - タブの切り替えや分割比の変更には追従しないので、そのときは `move` を呼ぶ。
 - 置いたあと 0.4 秒待って実際の窓の矩形を KWin から読み、指定とずれていれば直す（1 度目は同じ矩形を置き直す: 最大化の解除などで Chrome が後から前の大きさに戻すため。それでもずれていれば、各辺 64px 以内のずれだけを一定のずれ（窓の装飾の分など）として打ち消し、悪くなったら指定の矩形に戻す）。最大化の解除は、最大化しているときだけ行う。直らなければ stderr に指定と実際を出す。
-- Flatpak の Chrome はホームの任意の場所を読めない。file:// で手元の資料を開くなら `flatpak override --user --filesystem=~/docs:ro com.google.Chrome` のように許可する。
+- Flatpak / Snap の Chrome はホームの一部しか読めない。`open` に渡した file:// がサンドボックスの中から見えない場所なら（Flatpak は `flatpak info --show-permissions` と override の filesystems、Snap は home インターフェースで判定。分からなければ見えない側）、表示用のコピーをアプリから見える場所（Flatpak は `~/.var/app/<アプリ ID>/claude-show/<ハッシュ>/`、Snap は `~/snap/<名前>/common/claude-show/<ハッシュ>/`）に写して、そちらを開く。HTML は同じフォルダの中を指す相対参照の資源（img・script・link・srcset・CSS の `url()`・`@import`）も同じ位置に写す（`../` や絶対パスの参照は写さず stderr に 1 行。資源の合計が 50MB を超えれば HTML だけ）。写しは 1 日で消す。ネイティブの Chrome では写さない。iframe・object の先の資源、JS の `import`、リンク先の HTML は写さない。
+  - 元のファイルは動かさない。結果の JSON の `target` は元の URL のまま、`staged` が表示用のコピー、`note` にその旨。直すのは元のファイルで、直したら `open`（`claude-show`）を呼び直せば毎回写し直す。
+  - 写さずに見せたい場所は `flatpak override --user --filesystem=~/docs:ro com.google.Chrome` のように許可してもよい。
 - 返り値の `cdp` URL に Playwright の `connectOverCDP` などで接続して操作できる。
 - プロファイルは置き場の `<key>` に残るので、パスキー等のログインは一度人が済ませれば以後使える。
 - 窓の配置は KDE Plasma の KWin（`qdbus`・`qdbus6`・`qdbus-qt6` のどれか）。Linux で KWin が無ければ、何が足りないかを出して止まる。macOS は試験的に、kitty の窓の位置を CoreGraphics で読み、Chrome の窓を CDP で置く（「常に最前面」は無い。置けなければ止めずに普通の窓のまま開く。[SETUP.md](SETUP.md#macos-で使えるもの試験的なもの使えないもの)）。
@@ -150,10 +152,10 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 
 数え方（hook の入力は Claude Code 2.1.328 で記録して確認した）:
 
-- 待ち: 許可は PermissionRequest で足し、同じエージェント・同じツール名・同じ入力の PostToolUse / PostToolUseFailure で外す（PermissionRequest には tool_use_id が無いため）。質問は tool_use_id で照合する。手の `claude-state waiting` は次の UserPromptSubmit まで残る。UserPromptSubmit では本体の待ちを外す（手の待ちは、人が打ったときだけ。背景の作業の完了の通知や他のセッションからのメッセージでも UserPromptSubmit は来るため）。サブエージェントの待ちは、そのエージェントの hook で外す。本体の Stop は本体の待ちと、もう動いていないサブエージェントの待ちを、SubagentStop はそのサブエージェントの待ちを外す。
+- 待ち: 許可は PermissionRequest で足し、同じエージェント・同じツール名・同じ入力の PostToolUse / PostToolUseFailure で外す（PermissionRequest には tool_use_id が無いため）。質問は tool_use_id で照合する。手の `claude-state waiting` は呼んだターンのもの: そのターンの Stop では残り、人が打った UserPromptSubmit ですぐ外れる。背景の作業の完了の通知や他のセッションからのメッセージ（通知のターンも）で始まったターンや、UserPromptSubmit なしで本体が自分で再開したターンでは、その Stop までに呼び直されなければ、その Stop（Esc で止めたときは入力欄に戻った通知）で外す（色を最後の返答の中身に合わせるため）。StopFailure では外さない（返答を書けていないため）。UserPromptSubmit では本体の待ちを外す。サブエージェントの待ちは、そのエージェントの hook で外す。本体の Stop は本体の待ちと、もう動いていないサブエージェントの待ちを、SubagentStop はそのサブエージェントの待ちを外す。
 - サブエージェント: SubagentStart で足し、SubagentStop で外す（入力の `agent_id`）。本体の Stop の `background_tasks` に合わせ直すので、SubagentStop を取りこぼしても残らない。数えるのは subagent・workflow・teammate・cloud session で、shell と monitor は数えない（`tail -f` などがずっと作業中に見えてしまうため）。
 - 本体: UserPromptSubmit で動き、Stop / StopFailure で止まる。Stop のあとにツールの hook が来たら（背景の作業の完了で本体が自分で再開したときなど）また動いているとする。自動の compact（SessionStart の `source` が `compact`）では状態を変えない。
-- 他のセッションからのメッセージで、本文に「通知」の印（設定 `state.notice`。既定は空で、何も通知とみなさない。例は「返事は不要」を含む・「【通知】」で始まる。[docs/config.md](docs/config.md)）があるターンは、色を変えない（作業中にも見せず、終わっても done にしない）。UserPromptSubmit の `prompt` の `<cross-session-message>` で見分け、分からなければ Stop のときに会話記録（`transcript_path`）の、そのターンを始めた記録（`turnOrigin` が `peer` で、`origin.body` が本文）で確認して、ターンの前の状態に戻す。印の無い依頼は、ふつうどおり終われば done。通知のターンの中で始まったサブエージェントは、ふつうどおり作業中に見せる（動いているものは見せる）。
+- 他のセッションからのメッセージで、本文に「通知」の印（設定 `state.notice`。既定は空で、何も通知とみなさない。例は「返事は不要」を含む・「【通知】」で始まる。[docs/config.md](docs/config.md)）があるターンは、色を変えない（作業中にも見せず、終わっても done にしない。ただし前のターンの手の待受は、このターンの終わりで消える）。UserPromptSubmit の `prompt` の `<cross-session-message>` で見分け、分からなければ Stop のときに会話記録（`transcript_path`）の、そのターンを始めた記録（`turnOrigin` が `peer` で、`origin.body` が本文）で確認して、ターンの前の状態に戻す。印の無い依頼は、ふつうどおり終われば done。通知のターンの中で始まったサブエージェントは、ふつうどおり作業中に見せる（動いているものは見せる）。
 
 既知の制限:
 
@@ -177,7 +179,7 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
   - 色の確認: kitty が設定を読み直すと全ペインの色が消える。watch は 1 秒ごとに、記録のある各ペインの色を get-colors で見て（1 回約 1 ms）、記録の `background`（hook が書いた色。watch が起動時に読んだ設定ではない）と 2 回続けて違ったペインを、記録の色で塗り直す。1 回だけの違いは、hook が記録を書いてから set-colors するまでの間かもしれないので待つ。set-colors の失敗や、idle にした直後に hook が割り込んだときの食い違いも、これで直る。手で `set-colors` した色も、記録のあるペインなら 2 秒ほどで戻される。
   - 制限: 1 秒ごとに見るので、1 秒より短くよそへ移ってすぐ戻ったのは、離れたと気づかないことがある。消えるのは、続けて 2 秒見てから最大 1 秒後。設定（`state.watch_sockets`）は起動時にだけ読む（変えたら `systemctl --user restart claude-state-watch`、macOS は `launchctl kickstart -k gui/$(id -u)/claude-kitty.state-watch`）。`watch_sockets` や `--to` で固定のパスを使い、kitty を起動し直すと、ペインの id が振り直されて古い記録に当たることがある（既定の `kitty-<pid>` では起きない）。
 - `claude-state watch [--to SOCKET]... [--interval 1] [--once]`: 上の常駐。`--once` は 1 回だけ見て終わる（数え始めるだけなので、ふつうは何も変えない。socket に届くかの確認用）。
-- `claude-state waiting`: ふつうの文で問いを残したときに担当が手で呼ぶ。Stop でも done に変わらず、次の UserPromptSubmit で working に戻る。
+- `claude-state waiting`: ふつうの文で問いを残したときに担当が手で呼ぶ。そのターンの Stop でも done に変わらず、人が打てば working に戻る。人が打たずに次のターンが始まったとき（他のセッションからのメッセージなど）は、そのターンの最後の返答でも呼べば待受のまま、呼ばなければその Stop で待受が消える。
 - `claude-state list [--json] [--all]`: 統括用。1 行 1 セッションで role・状態・続いている時間（waiting・done・working・idle の順）。`--all` は claude が動いていない古い記録も出す。
 - `claude-state get [SESSION_ID]` / `claude-state paint SESSION_ID TEXT`: ステータス行用（状態の 1 語 / TEXT を状態の色で）。SESSION_ID を省くと `$CLAUDE_CODE_SESSION_ID`。
 - `claude-state marks [--clear]`: タブの題の「●」を付け直す（ふつうは hook と claude-view が行う）。
@@ -214,7 +216,8 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 
 `claude-show FILE_OR_URL [--ratio 0.6]` — 見てほしいものを開く。結果は 1 行の JSON。
 
-- HTML（`.html`/`.htm`）と URL: `claude-browser open <file:// か URL> --area others --mode show --focus none`（左の列を除いた右側のうち、自分のペインの横を避けた広い方を縦 100% で覆い、会話は見せたまま。入力先は動かさない。`--ratio` を付ければその場所の上から何割）。Flatpak の Chrome から見える場所に置くこと（claude-browser の項）。
+- HTML（`.html`/`.htm`）と URL: `claude-browser open <file:// か URL> --area others --mode show --focus none`（左の列を除いた右側のうち、自分のペインの横を避けた広い方を縦 100% で覆い、会話は見せたまま。入力先は動かさない。`--ratio` を付ければその場所の上から何割）。Flatpak / Snap の Chrome から見えない場所なら、claude-browser が表示用のコピーを写して開く（claude-browser の項）。
+  - そのときも `target` は元のファイルのままで、`staged` に表示用のコピー、`note` に「直すのは元のファイル。直したらもう一度呼ぶと写し直す」が入る。写さなかった参照などの知らせは `warnings` に入る。
 - 画像（png/jpg/jpeg/webp/gif/svg）: 自分のペインに kitty の overlay を重ねて `kitten icat --hold` で表示する。閉じるには、overlay をクリックしてからキーを押す。svg などは ImageMagick があれば表示できる。
 - 入力先は変えない（overlay も常に `--keep-focus`。ユーザーが打っている途中の文字が overlay に吸われないように）。自分のペインが表示されていないタブにあれば、その旨を `note` に書く。
 - 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確認できないときも同じ）。

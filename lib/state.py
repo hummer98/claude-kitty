@@ -179,8 +179,8 @@ def _reconcile(agents, tasks, now):
 def transition(prev, event, payload, now):
     """前の状態 prev（state ファイルの中身か None）と hook のイベントから、次の記録を返す。
 
-    記録は待ち（waits: 鍵 → {kind, agent, at}）・サブエージェント（agents: id → {type, start, end, bg}）・
-    本体が動いているか（main）・終わったあと見たか（seen）を持ち、state はそこから derive() で決める。
+    記録は待ち（waits: 鍵 → {kind, agent, at}。手の待ちは、付けた後のターンに入ると older も持つ）・
+    サブエージェント（agents: id → {type, start, end, bg}）・本体が動いているか（main）・終わったあと見たか（seen）を持ち、state はそこから derive() で決める。
     変えないときは None。SessionEnd は {"state": "end"}（ファイルを消して色を戻す）。
     """
     prev = prev or {}
@@ -207,6 +207,7 @@ def transition(prev, event, payload, now):
             if ag is None or ag.get("end") is not None:
                 agents[a] = {"type": payload.get("agent_type"), "start": now, "end": None, "bg": bool((ag or {}).get("bg"))}
         elif not rec.get("quiet"):  # 通知で始まったターンは、作業中にも見せない
+            new_turn()  # UserPromptSubmit なしで本体が自分で再開したターン（背景の作業の完了など）も、新しいターン
             if not rec["main"]:
                 rec["seen_before"] = rec["seen"]
             rec["main"] = True
@@ -215,14 +216,26 @@ def transition(prev, event, payload, now):
         for k in [k for k, w in waits.items() if pred(k, w)]:
             del waits[k]
 
+    def new_turn():
+        # 手の「問いを残した」は付けたターンのもの。本体の新しいターンが始まったら印を付け、そのターンの Stop までに
+        # 付け直されなければ外す（最後の返答が問いでなくなったのに待受の色が残らないよう）。ターンの途中に来た
+        # UserPromptSubmit では付けない（付けたそのターンで消えてしまう）
+        if rec["main"] or rec.get("quiet"):
+            return
+        for w in waits.values():
+            if w.get("agent") is None and w.get("kind") == "manual":
+                w["older"] = True
+
     if event == "UserPromptSubmit":
+        new_turn()
         if payload.get("_notice") and not rec["main"]:
             # 他のセッションからの通知で始まったターン: 前の状態（idle / done）のまま見せ、終わっても done にしない
+            # （前のターンの手の待ちは、ほかのターンと同じくこのターンの Stop で外す）
             rec["quiet"] = True
         else:
             # 本体が入力を受けた = 本体の問い・許可の画面は閉じている。サブエージェントの待ちは、そのエージェントの
             # hook で外す（背景の作業の完了の通知や、他のセッションからの依頼でも UserPromptSubmit は来るため）。
-            # 手の「問いを残した」は、人が打ったときだけ外す
+            # 手の「問いを残した」は、人が打ったときはすぐ外す（そうでなければ、このターンの Stop で外す）
             human = not _system_prompt(payload.get("prompt"))
             drop(lambda k, w: w.get("agent") is None and (human or w.get("kind") != "manual"))
             if not rec["main"]:
@@ -238,8 +251,11 @@ def transition(prev, event, payload, now):
             rec["seen"] = rec["seen_before"]
         else:
             rec["seen"] = False  # 応答が 1 回終わった = 新しく読むものがある（見ていれば呼ぶ側が seen にする）
-        # 担当が手で「問いを残した」と付けたら、その返事（次の UserPromptSubmit）まで待受のまま
-        drop(lambda k, w: w.get("agent") is None and w.get("kind") != "manual")
+        # 担当が手で「問いを残した」と付けたターンの Stop では待受のまま。次のターン（他のセッションからのメッセージ・
+        # 背景の作業の完了の通知で始まったものも）で付け直さなければ、そのターンの Stop で外す
+        # StopFailure（API のエラーなど）では返答を書けていないので、前のターンの手の待ちは次のターンまで残す
+        drop(lambda k, w: w.get("agent") is None
+             and (w.get("kind") != "manual" or (w.get("older") and event == "Stop")))
         if isinstance(payload.get("background_tasks"), list):
             _reconcile(agents, payload["background_tasks"], now)
             running = set(running_agents(rec))
@@ -290,7 +306,8 @@ def transition(prev, event, payload, now):
             interrupted = rec["main"]
             rec["main"] = False
             rec["quiet"] = False
-            drop(lambda k, w: w.get("agent") is None and w.get("kind") != "manual")
+            # Esc で止めたターンも Stop と同じ: 前のターンの手の待ちは外す
+            drop(lambda k, w: w.get("agent") is None and (w.get("kind") != "manual" or w.get("older")))
             # 前面のサブエージェントは本体のターンの中でしか動かない。入力欄に戻っているなら終わっている
             for k in [k for k, v in agents.items() if v.get("end") is None and not v.get("bg")]:
                 del agents[k]

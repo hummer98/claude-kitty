@@ -18,6 +18,7 @@ kitty は縮めない（縮めると全ペインの claude-code が再描画で�
 プロファイル名は起動し直しても変わらないもの（ペインの user var role > slot > セッション ID）。
 プロファイルは残すので、パスキー等のログインは一度人が済ませれば以後そのまま使える。
 起動する Chrome（Chromium）は設定の browser.command、無ければ自動で探す（順は lib/browser.py。status に出る）。
+Flatpak / Snap の Chrome から見えない場所の file:// は、アプリから見える場所に写して開く（lib/sandboxfs.py）。
 窓の配置は KDE Plasma の KWin。macOS は試験的に、kitty の窓の矩形を CoreGraphics（lib/macwin.py）で読み、
 Chrome の窓を CDP の Browser.setWindowBounds で置く（「常に最前面」は無い。置けなければ普通の窓のまま開く）。
 """
@@ -488,12 +489,23 @@ def launch_argv(command, profile, port, cls, url):
                             f"--class={cls}", *CHROME_FLAGS, "--new-window", url]
 
 
+def visible_url(url, env=None, run=subprocess.run):
+    """(開く URL, 写したことの dict か None)。サンドボックス（Flatpak / Snap）の Chrome から見えない file:// は、
+    アプリから見える場所に写してそちらを開く（lib/sandboxfs.py）。ネイティブの Chrome ではそのまま。"""
+    from sandboxfs import prepare_url
+    env = os.environ if env is None else env
+    sandbox = (BROWSER or {}).get("sandbox")
+    return prepare_url(url, sandbox, Path.home(), env, run=run, argv=CHROME, warn=warn)
+
+
 def cmd_open(args, key):
     st = load_state(key) or {}
     profile = PROFILE_ROOT / key
     if not CHROME and not running(profile)[0]:  # kitty や KWin を呼ぶ前に止める
         die(NO_BROWSER)
     prep = prepare(args, st)
+    asked = args.url
+    url, copied = visible_url(asked)  # 配置先が決まってから写す（この後で止まっても、写しは 1 日で消える）
     cls = f"claude-browser-{key}"
     pids, port = running(profile)
     if pids:
@@ -502,7 +514,7 @@ def cmd_open(args, key):
             die(f"このプロファイルの Chrome (pid {pids[0]}) が応答しない。claude-browser close で止める")
         st.update(port=port, **{"class": cls, "profile": str(profile)})
         save_state(key, st)
-        node(port, "goto", args.url)  # タブが無ければ cdp.mjs が作る
+        node(port, "goto", url)  # タブが無ければ cdp.mjs が作る
         if not wait_window(cls, 10, port):
             die("Chrome の窓が出てこない")
     else:
@@ -513,7 +525,7 @@ def cmd_open(args, key):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         with open(STATE_DIR / f"{key}.log", "wb") as log:  # 毎回作り直す（溜め込まない）
             try:
-                subprocess.Popen(launch_argv(CHROME, profile, port, cls, args.url),
+                subprocess.Popen(launch_argv(CHROME, profile, port, cls, url),
                                  stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
             except OSError as e:
                 die(f"Chrome を起動できない（{' '.join(CHROME)}: {e}）。設定の browser.command を確認する")
@@ -523,9 +535,13 @@ def cmd_open(args, key):
             die(f"Chrome が起動しない（ログ: {STATE_DIR / (key + '.log')}）")
     rect = placement(st, *prep)
     save_state(key, st)
-    print(json.dumps({"key": key, "port": port, "cdp": f"http://127.0.0.1:{port}",
-                      "rect": rect, "mode": st["mode"], "area": st["area"], "profile": str(profile)}), flush=True)
-    update_ledger(key, url=args.url, pane_vars=own_vars(kitty_ls(kitty_socket()), own_window_id()))
+    out = {"key": key, "port": port, "cdp": f"http://127.0.0.1:{port}",
+           "rect": rect, "mode": st["mode"], "area": st["area"], "profile": str(profile)}
+    if copied:  # 開いたのは表示用のコピー。target は元のまま（直すのは元のファイル）
+        from sandboxfs import staged_fields
+        out.update(target=asked, **staged_fields(copied))
+    print(json.dumps(out, ensure_ascii=False), flush=True)
+    update_ledger(key, url=asked, pane_vars=own_vars(kitty_ls(kitty_socket()), own_window_id()))
 
 
 def need_running(key):

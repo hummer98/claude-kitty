@@ -413,6 +413,7 @@ class Doctor(unittest.TestCase):
         self.assertEqual(it["status"], "ok")
         self.assertIn("/usr/bin/google-chrome", it["detail"])
         self.assertIn(".local/share/claude-kitty/browser-profiles", it["detail"])
+        self.assertNotIn("写して開く", it["detail"])
 
     def test_flatpak_chrome(self):
         self.which_map["flatpak"] = "/usr/bin/flatpak"
@@ -421,6 +422,7 @@ class Doctor(unittest.TestCase):
         self.assertEqual(it["status"], "ok")
         self.assertIn("Flatpak の com.google.Chrome", it["detail"])
         self.assertIn(".var/app/com.google.Chrome/claude-profiles", it["detail"])
+        self.assertIn("写して開く", it["detail"])  # 注意でなく情報（ok のまま）
 
     def test_nothing(self):
         it = self.items()["Chrome"]
@@ -453,6 +455,473 @@ class Doctor(unittest.TestCase):
         self.assertEqual(it["status"], "warn")
         self.assertIn("qdbus", it["detail"])
         self.assertIn("KDE Plasma", it["fix"])
+
+
+# ---------- サンドボックスの Chrome から見えない file:// を写して開く（lib/sandboxfs.py） ----------
+import sandboxfs as S  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+PERMS = """[Context]
+shared=ipc;network;
+filesystems=xdg-config/gtk-3.0:ro;host-etc;xdg-pictures;xdg-documents;~/.config/dconf:ro;~/research:ro;xdg-download;/run/.heim:ro;
+
+[Session Bus Policy]
+filesystems=home;
+"""
+
+
+class FakeRun:
+    """run の偽物。answers は (argv の頭のタプル) → (returncode, stdout)。無いものは「入っていない」（OSError）。"""
+
+    def __init__(self, answers):
+        self.answers, self.calls = answers, []
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        for head, (code, out) in self.answers.items():
+            if tuple(argv[:len(head)]) == head:
+                return SimpleNamespace(returncode=code, stdout=out, stderr="")
+        raise FileNotFoundError(argv[0])
+
+
+class SandboxTmp(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(os.path.realpath(self.tmp.name))
+        self.home = self.root / "home"
+        self.home.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_for(self, perms=PERMS, user="", system="", docs=None):
+        docs = str(self.home / "Documents") if docs is None else docs
+        return FakeRun({("flatpak", "info", "--show-permissions"): (0, perms),
+                        ("flatpak", "override", "--user", "--show"): (0, user),
+                        ("flatpak", "override", "--system", "--show"): (0, system),
+                        ("xdg-user-dir", "DOCUMENTS"): (0, docs + "\n"),
+                        ("xdg-user-dir", "PICTURES"): (0, str(self.home / "Pictures") + "\n"),
+                        ("xdg-user-dir", "DOWNLOAD"): (0, str(self.home) + "\n")})  # 設定が無いとホームが返る
+
+
+class FlatpakParse(SandboxTmp):
+    def test_filesystems_only_from_context(self):
+        self.assertEqual(S.filesystems_of(PERMS),
+                         ["xdg-config/gtk-3.0:ro", "host-etc", "xdg-pictures", "xdg-documents", "~/.config/dconf:ro",
+                          "~/research:ro", "xdg-download", "/run/.heim:ro"])
+        self.assertEqual(S.filesystems_of(""), [])
+        self.assertEqual(S.filesystems_of(None), [])
+
+    def test_modes_and_negation(self):
+        self.assertEqual(S.apply_entries(["home:ro", "~/a:create", "/x/:rw", "!home", "xdg-documents"]),
+                         ["~/a", "/x", "xdg-documents"])
+        self.assertEqual(S.apply_entries(["!home", "home"]), ["home"])  # 否定のあとに許せば効く
+        self.assertEqual(S.apply_entries(["host", "!host:ro", ""]), [])
+        self.assertEqual(S.apply_entries(["home", "!~"]), [])          # ~ と home は同じ場所
+        self.assertEqual(S.apply_entries(["host", "!host:reset"]), [])  # Flatpak 1.14 以降の書き方
+
+    def test_argv_filesystems(self):
+        self.assertEqual(S.argv_filesystems(["flatpak", "run", "--filesystem=home", "--branch", "beta",
+                                             "--nofilesystem", "~/x", "com.google.Chrome", "--filesystem=host"]),
+                         ["home", "!~/x"])  # アプリ ID より後ろはアプリへの引数
+        self.assertEqual(S.argv_filesystems(["google-chrome"]), [])
+        self.assertEqual(S.argv_filesystems(None), [])
+
+    def test_entry_path_kinds(self):
+        env = {"XDG_RUNTIME_DIR": "/run/user/1"}
+        xdg = S.XdgDirs(self.home, env, self.run_for())
+        h = str(self.home)
+        self.assertEqual(S.entry_path("host", self.home, env, xdg), "/")
+        self.assertEqual(S.entry_path("home", self.home, env, xdg), h)
+        self.assertEqual(S.entry_path("~", self.home, env, xdg), h)
+        self.assertEqual(S.entry_path("~/research", self.home, env, xdg), h + "/research")
+        self.assertEqual(S.entry_path("/data/x", self.home, env, xdg), "/data/x")
+        self.assertEqual(S.entry_path("xdg-documents", self.home, env, xdg), h + "/Documents")
+        self.assertEqual(S.entry_path("xdg-documents/sub", self.home, env, xdg), h + "/Documents/sub")
+        self.assertIsNone(S.entry_path("xdg-download", self.home, env, xdg))  # ホームと同じなら無いもの
+        self.assertIsNone(S.entry_path("xdg-music", self.home, env, xdg))     # xdg-user-dir が答えない
+        self.assertEqual(S.entry_path("xdg-config/gtk-3.0", self.home, env, xdg), h + "/.config/gtk-3.0")
+        self.assertEqual(S.entry_path("xdg-config", self.home, {"XDG_CONFIG_HOME": "/cfg"}, xdg), "/cfg")
+        self.assertEqual(S.entry_path("xdg-run/pipewire-0", self.home, env, xdg), "/run/user/1/pipewire-0")
+        for unknown in ("host-os", "host-etc", "xdg-unknown", "weird"):
+            self.assertIsNone(S.entry_path(unknown, self.home, env, xdg), unknown)
+
+    def test_xdg_user_dirs_file_when_command_missing(self):
+        (self.home / ".config").mkdir()
+        (self.home / ".config/user-dirs.dirs").write_text('XDG_DOCUMENTS_DIR="$HOME/ドキュメント"\n')
+        xdg = S.XdgDirs(self.home, {}, FakeRun({}))
+        self.assertEqual(xdg.user_dir("DOCUMENTS"), str(self.home / "ドキュメント"))
+        self.assertIsNone(xdg.user_dir("MUSIC"))
+
+    def test_xdg_cached_within_one_call(self):
+        run = self.run_for()
+        xdg = S.XdgDirs(self.home, {}, run)
+        xdg.user_dir("DOCUMENTS"); xdg.user_dir("DOCUMENTS")
+        self.assertEqual(sum(1 for c in run.calls if c[0] == "xdg-user-dir"), 1)
+
+
+class FlatpakVisible(SandboxTmp):
+    def visible(self, path, run=None, argv=None):
+        box = S.Sandbox({"type": "flatpak", "id": "com.google.Chrome"}, self.home, {}, run or self.run_for(), argv)
+        return box.visible(path)
+
+    def test_allowed_and_not(self):
+        h = self.home
+        self.assertTrue(self.visible(h / "research/a.html"))
+        self.assertTrue(self.visible(h / "Documents/r.html"))
+        self.assertTrue(self.visible(h / ".var/app/com.google.Chrome/claude-show/x/a.html"))  # アプリの場所
+        self.assertFalse(self.visible(h / "claude-kitty/docs/relay-spec.html"))
+        self.assertFalse(self.visible(h / "researchX/a.html"))  # 名前の頭が同じだけの別のフォルダ
+        self.assertFalse(self.visible(h / ".var/app/org.other/a.html"))
+
+    def test_permissions_cached_within_one_call(self):
+        run = self.run_for()
+        box = S.Sandbox({"type": "flatpak", "id": "com.google.Chrome"}, self.home, {}, run)
+        box.visible(self.home / "a"); box.visible(self.home / "b")
+        self.assertEqual(sum(1 for c in run.calls if c[:2] == ["flatpak", "info"]), 1)
+
+    def test_home_and_host(self):
+        run = self.run_for(perms="[Context]\nfilesystems=home:ro;\n")
+        self.assertTrue(self.visible(self.home / "x/a.html", run))
+        self.assertFalse(self.visible("/data/a.html", run))
+        run = self.run_for(perms="[Context]\nfilesystems=host;\n")
+        self.assertTrue(self.visible("/data/a.html", run))
+        self.assertTrue(self.visible(self.home / "x/a.html", run))
+        self.assertFalse(self.visible("/tmp/a.html", run))  # /tmp はサンドボックスのもの
+        self.assertFalse(self.visible("/usr/share/doc/a.html", run))
+        self.assertFalse(self.visible("/var/lib/x/a.html", run))  # /var はサンドボックスのもの（ホームは別に足す）
+
+    def test_override_negation(self):
+        run = self.run_for(perms="[Context]\nfilesystems=home;\n", user="[Context]\nfilesystems=!home;~/ok;\n")
+        self.assertFalse(self.visible(self.home / "x/a.html", run))
+        self.assertTrue(self.visible(self.home / "ok/a.html", run))
+
+    def test_command_line_filesystem(self):
+        run = self.run_for(perms="[Context]\nfilesystems=\n")
+        argv = ["flatpak", "run", "--filesystem=~/proj:ro", "com.google.Chrome"]
+        self.assertTrue(self.visible(self.home / "proj/a.html", run, argv))
+        self.assertFalse(self.visible(self.home / "proj/a.html", run))
+
+    def test_unreadable_permissions_mean_not_visible(self):
+        for run in (FakeRun({}), FakeRun({("flatpak", "info"): (1, "")})):
+            self.assertFalse(self.visible(self.home / "research/a.html", run))
+            self.assertTrue(self.visible(self.home / ".var/app/com.google.Chrome/a.html", run))
+
+    def test_paths_compared_by_realpath(self):
+        # Fedora Atomic 系: /home → /var/home の symlink。どちらの書き方でも同じ判定
+        link = self.root / "homelink"
+        link.symlink_to(self.home)
+        (self.home / "research").mkdir()
+        (self.home / "research/a.html").write_text("x")
+        box = S.Sandbox({"type": "flatpak", "id": "com.google.Chrome"}, link, {}, self.run_for())
+        self.assertTrue(box.visible(link / "research/a.html"))
+        self.assertTrue(box.visible(self.home / "research/a.html"))
+        self.assertFalse(box.visible(link / "other.html"))
+
+
+class SnapVisible(SandboxTmp):
+    CONNECTED = "Interface  Plug           Slot   Notes\nhome       chromium:home  :home  -\n"
+    DISCONNECTED = "Interface  Plug           Slot   Notes\nhome       chromium:home  -      -\n"
+
+    def visible(self, path, out):
+        run = FakeRun({("snap", "connections"): (0, out)} if out is not None else {})
+        return S.Sandbox({"type": "snap", "id": "chromium"}, self.home, {}, run).visible(path)
+
+    def test_home_interface(self):
+        self.assertTrue(self.visible(self.home / "docs/a.html", self.CONNECTED))
+        self.assertFalse(self.visible(self.home / "docs/a.html", self.DISCONNECTED))
+        self.assertFalse(self.visible(self.home / "docs/a.html", None))   # snap を動かせない
+        self.assertFalse(self.visible(self.home / ".hidden/a.html", self.CONNECTED))
+        self.assertFalse(self.visible(self.home / "docs/.cache/a.html", self.CONNECTED))  # 保守的に
+        self.assertFalse(self.visible("/data/a.html", self.CONNECTED))
+        self.assertTrue(self.visible(self.home / "snap/chromium/common/a.html", None))  # 自分の場所
+
+
+class Resources(SandboxTmp):
+    def make_site(self):
+        site = self.home / "proj/docs"
+        (site / "img").mkdir(parents=True)
+        (site / "css").mkdir()
+        (site / "img/a.png").write_bytes(b"A")
+        (site / "img/b.png").write_bytes(b"B")
+        (site / "img/c 1.png").write_bytes(b"C")
+        (site / "img/2x.png").write_bytes(b"D")
+        (site / "bg.png").write_bytes(b"E")
+        (site / "app.js").write_text("1")
+        (site / "css/s.css").write_text('@import "t.css"; body{background:url(../bg.png)} .x{background:url("/abs.png")}')
+        (site / "css/t.css").write_text(".y{background:url('../img/b.png')}")
+        (self.home / "proj/up.png").write_bytes(b"U")
+        (site / "index.html").write_text(
+            '<html><head><link rel="stylesheet" href="css/s.css?v=2"><script src="app.js"></script>'
+            '<style>.z{background:url(img/a.png)}</style></head><body>'
+            '<img src="img/a.png#frag"><img src="img/c%201.png" srcset="img/2x.png 2x, data:x 3x">'
+            '<img src="../up.png"><img src="/etc/passwd"><img src="file:///x.png"><img src="https://e.org/a.png">'
+            '<img src="data:image/png;base64,AA"><img src="missing.png"><a href="other.html">x</a>'
+            '<div style="background:url(img/a.png)"></div></body></html>')
+        return site
+
+    def test_collect(self):
+        site = self.make_site()
+        files, outside = S.collect_resources(str(site / "index.html"))
+        self.assertEqual(sorted(files), ["app.js", "bg.png", "css/s.css", "css/t.css", "img/2x.png", "img/a.png",
+                                         "img/b.png", "img/c 1.png"])
+        self.assertEqual(sorted(outside), sorted(["../up.png", "/etc/passwd", "file:///x.png", "/abs.png"]))
+
+    def test_classify_ref(self):
+        r = "/s"
+        self.assertEqual(S.classify_ref("", r, r), ("skip", None))
+        self.assertEqual(S.classify_ref("#top", r, r), ("skip", None))
+        self.assertEqual(S.classify_ref("//cdn/x.js", r, r), ("skip", None))
+        self.assertEqual(S.classify_ref("mailto:a@b", r, r), ("skip", None))
+        self.assertEqual(S.classify_ref("a/../../x", r, r), ("outside", "a/../../x"))
+
+    def test_broken_html_still_parses(self):
+        site = self.home / "s"
+        site.mkdir()
+        (site / "a.png").write_bytes(b"x")
+        (site / "i.html").write_text('<img src="a.png"><img src="<<<"><div')
+        self.assertEqual(S.collect_resources(str(site / "i.html"))[0], ["a.png"])
+
+
+class PrepareUrl(SandboxTmp):
+    FP = {"type": "flatpak", "id": "com.google.Chrome"}
+
+    def prepare(self, path, sandbox=FP, run=None, **kw):
+        notes = []
+        url = path if isinstance(path, str) else Path(path).as_uri()
+        got = S.prepare_url(url, sandbox, self.home, {}, run=run or self_run(self), warn=notes.append, **kw)
+        return got, notes
+
+    def base(self):
+        return self.home / ".var/app/com.google.Chrome/claude-show"
+
+    def test_native_chrome_does_not_copy(self):
+        f = self.home / "x/a.html"; f.parent.mkdir(); f.write_text("x")
+        run = FakeRun({})
+        (url, copied), notes = self.prepare(f, sandbox=None, run=run)
+        self.assertEqual((url, copied, notes), (f.as_uri(), None, []))
+        self.assertEqual(run.calls, [])  # flatpak も呼ばない
+        self.assertFalse((self.home / ".var").exists())
+
+    def test_visible_is_unchanged(self):
+        f = self.home / "research/a.html"; f.parent.mkdir(); f.write_text("x")
+        (url, copied), _ = self.prepare(f)
+        self.assertEqual((url, copied), (f.as_uri(), None))
+        self.assertFalse(self.base().exists())
+
+    def test_not_file_or_missing_is_unchanged(self):
+        for u in ("https://example.com/a.html", "about:blank", (self.home / "nope.html").as_uri()):
+            (url, copied), _ = self.prepare(u)
+            self.assertEqual((url, copied), (u, None))
+
+    def test_copies_html_and_relative_resources(self):
+        site = Resources.make_site(self)
+        u = (site / "index.html").as_uri() + "#sec"
+        (url, copied), notes = self.prepare(u)
+        dest = Path(copied["to"])
+        self.assertTrue(str(dest).startswith(str(self.base()) + "/"))
+        self.assertEqual(url, dest.as_uri() + "#sec")  # 見出しへのリンクは残す
+        self.assertEqual(copied["from"], str(site / "index.html"))
+        self.assertTrue((site / "index.html").is_file())  # 元は動かさない
+        self.assertIn("元のファイル", copied["note"])
+        self.assertEqual(copied["resources"], 8)
+        for rel in ("img/a.png", "img/c 1.png", "css/s.css", "css/t.css", "bg.png", "app.js"):
+            self.assertTrue((dest.parent / rel).is_file(), rel)
+        self.assertFalse((dest.parent.parent / "up.png").exists())
+        self.assertEqual(len(notes), 1)  # 写さなかったものは 1 行で
+        self.assertIn("../up.png", notes[0])
+        self.assertIn("/etc/passwd", notes[0])
+
+    def test_copy_dest_uses_home_as_given(self):
+        # 開く場所は $HOME の形（/home → /var/home の symlink でも、プロファイルの置き場と同じ書き方）
+        link = self.root / "homelink"
+        link.symlink_to(self.home)
+        f = self.home / "x/a.html"; f.parent.mkdir(); f.write_text("x")
+        url, copied = S.prepare_url(f.as_uri(), self.FP, link, {}, run=self_run(self))
+        self.assertTrue(copied["to"].startswith(str(link / ".var/app/com.google.Chrome/claude-show") + "/"))
+        self.assertEqual(copied["from"], str(f))
+        self.assertTrue(Path(copied["to"]).is_file())
+
+    def test_image_file_is_copied_alone(self):
+        f = self.home / "pics/a.png"; f.parent.mkdir(); f.write_bytes(b"P")
+        (url, copied), notes = self.prepare(f)
+        self.assertEqual(Path(copied["to"]).read_bytes(), b"P")
+        self.assertEqual((copied["resources"], notes), (0, []))
+
+    def test_limit_copies_html_only(self):
+        site = Resources.make_site(self)
+        (url, copied), notes = self.prepare(site / "index.html", limit=3)
+        dest = Path(copied["to"])
+        self.assertEqual([p.name for p in dest.parent.iterdir()], ["index.html"])
+        self.assertEqual(copied["resources"], 0)
+        self.assertTrue(any("上限" in n for n in notes), notes)
+
+    def test_recopy_drops_stale_and_cleans_old(self):
+        f = self.home / "x/a.html"; f.parent.mkdir(); f.write_text("<img src='i.png'>")
+        (f.parent / "i.png").write_bytes(b"1")
+        (_, copied), _ = self.prepare(f)
+        dest = Path(copied["to"]).parent
+        (f.parent / "i.png").unlink()
+        old = self.base() / "0123456789ab"; old.mkdir(); (old / "z.html").write_text("z")
+        young = self.base() / "aaaaaaaaaaaa"; young.mkdir()
+        os.utime(old, (time.time() - 2 * 86400,) * 2)
+        (_, copied2), _ = self.prepare(f)
+        self.assertEqual(Path(copied2["to"]).parent, dest)  # 同じ元は同じ場所
+        self.assertFalse((dest / "i.png").exists())  # 前の写しの残りは消える
+        self.assertFalse(old.exists())
+        self.assertTrue(young.exists())
+
+    def test_recall_recopies_new_content(self):
+        # 元を直して呼び直したら、必ず写し直す（古いコピーを見せない）
+        f = self.home / "x/a.html"; f.parent.mkdir(); f.write_text("v1")
+        (f.parent / "s.css").write_text("old")
+        f.write_text('<link rel="stylesheet" href="s.css">v1')
+        (_, c1), _ = self.prepare(f)
+        f.write_text('<link rel="stylesheet" href="s.css">v2')
+        (f.parent / "s.css").write_text("new")
+        (_, c2), _ = self.prepare(f)
+        self.assertEqual(c1["to"], c2["to"])
+        self.assertIn("v2", Path(c2["to"]).read_text())
+        self.assertEqual((Path(c2["to"]).parent / "s.css").read_text(), "new")
+        self.assertEqual(c2["from"], str(f))
+
+    def test_copy_failure_opens_original(self):
+        f = self.home / "x/a.html"; f.parent.mkdir(); f.write_text("x")
+        (self.home / ".var").write_text("not a dir")  # 写す先を作れない
+        (url, copied), notes = self.prepare(f)
+        self.assertEqual((url, copied), (f.as_uri(), None))
+        self.assertIn("写せなかった", notes[0])
+
+    def test_snap_copies_under_common(self):
+        f = self.home / ".hidden/a.html"; f.parent.mkdir(); f.write_text("x")
+        (url, copied), _ = self.prepare(f, sandbox={"type": "snap", "id": "chromium"}, run=FakeRun({}))
+        self.assertTrue(copied["to"].startswith(str(self.home / "snap/chromium/common/claude-show") + "/"))
+
+
+def self_run(t):
+    return t.run_for(perms="[Context]\nfilesystems=~/research:ro;\n")
+
+
+import time  # noqa: E402
+
+
+class SandboxOfBrowser(unittest.TestCase):
+    def test_sandbox_field(self):
+        b, _ = find({"google-chrome": "/usr/bin/google-chrome"})
+        self.assertIsNone(b["sandbox"])
+        b, _ = find(FLATPAK, flatpaks={"com.google.Chrome"})
+        self.assertEqual(b["sandbox"], {"type": "flatpak", "id": "com.google.Chrome"})
+        b, _ = find({"chromium": "/snap/bin/chromium"})
+        self.assertEqual(b["sandbox"], {"type": "snap", "id": "chromium"})
+        b, _ = find(conf={"command": ["flatpak", "run", "--branch=beta", "org.chromium.Chromium"], "profile_root": None})
+        self.assertEqual(b["sandbox"], {"type": "flatpak", "id": "org.chromium.Chromium"})
+        self.assertIsNone(find()[0]["sandbox"])
+
+
+FAKE_FLATPAK_PERMS = """#!/bin/sh
+echo "$*" >> "$FAKE_LOG/flatpak.calls"
+if [ "$1" = info ] && [ "$2" = --show-permissions ]; then
+  printf '[Context]\\nfilesystems=xdg-download;~/research:ro;\\n'; exit 0
+fi
+[ "$1" = override ] && exit 0
+[ "$1" = info ] && [ "$2" = com.google.Chrome ] && exit 0
+exit 1
+"""
+
+
+class BrowserVisibleUrl(unittest.TestCase):
+    """claude-browser の visible_url（open が使う）を、偽の flatpak を PATH に置いて動かす。"""
+
+    def setUp(self):
+        import importlib.machinery as m
+        import importlib.util as u
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(os.path.realpath(self.tmp.name))
+        self.home, self.fake, self.log = self.root / "home", self.root / "fake", self.root / "log"
+        for d in (self.home, self.fake, self.log):
+            d.mkdir()
+        (self.fake / "flatpak").write_text(FAKE_FLATPAK_PERMS)
+        (self.fake / "flatpak").chmod(0o755)
+        loader = m.SourceFileLoader("claude_browser_v", str(ROOT / "bin/claude-browser"))
+        self.b = u.module_from_spec(u.spec_from_loader("claude_browser_v", loader))
+        loader.exec_module(self.b)
+        self.env = {"PATH": str(self.fake), "HOME": str(self.home), "FAKE_LOG": str(self.log)}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def call(self, url):
+        for name in ("flatpak", "xdg-user-dir", "snap"):
+            q = shutil.which(name, path=self.env["PATH"])
+            assert q is None or q.startswith(str(self.root)), f"本物の {name} に届く PATH: {q}"
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stderr(err):
+            self.b.setup_browser(self.env, strict=True)
+            return self.b.visible_url(url, self.env), err.getvalue()
+
+    def test_flatpak_copies_invisible_file(self):
+        f = self.home / "claude-kitty/docs/relay-spec.html"; f.parent.mkdir(parents=True)
+        f.write_text('<img src="../x.png">')
+        (url, copied), err = self.call(f.as_uri())
+        self.assertEqual(self.b.BROWSER["kind"], "flatpak")
+        self.assertTrue(copied["to"].startswith(str(self.home / ".var/app/com.google.Chrome/claude-show") + "/"))
+        self.assertEqual(url, Path(copied["to"]).as_uri())
+        self.assertIn("../x.png", err)
+        self.assertIn("info --show-permissions com.google.Chrome", (self.log / "flatpak.calls").read_text())
+
+    def test_flatpak_visible_file_unchanged(self):
+        f = self.home / "research/a.html"; f.parent.mkdir(); f.write_text("x")
+        (url, copied), err = self.call(f.as_uri())
+        self.assertEqual((url, copied, err), (f.as_uri(), None, ""))
+
+    def test_native_chrome_unchanged(self):
+        (self.fake / "flatpak").unlink()
+        (self.fake / "google-chrome").write_text(FAKE_CHROME)
+        (self.fake / "google-chrome").chmod(0o755)
+        f = self.home / "x/a.html"; f.parent.mkdir(); f.write_text("x")
+        (url, copied), _ = self.call(f.as_uri())
+        self.assertEqual((url, copied), (f.as_uri(), None))
+        self.assertFalse((self.home / ".var").exists())
+
+
+class ShowStaged(unittest.TestCase):
+    """claude-show は target を元のファイルのままにし、claude-browser の staged・note を足す。"""
+
+    def setUp(self):
+        import importlib.machinery as m
+        import importlib.util as u
+        loader = m.SourceFileLoader("claude_show_c", str(ROOT / "bin/claude-show"))
+        self.show = u.module_from_spec(u.spec_from_loader("claude_show_c", loader))
+        loader.exec_module(self.show)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        (self.d / "c.json").write_text(json.dumps({"view": {"guard": []}}))
+        self.html = self.d / "r.html"; self.html.write_text("<p>x")
+        self.env = {"CLAUDE_KITTY_CONFIG": str(self.d / "c.json"), "KITTY_WINDOW_ID": "4",
+                    "KITTY_LISTEN_ON": "unix:/fake/kitty-1"}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_staged_passed_through_and_target_kept(self):
+        info = {"from": str(self.html), "to": "/h/.var/app/x/claude-show/abc/r.html", "resources": 2,
+                "note": S.staged_note("Flatpak の x")}
+        line = json.dumps({"key": "k", "target": self.html.as_uri(), **S.staged_fields(info)})
+        run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="noise\n" + line + "\n", stderr="")  # noqa: E731
+        code, out = self.show.show(str(self.html), self.env, None, run=run)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["target"], self.html.as_uri())  # 元のファイルのまま（AI が見失わない）
+        self.assertEqual((out["staged"], out["staged_resources"]), (info["to"], 2))
+        self.assertIn("元のファイル", out["note"])
+        self.assertIn("もう一度", out["note"])
+        run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout=json.dumps({"key": "k"}), stderr="")  # noqa: E731
+        out = self.show.show(str(self.html), self.env, None, run=run)[1]
+        self.assertFalse(set(out) & {"staged", "note"})
+        run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout=line, stderr="claude-browser: ../x.png は写していない\n")  # noqa: E731
+        out = self.show.show(str(self.html), self.env, None, run=run)[1]
+        self.assertEqual(out["warnings"], ["claude-browser: ../x.png は写していない"])  # 呼び手に届く
+        self.assertEqual(self.show.browser_staged(""), {})
+        self.assertEqual(self.show.browser_staged("[1]"), {})
 
 
 if __name__ == "__main__":
