@@ -279,6 +279,8 @@ def transition(prev, event, payload, now):
             agents.pop(a, None)  # 前面のもの（と、Claude Code の内部のエージェント）は終われば消す
     elif event == "PreToolUse":
         busy()
+        if a is None and ((waits.get("manual") or {}).get("older") or (waits.get("manual") or {}).get("armed")):
+            del waits["manual"]  # 手の待ちを付けたターンの後で、本体が動き始めた
         key = _perm_key(a, payload)
         # 許可を待っていたエージェントが別のツールを呼び始めた = その許可は片付いた（断られたなど）
         drop(lambda k, w: w.get("agent") == a and w.get("kind") in ("permission", "notify") and k != key

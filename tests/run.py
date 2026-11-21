@@ -1283,6 +1283,31 @@ class StateTransition(unittest.TestCase):
         self.assertEqual(transition(s, "PostToolUse", {}, 2)["state"], "waiting")
         self.assertEqual(transition(s, "UserPromptSubmit", {}, 3)["state"], "working")
 
+    def test_manual_waiting_cleared_when_main_works_after_stop(self):
+        # 手の待ちを付けたターンの後、人が打たずに（他のセッションの依頼・背景の完了の通知）本体が動き始めたら外す
+        for prompt in (None, peer_prompt("順番です"), "<task-notification>\n<task-id>x</task-id>"):
+            evs = [("UserPromptSubmit", {}), ("manual-waiting", {}), ("Stop", {})]
+            if prompt is not None:
+                evs.append(("UserPromptSubmit", {"prompt": prompt}))
+            evs += [("PreToolUse", BASH_A)]
+            sts, rec = run_events(evs)
+            self.assertEqual(sts[2], "waiting", prompt)  # Stop の後も待受のまま（問いを残して止まっている）
+            self.assertEqual(sts[-1], "working", prompt)
+            self.assertNotIn("manual", rec["waits"], prompt)
+
+    def test_manual_waiting_kept_within_its_own_turn(self):
+        # 付けたターンの中で続けてツールを使っても外さない（Stop の前）。サブエージェントのツールでも外さない
+        sts, rec = run_events([("UserPromptSubmit", {}), ("manual-waiting", {}), ("PreToolUse", BASH_A),
+                               ("PostToolUse", BASH_A), ("Stop", {}),
+                               ("PreToolUse", dict(BASH_B, agent_id="x"))])
+        self.assertEqual(sts[1:], ["waiting"] * 5)
+        self.assertIn("manual", rec["waits"])
+
+    def test_manual_waiting_cleared_after_esc_then_work(self):
+        _, rec = run_events([("UserPromptSubmit", {}), ("manual-waiting", {}),
+                             ("Notification", {"notification_type": "idle_prompt"}), ("PreToolUse", BASH_A)])
+        self.assertNotIn("manual", rec["waits"])
+
     def test_session_start_end_and_unknown(self):
         self.assertEqual(transition(None, "SessionStart", {}, 1)["state"], "idle")
         self.assertEqual(transition({"state": "waiting"}, "SessionEnd", {}, 1), {"state": "end"})
@@ -1462,7 +1487,8 @@ class StateInterruptsAndSessions(unittest.TestCase):
     def test_idle_prompt_keeps_done_manual_and_subagents(self):
         self.assertIsNone(transition({"state": "done"}, "Notification", {"notification_type": "idle_prompt"}, 1))
         w = transition({"state": "idle"}, "manual-waiting", {}, 1)
-        self.assertIsNone(transition(w, "Notification", {"notification_type": "idle_prompt"}, 2))  # 手の待ちは残る
+        # 付けたターンを Esc で止めても手の待ちは残る（次のターンで本体が動くか、そのターンが終われば外れる）
+        self.assertIsNone(transition(w, "Notification", {"notification_type": "idle_prompt"}, 2))
         bt = [{"id": "b", "type": "subagent", "status": "running"}]
         _, rec = run_events([("UserPromptSubmit", {}), ("SubagentStart", {"agent_id": "b"}),
                              ("Stop", {"background_tasks": bt}), ("UserPromptSubmit", {}),
@@ -1499,7 +1525,8 @@ class StateInterruptsAndSessions(unittest.TestCase):
         for prompt in (peer_prompt("この件を進めて"), "<task-notification>\n<task-id>x</task-id>"):
             sts, rec = run_events(ask + [("UserPromptSubmit", {"prompt": prompt}), ("PreToolUse", BASH_B),
                                          ("PostToolUse", BASH_B), ("Stop", {})])
-            self.assertEqual(sts[2:5], ["waiting", "waiting", "waiting"], prompt)  # 付けたターンの Stop では残る
+            # 付けたターンの Stop では残り、次のターンが始まってもまだ残る。本体がツールを使い始めたら外れる（PR #1）
+            self.assertEqual(sts[2:6], ["waiting", "waiting", "working", "working"], prompt)
             self.assertEqual((rec["state"], rec["waits"]), ("done", {}), prompt)
             # そのターンで付け直せば、新しいターンの印として残る
             sts, rec = run_events(ask + [("UserPromptSubmit", {"prompt": prompt}), ("manual-waiting", {}),

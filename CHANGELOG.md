@@ -8,11 +8,15 @@
 
 ### 変更
 
-- `claude-state`: 手の待受（`claude-state waiting`）の消え方を変えた。前は人が打つまで消えず、他のセッションからのメッセージや背景の作業の通知で何ターンも作業して、最後は問いの無い報告で終わっても、問いを残したときの待受の色のままだった。今は付けたターンのものとし、付けたターンの Stop では残し、人が打てばすぐ消し、それ以外で始まった次のターン（通知のターンや、本体が自分で再開したターンも）はその Stop までに `claude-state waiting` が呼び直されなければその Stop で消す（Esc で止めたときは入力欄に戻った通知で。StopFailure では返答を書けていないので消さない）。まだ答えを待っているなら、そのターンの最後の返答でも呼び直す。前の版の記録（manual に at だけ）は、次のターンの Stop で同じく消える。README・PRACTICES.md の説明も合わせた。
+- `claude-state`: 手の待受（`claude-state waiting`）の消え方を変えた。前は人が打つまで消えず、他のセッションからのメッセージや背景の作業の通知で何ターンも作業して、最後は問いの無い報告で終わっても、問いを残したときの待受の色のままだった。今は付けたターンのものとし、付けたターンの Stop では残し、人が打てばすぐ消し、それ以外で始まった次のターン（通知のターンや、本体が自分で再開したターンも）はその Stop までに `claude-state waiting` が呼び直されなければその Stop で消す（Esc で止めたときは入力欄に戻った通知で。StopFailure では返答を書けていないので消さない）。まだ答えを待っているなら、そのターンの最後の返答でも呼び直す。次のターンで本体がツールを使い始めたら、その時点で消す（mac で使った PR #1 の直しと合わせた）。前の版の記録（manual に at だけ）は、次のターンの Stop で同じく消える。README・PRACTICES.md の説明も合わせた。
+- `claude-kitty`: 起動の前に、呼んだ側の端末の環境変数も消す（`CMUX_*`・`C11_*`・`GHOSTTY_*`・`TMUX`・`TMUX_PANE`・`TERM_PROGRAM`・`TERM_PROGRAM_VERSION`・`KITTY_WINDOW_ID`・`KITTY_LISTEN_ON`・`KITTY_PID`・`WINDOWID`）。cmux（c11）の中の Claude Code から起動すると、kitty の各ペインの claude が「c11 の中に居る」と判断し、c11 用の SessionStart hook が失敗していた。足すものは `CLAUDE_KITTY_UNSET`（名前か `FOO_*`）。`CLAUDE_KITTY_*` と `CLAUDE_VIEW_*` を残すのは今までどおり。
 
 ### 修正
 
 - `claude-browser`・`claude-show`: Flatpak（や Snap）の Chrome で、サンドボックスから見えない場所（Flatpak の filesystems の許可の外など）の file:// を開くと「アクセスできませんでした」になっていた。サンドボックスの Chrome のときだけ、開く file:// が中から見えるかを判定し（Flatpak は `flatpak info --show-permissions` と override の filesystems: host・home・xdg-*・`~/…`・絶対パス・`!` の否定・`flatpak run --filesystem=`。Snap は home インターフェース。読めない・解釈できないときは見えない側）、見えなければ表示用のコピーを `~/.var/app/<アプリ ID>/claude-show/<ハッシュ>/`（Snap は `~/snap/<名前>/common/claude-show/<ハッシュ>/`）に写してそちらを開く。HTML は同じフォルダの中を指す相対参照の資源も同じ位置に写す（`../`・絶対パスの参照は写さず stderr に 1 行。合計 50MB を超えれば HTML だけ）。写しは 1 日で消し、呼び直すと毎回写し直す。元のファイルは動かさず、結果の JSON の `target` は元のまま、`staged` に写した先、`note` に「直すのは元のファイル」を入れる。ネイティブの Chrome では前と同じ。`claude-kitty doctor` の Chrome の行にも、サンドボックスのときはその旨を出す（ok のまま）。
+- `claude-kitty`: macOS で `--class` を渡していた。macOS の kitty（0.51）には `--class` が無く「Unknown flag: --class use --help.」で終わるので、kitty が開かなかった。しかも背景で起動するので 0 で終わり、失敗に気づけなかった。macOS では `--class` を渡さず（`CLAUDE_KITTY_CLASS` は Linux だけ）、`CLAUDE_KITTY_WAIT` 秒（既定 2）のうちに kitty が 0 以外で終わったら kitty のエラーを出して 1 で終わる。
+- `claude-wait`・`claude-roster`: Claude Code の sessions を `~/.claude/sessions` に決め打ちしていた。`$CLAUDE_CONFIG_DIR`（direnv などでプロジェクトごとに分けている）で動く claude を見つけられず、動いている相手を「いない」とみなして同じセッションを 2 か所で開いていた。`CLAUDE_SESSIONS_DIR` > `$CLAUDE_CONFIG_DIR/sessions` > `~/.claude/sessions` の順に見る（`claude-roster` の projects も同じ）。
+- `tools/install.sh`・`tools/release.sh`・`claude-kitty`: macOS の `/bin/sh`（bash 3.2）で、変数のすぐ後ろに全角文字があるメッセージ（`$BIN_DIR（` など）の変数が空になり、出力が UTF-8 として壊れていた（`${名前}` と書く）。
 
 ## [0.6.1] - 2026-11-21
 

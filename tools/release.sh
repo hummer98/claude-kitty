@@ -79,7 +79,7 @@ else
 	echo "release.sh: origin のタグを確認できない（--dry-run なので続ける）" >&2
 fi
 
-echo "版: $ver（タグ $tag → $(git log -1 --format='%h %s' "$target")）"
+echo "版: ${ver}（タグ $tag → $(git log -1 --format='%h %s' "$target")）"
 echo "--- release の本文（CHANGELOG の [$ver] の節） ---"
 printf '%s\n' "$notes"
 echo "---"

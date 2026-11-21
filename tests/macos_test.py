@@ -660,6 +660,27 @@ class SmallFixes(unittest.TestCase):
         with platform(proc, "linux"):
             self.assertEqual(w.find_live(sid)[0], "none")    # Linux は今まで通り比べる（違えば別のプロセス）
 
+    def test_wait_and_roster_use_claude_config_dir(self):
+        # Claude Code は $CLAUDE_CONFIG_DIR/sessions に書く（direnv などでプロジェクトごとに分けている人がいる）。
+        # ~/.claude/sessions だけを見ると、動いている相手を見つけられず同じセッションを 2 か所で開く
+        from unittest import mock
+        cfg = self.d / "proj-config"
+        base = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_SESSIONS_DIR", "CLAUDE_PROJECTS_DIR")}
+        with mock.patch.dict(os.environ, dict(base, CLAUDE_CONFIG_DIR=str(cfg), HOME=str(self.d)), clear=True):
+            w = load_bin("claude-wait", "claude_wait_cfgdir")
+            r = load_bin("claude-roster", "claude_roster_cfgdir")
+        self.assertEqual(w.SESSIONS, cfg / "sessions")
+        self.assertEqual(r.SESSIONS, cfg / "sessions")
+        self.assertEqual(r.PROJECTS, cfg / "projects")
+        with mock.patch.dict(os.environ, dict(base, HOME=str(self.d)), clear=True):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            w = load_bin("claude-wait", "claude_wait_nocfg")
+        self.assertEqual(w.SESSIONS, self.d / ".claude" / "sessions")   # 無ければ今まで通り ~/.claude
+        with mock.patch.dict(os.environ, dict(base, CLAUDE_CONFIG_DIR=str(cfg), CLAUDE_SESSIONS_DIR=str(self.d / "s")),
+                             clear=True):
+            w = load_bin("claude-wait", "claude_wait_explicit")
+        self.assertEqual(w.SESSIONS, self.d / "s")                       # CLAUDE_SESSIONS_DIR が一番強い
+
     def test_view_without_any_kitty(self):
         r = subprocess.run([sys.executable, str(ROOT / "bin/claude-view"), "status"], env=self.env(),
                            capture_output=True, text=True, timeout=10)
@@ -678,6 +699,8 @@ class SmallFixes(unittest.TestCase):
 # ---- claude-kitty（bin/claude-kitty）の macOS ------------------------------------
 
 FAKE_KITTY = """#!/bin/sh
+[ -n "$FAKE_KITTY_ERROR" ] && { echo "$FAKE_KITTY_ERROR" >&2; exit 1; }
+env > "$FAKE_LOG/env.all"
 printf '%s\\n' "$@" > "$FAKE_LOG/kitty.args.tmp"
 mv "$FAKE_LOG/kitty.args.tmp" "$FAKE_LOG/kitty.args"
 """
@@ -733,7 +756,8 @@ class KittyLaunchMac(unittest.TestCase):
     def test_no_detach_and_no_kwin(self):
         r = self.launch({"kitty": {"desktop": 2, "maximize": True}})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.args(), ["--class", "kitty-claude", "--start-as", "normal", "--session", "/x/my.session"])
+        # macOS の kitty には --class が無い（「Unknown flag: --class」で終わる）ので渡さない
+        self.assertEqual(self.args(), ["--start-as", "normal", "--session", "/x/my.session"])
         self.assertIn("kitty.maximize を使わない", r.stderr)
         self.assertIn("kitty.desktop を使わない", r.stderr)
         time.sleep(0.2)
@@ -752,6 +776,50 @@ class KittyLaunchMac(unittest.TestCase):
         r = self.launch(via=link_dir / "claude-kitty", args=("--version",))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn((ROOT / "VERSION").read_text().strip(), r.stdout)
+
+    def test_class_is_not_passed_even_when_set(self):
+        r = self.launch(CLAUDE_KITTY_CLASS="kitty-test")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("--class", self.args())
+
+    def test_kitty_that_fails_to_start_is_reported(self):
+        # 背景で起動するので、そのままだと失敗しても 0 で終わっていた。すぐ 0 以外で終わった kitty はエラーを出して 1
+        r = self.launch(FAKE_KITTY_ERROR="Unknown flag: --class use --help.")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("kitty が起動できなかった", r.stderr)
+        self.assertIn("Unknown flag: --class", r.stderr)
+
+    NESTED = {  # 別の端末（cmux / tmux / 別の kitty）の中の claude-code から呼ばれたときに持ち込まれるもの
+        "CMUX_SURFACE_ID": "s1", "C11_TAB_ID": "t9", "GHOSTTY_RESOURCES_DIR": "/x/ghostty",
+        "TMUX": "/tmp/tmux-501/default,1,0", "TMUX_PANE": "%3", "TERM_PROGRAM": "ghostty", "TERM_PROGRAM_VERSION": "1.2",
+        "KITTY_WINDOW_ID": "7", "KITTY_LISTEN_ON": "unix:/tmp/kitty-1", "KITTY_PID": "1", "WINDOWID": "42",
+        "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "x", "CLAUDE_KITTY_KEEP": "k", "CLAUDE_VIEW_KEEP": "v",
+        "MY_SECRET_X": "1", "OTHER_A": "1", "CMUXLIKE": "keep", "KEEP_ME": "multi\nCMUX_FAKE=1"}
+
+    def env_names(self):
+        self.args()  # 書き終わるのを待つ
+        return {l.split("=", 1)[0] for l in (self.log / "env.all").read_text().splitlines() if "=" in l}
+
+    def test_calling_terminal_env_is_dropped(self):
+        r = self.launch(**self.NESTED)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        names = self.env_names()
+        for gone in ("CMUX_SURFACE_ID", "C11_TAB_ID", "GHOSTTY_RESOURCES_DIR", "TMUX", "TMUX_PANE", "TERM_PROGRAM",
+                     "TERM_PROGRAM_VERSION", "KITTY_WINDOW_ID", "KITTY_LISTEN_ON", "KITTY_PID", "WINDOWID",
+                     "CLAUDECODE", "CLAUDE_CODE_SESSION_ID"):
+            self.assertNotIn(gone, names, gone)
+        for kept in ("CLAUDE_KITTY_KEEP", "CLAUDE_VIEW_KEEP", "MY_SECRET_X", "OTHER_A", "CMUXLIKE", "KEEP_ME", "HOME"):
+            self.assertIn(kept, names, kept)
+
+    def test_claude_kitty_unset_adds_names_and_prefixes(self):
+        r = self.launch(CLAUDE_KITTY_UNSET="MY_SECRET_X OTHER_* bad-name *", **self.NESTED)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        names = self.env_names()
+        self.assertNotIn("MY_SECRET_X", names)
+        self.assertNotIn("OTHER_A", names)
+        self.assertIn("CMUXLIKE", names)
+        self.assertIn("「bad-name」は名前か接頭辞", r.stderr)
+        self.assertIn("「*」は名前か接頭辞", r.stderr)
 
     def test_linux_is_unchanged(self):
         r = self.launch(CLAUDE_KITTY_UNAME="Linux")
