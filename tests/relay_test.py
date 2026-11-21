@@ -39,7 +39,7 @@ import json, os, re, shlex, subprocess, sys
 world = json.load(open({world!r}))
 a = sys.argv[1:]
 open(world["calls"], "a").write(json.dumps(a) + "\n")
-opts, i, key, port = [], 0, None, "22"
+opts, i, key, port, cfg = [], 0, None, "22", None
 while i < len(a) and a[i].startswith("-"):
     if a[i] == "-T":
         i += 1; continue
@@ -49,11 +49,18 @@ while i < len(a) and a[i].startswith("-"):
         opts.append(a[i + 1])
     elif a[i] == "-p":
         port = a[i + 1]
+    elif a[i] == "-F":
+        cfg = a[i + 1]
     else:
         sys.exit("unknown option " + a[i])
     i += 2
 dest, remote = a[i], a[i + 1:]
-for o in ("IdentitiesOnly=yes", "BatchMode=yes", "ConnectTimeout=5", "StrictHostKeyChecking=yes"):
+# 利用者の ssh の設定を読まない・専用の known_hosts だけを信じる・個人の鍵や相乗りに落ちない
+if cfg != "/dev/null":
+    sys.exit("missing -F /dev/null")
+for o in ("IdentitiesOnly=yes", "BatchMode=yes", "ConnectTimeout=5", "StrictHostKeyChecking=yes",
+          "GlobalKnownHostsFile=/dev/null", "ControlMaster=no", "ControlPath=none", "IdentityAgent=none",
+          "PasswordAuthentication=no"):
     if o not in opts:
         sys.exit("missing -o " + o)
 kh = [o.split("=", 1)[1] for o in opts if o.startswith("UserKnownHostsFile=")]
@@ -339,6 +346,32 @@ class Refusals(RelayBase):
         self.assertIn("受信箱に置いた: b/boss", self.send().stdout)
         self.assertEqual(len(self.w.inbox("b", "boss")), 1)
 
+    def test_receivers_ignore_view_left_env(self):
+        # recv は sshd から動き、kitty の中の $CLAUDE_VIEW_LEFT を持たない。hook と食い違わないよう、どちらも設定ファイルだけで決める
+        from config import load_relay_config
+        env = self.w.env("b", CLAUDE_VIEW_LEFT="boss")
+        self.assertEqual(load_relay_config(env)["receivers"], ["main"])
+        self.w.session("b", "sid-b", "main")
+        self.send()
+        r = subprocess.run([sys.executable, str(RELAY), "hook", "UserPromptSubmit"], input='{"session_id": "sid-b"}',
+                           capture_output=True, text=True, env=env, timeout=30)
+        self.assertIn("hi", json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"])
+
+    def test_rate_counts_files_not_log(self):
+        # ログは拒否や ping でも育って回る。数はファイルで数えるので、ログを消しても上限は効く
+        self.w.set_relay("b", rate={"count": 1, "per_seconds": 600})
+        self.assertEqual(self.send().returncode, 0)
+        (Path(self.w.terms["b"]["XDG_STATE_HOME"]) / "claude-kitty/relay/log.jsonl").unlink()
+        self.assertEqual(self.send().returncode, 1)
+        # 渡したあと（delivered/ に移ったもの）も数える
+        self.w.session("b", "sid-b", "main")
+        self.w.hook("b", "UserPromptSubmit", {"session_id": "sid-b"})
+        self.assertEqual(self.send().returncode, 1)
+        # 窓の外のものは数えない
+        for f in (Path(self.w.terms["b"]["XDG_STATE_HOME"]) / "claude-kitty/relay").rglob("*-a.json"):
+            os.utime(f, (1, 1))
+        self.assertEqual(self.send().returncode, 0)
+
     def test_too_big(self):
         self.w.set_relay("b", max_bytes=10)
         r = self.send(body="あいうえお")  # 15 バイト
@@ -360,6 +393,12 @@ class Refusals(RelayBase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("relay.enabled が false", r.stderr)
         self.assertEqual(self.w.inbox("b"), [])
+
+    def test_trailing_newline_in_original_command(self):
+        e = dict(self.w.env("b"), SSH_ORIGINAL_COMMAND="recv main\n")
+        r = subprocess.run([sys.executable, str(RELAY), "recv", "--from", "a"], input='{"body": "x"}',
+                           capture_output=True, text=True, env=e, timeout=30)
+        self.assertEqual(r.returncode, 1)
 
     def test_bad_original_command(self):
         env = self.w.env("b")
@@ -476,6 +515,17 @@ class Hooks(RelayBase):
         self.assertIn("<relay-message", r.stdout)
         self.assertEqual(self.w.inbox("b"), [])
 
+    def test_hook_output_comes_before_cleanup(self):
+        # 印を外す片付け（kitten の待ち）は、渡す文を出したあと
+        self.w.cli("a", "send", "b", "one")
+        env = self.w.env("b")
+        got = R.hook_output("UserPromptSubmit", {"session_id": "sid-b"}, env)
+        out, (role, rest) = got
+        self.assertEqual((role, rest), ("main", 0))
+        self.assertEqual(self.w.record("b", "sid-b")["state"], "waiting")  # まだ外していない
+        R.finish(env, role, rest)
+        self.assertNotEqual(self.w.record("b", "sid-b")["state"], "waiting")
+
 
 class Units(unittest.TestCase):
     def test_escape_body(self):
@@ -511,7 +561,15 @@ class Units(unittest.TestCase):
     def test_ak_line(self):
         line = R.ak_line("mac-a", fake_pub(1) + " c", "/opt/ck/bin/claude-relay")
         self.assertEqual(line, f'command="/opt/ck/bin/claude-relay recv --from mac-a",{R.AK_OPTIONS} {fake_pub(1)} claude-relay:mac-a')
-        self.assertIn("'/a b/claude-relay' recv", R.ak_line("x", fake_pub(1), "/a b/claude-relay"))
+        spaced = R.ak_line("x", fake_pub(1), "/a b/claude-relay")
+        self.assertIn("'/a b/claude-relay' recv", spaced)
+        self.assertTrue(R.ak_is_ours(spaced, "x"))            # 空白のあるパスでも自分の行と分かる
+        self.assertEqual(R.ak_replace(spaced + "\n", "x", spaced), (spaced + "\n", "same"))
+        self.assertEqual(R.ak_replace(spaced + "\n", "x", None), ("", "remove"))
+        with self.assertRaises(ValueError):
+            R.ak_line("x", fake_pub(1), "/a'b/claude-relay")  # 引用で " が入り command="…" を壊す
+        self.assertFalse(R.ak_is_ours(f'command="/x/claude-relay recv --from y",no-pty {fake_pub(1)} claude-relay:x'))
+        self.assertFalse(R.ak_is_ours(f'command="/bin/sh",no-pty {fake_pub(1)} claude-relay:x'))
         for name in ("a b", "-x", "a\"", "a/b", "", "x" * 65, "a\n", "a\nb"):
             with self.assertRaises(ValueError):
                 R.ak_line(name, fake_pub(1), "/x/claude-relay")
@@ -520,7 +578,7 @@ class Units(unittest.TestCase):
                 R.ak_line("x", fake_pub(1), path)
 
     def test_ak_replace(self):
-        other = 'ssh-ed25519 AAAA other@host\n# comment claude-relay:x\ncommand="claude-relay recv --from x" key claude-relay:xx\n'
+        other = 'ssh-ed25519 AAAA other@host\n# comment claude-relay:x\ncommand="claude-relay recv --from xx" key claude-relay:xx\n'
         l1 = R.ak_line("x", fake_pub(1), "/p/claude-relay")
         t, act = R.ak_replace(other, "x", l1)
         self.assertEqual((act, t), ("add", other + l1 + "\n"))
@@ -535,7 +593,7 @@ class Units(unittest.TestCase):
         self.assertEqual(R.ak_replace(other, "x", None), (other, "none"))
         t4, _ = R.ak_replace("ssh-ed25519 AAAA nonl", "x", l1)  # 末尾に改行の無いファイル
         self.assertEqual(t4, "ssh-ed25519 AAAA nonl\n" + l1 + "\n")
-        self.assertEqual(R.ak_names(t2), ["xx", "x"])  # 3 行目は claude-relay:xx の行に見える（名前が違うので触らない）
+        self.assertEqual(R.ak_names(t2), ["xx", "x"])  # 3 行目は claude-relay:xx の行（名前が違うので触らない）
 
     def test_original_command(self):
         self.assertIsNone(R.parse_original("recv"))
@@ -623,6 +681,87 @@ class AuthorizedKeys(RelayBase):
         self.assertEqual(self.w.config("b")["relay"]["peers"], {})
         self.assertNotIn("a.lan", (Path(self.w.terms["b"]["XDG_CONFIG_HOME"]) / "claude-kitty/relay/known_hosts").read_text())
         self.assertIn("変えるものは無い", self.w.cli("b", "untrust", "a", "--yes").stdout)
+
+    def test_space_in_repo_path_round_trip(self):
+        # リポジトリのパスに空白がある: 行は引用され、sshd（ここでは /bin/sh -c）から動き、trust し直しても二重にならない
+        import shutil
+        spaced = Path(self.tmp.name) / "my tools" / "claude-kitty"
+        shutil.copytree(ROOT, spaced, ignore=shutil.ignore_patterns(".git", "__pycache__", "tests"))
+        rbin = spaced / "bin" / "claude-relay"
+
+        def cli(name, *args, input=None):
+            return subprocess.run([sys.executable, str(rbin), *args], input=input, capture_output=True, text=True,
+                                  env=self.w.env(name), timeout=60)
+        for n in ("a", "b"):
+            cli(n, "pair", "--name", n)
+        for _ in range(2):
+            r = cli("b", "trust", "a", "a.lan", "user-a", " ".join(self.w.pub("a")), "--yes")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.ak().read_text().splitlines()), 1)
+        self.assertIn(f"'{rbin}' recv --from a", self.ak().read_text())
+        cli("a", "trust", "b", "b.lan", "user-b", " ".join(self.w.pub("b")), "--yes")
+        r = cli("a", "send", "b", "hello")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.w.inbox("b")), 1)
+        self.assertEqual(cli("b", "untrust", "a", "--yes").returncode, 0)
+        self.assertEqual(self.ak().read_text(), "")
+
+    def test_changed_host_key_needs_explicit_flag(self):
+        kh = Path(self.w.terms["b"]["XDG_CONFIG_HOME"]) / "claude-kitty/relay/known_hosts"
+        kh.parent.mkdir(parents=True)
+        kh.write_text(f"a.lan {fake_pub(77)}\n")
+        r = self.w.cli("b", "trust", "a", "a.lan", "user-a", fake_pub(3), "--yes")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("--replace-host-key", r.stdout)
+        self.assertFalse(self.ak().exists())
+        self.assertEqual(kh.read_text(), f"a.lan {fake_pub(77)}\n")
+        r = self.w.cli("b", "trust", "a", "a.lan", "user-a", fake_pub(3), "--yes", "--replace-host-key")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(kh.read_text(), f"a.lan {HOST_KEY}\n")
+
+    def test_same_key_in_unrestricted_line_refused(self):
+        self.ak().parent.mkdir(mode=0o700)
+        self.ak().write_text(fake_pub(3) + " me@laptop\n")
+        r = self.w.cli("b", "trust", "a", "a.lan", "user-a", fake_pub(3), "--yes")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("同じ鍵の別の行", r.stdout)
+        self.assertEqual(self.ak().read_text(), fake_pub(3) + " me@laptop\n")
+
+    def test_changed_while_confirming_is_not_overwritten(self):
+        # 確認を待つ間に authorized_keys が変わった: 黙って上書きしない
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("claude_relay_cli", str(RELAY))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("claude_relay_cli", loader))
+        loader.exec_module(mod)
+        env = self.w.env("b")
+        ak = self.ak()
+
+        def confirm(q, yes):
+            ak.parent.mkdir(mode=0o700, exist_ok=True)
+            ak.write_text("ssh-ed25519 AAAA added-meanwhile\n")
+            return True
+        mod.confirm = confirm
+        from types import SimpleNamespace
+        import contextlib
+        import io
+        a = SimpleNamespace(name="a", host="a.lan", user="u", pubkey=fake_pub(3), port=22, yes=False, no_keyscan=True,
+                            replace_host_key=False)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = mod.cmd_trust(a, env)
+        self.assertEqual(rc, 1)
+        self.assertIn("読んだあとに変わった", err.getvalue())
+        self.assertEqual(ak.read_text(), "ssh-ed25519 AAAA added-meanwhile\n")
+        self.assertIsNone(self.w.config("b"))
+
+    def test_untrust_keeps_shared_host_key(self):
+        for n in ("x", "y"):
+            self.w.cli("b", "trust", n, "a.lan", f"u{n}", fake_pub(ord(n)), "--yes")
+        kh = Path(self.w.terms["b"]["XDG_CONFIG_HOME"]) / "claude-kitty/relay/known_hosts"
+        self.w.cli("b", "untrust", "x", "--yes")
+        self.assertIn("a.lan", kh.read_text())  # y がまだ使う
+        self.w.cli("b", "untrust", "y", "--yes")
+        self.assertNotIn("a.lan", kh.read_text())
 
     def test_trust_needs_confirmation(self):
         r = self.w.cli("b", "trust", "a", "a.lan", "user-a", fake_pub(3))  # 端末でなく --yes も無い
@@ -731,6 +870,18 @@ class DoctorRelay(unittest.TestCase):
         it = {i["name"]: i for i in rep.items}
         self.assertEqual(it["relay: sshd"]["status"], "warn")
         self.assertIn("リモートログイン", it["relay: sshd"]["fix"])
+        self.assertEqual(it["relay: 鍵"]["status"], "warn")  # 送る相手がいなければ、鍵が無いのは注意だけ
+
+    def test_socket_activated_sshd(self):
+        self.cfg.write_text(json.dumps({"relay": {}}))
+        orig = self.w.run
+
+        def run(argv, timeout):
+            if os.path.basename(argv[0]) == "systemctl" and argv[1] == "is-active":
+                return (0, "active\n") if argv[2] == "ssh.socket" else (3, "inactive\n")
+            return orig(argv, timeout)
+        self.w.run = run
+        self.assertEqual(self.items()["relay: sshd"]["status"], "ok")
 
 
 class HookInstall(unittest.TestCase):

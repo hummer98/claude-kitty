@@ -251,7 +251,8 @@ def load_relay_config(env, path=None):
       {"relay": {"name": "linux-desk", "receivers": ["left"],
                  "peers": {"mac-a": {"host": "mac-a.local", "user": "taro", "port": 22}}}}
 
-    receivers の "left" は view.left の役割（既定 main）を指す（返す値では役割名に置き換え、重なりを除く）。
+    receivers の "left" は設定ファイルの view.left の役割（既定 main。$CLAUDE_VIEW_LEFT は見ない）を指す
+    （返す値では役割名に置き換え、重なりを除く）。
     present は設定ファイルに relay の節があるか（doctor が relay を調べるか決める）。
     壊れていれば ValueError（受け取る側は拒否し、送る側は止める。黙って別の相手に送らないため）。"""
     import re
@@ -308,9 +309,11 @@ def load_relay_config(env, path=None):
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise ValueError(f"{where}.port は 1〜65535: {port!r}")
         clean[name] = {"host": host, "user": user, "port": port}
+    # "left" は設定ファイルの view.left だけで決める（$CLAUDE_VIEW_LEFT は見ない）。recv は sshd から動き、
+    # kitty の中のシェルの環境変数を持たないので、hook と recv で受け取りの役割が食い違わないように
     view = data.get("view") if isinstance(data, dict) else None
-    left = env.get("CLAUDE_VIEW_LEFT") or (view.get("left") if isinstance(view, dict) and isinstance(view.get("left"), str)
-                                          and view.get("left") else DEFAULT_VIEW["left"])
+    left = (view.get("left") if isinstance(view, dict) and isinstance(view.get("left"), str) and view.get("left")
+            else DEFAULT_VIEW["left"])
     roles = list(dict.fromkeys(left if x == "left" else x for x in rc))
     out.update(enabled=e, name=n, receivers=roles, max_bytes=mb, rate={"count": cnt, "per_seconds": per}, peers=clean)
     return out

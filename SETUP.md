@@ -225,7 +225,7 @@ claude-relay pair --name linux-desk               # 先方は claude-relay pair 
 claude-relay trust mac-a mac-a.local hanako 'ssh-ed25519 AAAA…'   # 先方から受け取った 1 行
 ```
 
-- 何をするか（authorized_keys に足す受け取り専用の行・設定の `relay.peers`・相手の host key の指紋）を見せて、確認を取る。
+- 何をするか（authorized_keys に足す受け取り専用の行・設定の `relay.peers`・相手の host key の指紋）を見せて、確認を取る。前に登録した host key と違えば止まる（相手に確かめてから `--replace-host-key`）。
 - **host key の指紋を相手と見比べる**: 相手の端末で `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`（mac も同じ場所）を出してもらい、trust が見せた `ssh-ed25519 SHA256:…` と同じなら y。違えば止める（別の機械に繋がっているかもしれない）。
 - 相手の sshd がまだ動いていなければ、host key を取れないと出る。残りは登録されるので、相手の sshd が動いてから同じ 1 行をもう一度（同じ名前は置き換えるので二重にならない）。
 

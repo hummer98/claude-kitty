@@ -39,6 +39,10 @@ KEY_TYPE = "ssh-ed25519"
 ORIGINAL_RE = re.compile(r"^recv(?: (" + RELAY_NAME_CORE + r"))?\Z")
 AK_OPTIONS = "no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc"
 SSH_OPTIONS = ["-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes"]
+# 利用者の ~/.ssh/config・/etc/ssh/ssh_config を読まない（IdentityFile で個人の鍵に落ちると強制コマンドの無い
+# ログインになりうる。ControlMaster の相乗りで専用の鍵を使わないこともある）。host key は専用の known_hosts だけ
+SSH_ISOLATE = ["-F", "/dev/null", "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+               "-o", "IdentityAgent=none", "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no"]
 SSH_TIMEOUT = 30
 STDIN_SLACK = 8192          # 本文の上限に足す、JSON の枠の分
 CONTEXT_BUDGET = 9000       # hook の additionalContext は 1 つ 10,000 字まで（超えるとファイルに逃がされ、読まれない）
@@ -50,7 +54,7 @@ NOTICE = ("これは別の端末の Claude セッションからのメッセー�
 # 本文に入っていると枠や Claude Code の印と取り違えうるタグ。頭の < を &lt; にする
 _TAGS = re.compile(r"<(?=\s*/?\s*(?:relay-message|cross-session-message|system-reminder|task-notification|"
                    r"user-prompt-submit-hook|command-name|command-message)\b)", re.I)
-_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 class Refused(Exception):
@@ -300,21 +304,40 @@ def ak_line(name, pubkey, bin_path=None):
     _checked(name, "端末")
     typ, b64 = parse_pubkey(pubkey)
     path = str(bin_path or relay_bin())
-    if any(c in path for c in '"\\\n\r') or not os.path.isabs(path):
-        raise ValueError(f"claude-relay の場所を authorized_keys に書けない（\" や \\ を含む・絶対パスでない）: {path}")
     cmd = f"{shlex.quote(path)} recv --from {name}"
+    # 引用したあとの文字列で調べる（' を含むパスは引用で " が入り、command="…" を壊すため）
+    if any(c in cmd for c in '"\\\n\r') or not os.path.isabs(path):
+        raise ValueError(f"claude-relay の場所を authorized_keys に書けない（\" ' \\ を含む・絶対パスでない）: {path}")
     return f'command="{cmd}",{AK_OPTIONS} {typ} {b64} {ak_comment(name)}'
 
 
+def forced_command(line):
+    """authorized_keys の行の command="…" を語に分けたもの（無い・読めなければ []）。"""
+    m = re.match(r'^command="([^"]*)"', line.strip())
+    try:
+        return shlex.split(m.group(1)) if m else []
+    except ValueError:
+        return []
+
+
 def ak_is_ours(line, name=None):
-    """claude-relay の行か（name があればその名前の行か）。コメント（最後の語）と強制コマンドの両方で見る。"""
+    """claude-relay の行か（name があればその名前の行か）。コメント（最後の語）と、強制コマンドが
+    「…/claude-relay recv --from <コメントと同じ名前>」であることの両方で見る（パスに空白があっても分かるよう語に分ける）。"""
     s = line.strip()
-    if not s or s.startswith("#") or "claude-relay recv --from " not in s:
+    if not s or s.startswith("#"):
         return False
     last = s.split()[-1]
-    if name is None:
-        return last.startswith("claude-relay:")
-    return last == ak_comment(name)
+    if not last.startswith("claude-relay:"):
+        return False
+    words = forced_command(s)
+    if len(words) != 4 or os.path.basename(words[0]) != "claude-relay" or words[1:] != ["recv", "--from", last[13:]]:
+        return False
+    return name is None or last == ak_comment(name)
+
+
+def ak_other_lines_with_key(text, b64):
+    """同じ鍵を使う、claude-relay の行でない行（sshd は先に合った行を使うので、強制コマンドが効かなくなる）。"""
+    return [x for x in text.splitlines() if not ak_is_ours(x) and b64 in x.split()]
 
 
 def ak_names(text):
@@ -458,6 +481,27 @@ def _short(v, n=128):
     return v if isinstance(v, str) and len(v) <= n and not _CTRL.search(v) else None
 
 
+def recent_count(env, sender, since):
+    """since 以降にその送り元から受け取った数。受信箱と delivered/ のファイル（名前の末尾が送り元、mtime が受け取った時刻。
+    delivered/ へは rename なので変わらない）から数える（ログは拒否や ping でも育って回るので、数えるのに使わない）。"""
+    n = 0
+    for top in ("inbox", "delivered"):
+        base = state_root(env) / top
+        try:
+            roles = os.listdir(base)
+        except OSError:
+            continue
+        for r in roles:
+            try:
+                with os.scandir(base / r) as it:
+                    for f in it:
+                        if f.name.endswith(f"-{sender}.json") and ID_RE.match(f.name[:-5]) and f.stat().st_mtime >= since:
+                            n += 1
+            except OSError:
+                continue
+    return n
+
+
 def new_id(d, sender, t):
     base = time.strftime("%Y%m%dT%H%M%S", time.localtime(t)) + f"{int((t % 1) * 1e6):06d}"
     i, name = 0, f"{base}-{sender}"
@@ -509,12 +553,7 @@ def receive(env, sender, original, data, now=None, notify=None):
         root = state_root(env)
         with locked(root):
             rate = conf["rate"]
-            since = now - rate["per_seconds"]
-            n = 0
-            for e in read_log(env):
-                if e.get("dir") == "in" and e.get("from") == sender and e.get("result") in ("queued", "delivered") \
-                        and isinstance(e.get("t"), (int, float)) and e["t"] >= since:
-                    n += 1
+            n = recent_count(env, sender, now - rate["per_seconds"])
             if n >= rate["count"]:
                 raise Refused(f"多すぎる（{sender} からは {int(rate['per_seconds'])} 秒に {rate['count']} 通まで）")
             d = inbox_dir(env, role)
@@ -525,16 +564,20 @@ def receive(env, sender, original, data, now=None, notify=None):
                    "from_role": msg["from_role"] if isinstance(msg.get("from_role"), str) and NAME_RE.match(msg["from_role"]) else None,
                    "from_session": _short(msg.get("from_session")), "sent_at": _short(msg.get("at"), 64),
                    "reply_to": _short(msg.get("reply_to"))}
-            write_private(d / f"{mid}.json", json.dumps(rec, ensure_ascii=False))
-            entry.update(t=now, id=mid, result="queued")
             try:
-                panes = (notify or notify_role)(env, role, "relay", now)
-            except Exception as e:  # noqa: BLE001 — ペインに知らせられなくても、受信箱に置けたら成功
-                entry["notify_error"] = f"{type(e).__name__}: {e}"
-                panes = 0
-            if panes:
-                entry["result"] = "delivered"
-            append_log(env, entry)
+                write_private(d / f"{mid}.json", json.dumps(rec, ensure_ascii=False))
+            except OSError as e:
+                raise Refused(f"受信箱に書けない: {e}")
+            entry.update(t=now, id=mid, result="queued")
+        # ペインに知らせるのはロックの外で（kitten の待ちで、ほかの受信と hook を待たせない）
+        try:
+            panes = (notify or notify_role)(env, role, "relay", now)
+        except Exception as e:  # noqa: BLE001 — ペインに知らせられなくても、受信箱に置けたら成功
+            entry["notify_error"] = f"{type(e).__name__}: {e}"
+            panes = 0
+        if panes:
+            entry["result"] = "delivered"
+        append_log(env, entry)
         return f"ok {entry['result']} {role}", 0
     except (Refused, ValueError) as e:
         entry.update(result="rejected", reason=str(e))
@@ -665,10 +708,11 @@ def compose(items, budget=CONTEXT_BUDGET, delivered=None):
     return text(frames, len(items) - len(frames)), len(frames)
 
 
-def take(env, role, budget=CONTEXT_BUDGET, now=None):
-    """受信箱から渡す分を delivered/ へ移し、渡す文を返す（無ければ None）。受信箱が空になれば印 relay を外す。"""
+def take(env, role, budget=CONTEXT_BUDGET, now=None, timeout=10.0):
+    """受信箱から渡す分を delivered/ へ移し、(渡す文（無ければ None）, 受信箱に残った数) を返す。
+    印 relay は外さない（呼ぶ側が、渡す文を出したあとに finish() で外す。hook が時間切れで殺されても文を先に出すため）。"""
     root = state_root(env)
-    with locked(root):
+    with locked(root, timeout=timeout):
         items = inbox_items(env, role)
         if not items:
             return None
@@ -684,12 +728,17 @@ def take(env, role, budget=CONTEXT_BUDGET, now=None):
                 pass
         rest = len(items) - n
         append_log(env, {"at": now_iso(now), "dir": "deliver", "role": role, "count": moved, "ids": [r["id"] for r in items[:n]]})
-    if not rest:
-        try:
-            notify_role(env, role, "relay-clear", now)
-        except Exception:  # noqa: BLE001
-            pass
-    return text if moved else None
+    return (text if moved else None), rest
+
+
+def finish(env, role, rest, now=None):
+    """渡したあとの片付け: 受信箱が空になったら、その役割のペインの印 relay を外す。失敗しても止めない。"""
+    if rest:
+        return
+    try:
+        notify_role(env, role, "relay-clear", now)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---- hook -------------------------------------------------------------------------------
@@ -735,7 +784,7 @@ def session_role(env, sid):
 
 
 def hook_output(event, payload, env, now=None):
-    """hook の stdout に出す JSON（dict）か None。受け取りの役割でないセッションでは何もしない。"""
+    """(hook の stdout に出す JSON（dict）, 後片付けの (役割, 残りの数)) か None。受け取りの役割でないセッションでは何もしない。"""
     if event not in ("UserPromptSubmit", "Stop"):
         return None
     if event == "Stop" and payload.get("stop_hook_active"):
@@ -749,12 +798,14 @@ def hook_output(event, payload, env, now=None):
     role = session_role(env, payload.get("session_id"))
     if not role or role not in conf["receivers"]:
         return None
-    text = take(env, role, now=now)
+    text, rest = take(env, role, now=now, timeout=2.0)  # hook の timeout（10 秒）より十分短く
     if not text:
         return None
     if event == "UserPromptSubmit":
-        return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
-    return {"decision": "block", "reason": text}
+        out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}}
+    else:
+        out = {"decision": "block", "reason": text}
+    return out, (role, rest)
 
 
 def hook_log_error(env, event, msg):
@@ -790,7 +841,7 @@ def own_role(env):
 
 
 def ssh_argv(env, peer, role):
-    return ([tool(env, "ssh"), "-T", "-i", str(key_path(env)), *SSH_OPTIONS,
+    return ([tool(env, "ssh"), *SSH_ISOLATE, "-T", "-i", str(key_path(env)), *SSH_OPTIONS,
              "-o", f"UserKnownHostsFile={known_hosts_path(env)}", "-p", str(peer["port"]),
              f"{peer['user']}@{peer['host']}", "recv"] + ([role] if role else []))
 

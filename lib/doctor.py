@@ -530,7 +530,7 @@ def check_sshd(ctx, rep):
         if not sc:
             rep.warn(name, "systemctl が無いので確認できない（受け取るには sshd が要る）")
             return
-        for unit in ("sshd", "ssh"):
+        for unit in ("sshd", "ssh", "sshd.socket", "ssh.socket"):  # Ubuntu などは socket で起動する
             rc, out = ctx.run([sc, "is-active", unit])
             if rc == 0 and (out or "").strip() == "active":
                 rep.ok(name, f"{unit} が動いている")
@@ -550,16 +550,6 @@ def check_sshd(ctx, rep):
         rep.skip(name, f"{ctx.os_name} では調べない")
 
 
-def _forced_program(line):
-    import shlex
-    m = re.match(r'^command="([^"]*)"', line.strip())
-    try:
-        words = shlex.split(m.group(1)) if m else []
-    except ValueError:
-        words = []
-    return words[0] if words else None
-
-
 def check_relay(ctx, rep):
     from config import config_path, load_relay_config
     if not uses_relay(config_path(ctx.env)):
@@ -573,7 +563,10 @@ def check_relay(ctx, rep):
     check_sshd(ctx, rep)
     key = R.key_path(renv)
     if not key.exists():
-        rep.ng("relay: 鍵", f"無い（{key}）", "claude-relay pair")
+        if conf["peers"]:
+            rep.ng("relay: 鍵", f"無い（{key}。送れない）", "claude-relay pair")
+        else:
+            rep.warn("relay: 鍵", f"無い（{key}。受け取るだけなら要らない）", "送るなら claude-relay pair")
     elif key.stat().st_mode & 0o077:
         rep.ng("relay: 鍵", f"ほかの人が読める（{key}）", f"chmod 600 {key}")
     else:
@@ -597,7 +590,7 @@ def check_relay(ctx, rep):
         bad = []
         for line in text.splitlines():
             if R.ak_is_ours(line):
-                prog = _forced_program(line)
+                prog = (R.forced_command(line) or [None])[0]
                 if not prog or not (os.path.isfile(prog) and os.access(prog, os.X_OK)):
                     bad.append(line.strip().split()[-1])
         problem = R.ssh_dir_problem(renv)

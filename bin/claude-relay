@@ -2,7 +2,7 @@
 """端末をまたぐ Claude Code セッションの連絡（互いに承認した端末の間、LAN の中の ssh）。詳しくは docs/relay.md。
 
   claude-relay pair [--name N] [--host H] [--port P]   専用の鍵を作り（無ければ）、相手に渡す 1 行を出す
-  claude-relay trust NAME HOST USER 'PUBKEY' [--port P] [--yes] [--no-keyscan]
+  claude-relay trust NAME HOST USER 'PUBKEY' [--port P] [--yes] [--no-keyscan] [--replace-host-key]
                                    相手を登録する（authorized_keys の受け取り専用の行・relay.peers・相手の host key）
   claude-relay untrust NAME [--yes]   登録を外す
   claude-relay send PEER[/ROLE] TEXT|- [--reply-to ID]   送る（- は標準入力。ROLE を省くと相手の受け取りの役割）
@@ -31,9 +31,13 @@ def cmd_hook(event, env):
             payload = json.loads(text) if text.strip() else {}
         except ValueError:
             payload = {}
-        out = relay.hook_output(event, payload if isinstance(payload, dict) else {}, env)
-        if out:
+        got = relay.hook_output(event, payload if isinstance(payload, dict) else {}, env)
+        if got:
+            out, (role, rest) = got
+            # 先に出して flush する（印を外す kitten の待ちで hook が時間切れになっても、渡す文は届くように）
             sys.stdout.write(json.dumps(out, ensure_ascii=False))
+            sys.stdout.flush()
+            relay.finish(env, role, rest)
     except BaseException as e:  # noqa: BLE001 — hook は Claude Code を止めない
         relay.hook_log_error(env, event, f"{type(e).__name__}: {e}")
     return 0
@@ -102,6 +106,26 @@ def cmd_pair(a, env):
     return 0
 
 
+def _write_checked(relay, env, before, writes):
+    """ロックを取ってから、読んだときの中身（before: パス → 文字列）と今が同じか確かめ、同じなら writes を順に行う。
+    確認を待っている間にほかの道具・手で変わっていたら、黙って上書きしないよう何も書かずに 1 を返す。"""
+    try:
+        with relay.locked(relay.conf_dir(env), timeout=5.0):
+            for p, text in before.items():
+                if relay.read_text_or_empty(p) != text:
+                    print(f"claude-relay: {p} が読んだあとに変わった。何も書いていない（もう一度実行する）", file=sys.stderr)
+                    return 1
+            for w in writes:
+                w()
+    except relay.Refused as e:
+        print(f"claude-relay: {e}（何も書いていない）", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as e:
+        print(f"claude-relay: 書けない: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _plan_peer(data, name, peer):
     peers = data.setdefault("relay", {}).setdefault("peers", {})
     old = peers.get(name)
@@ -123,11 +147,14 @@ def cmd_trust(a, env):
         line = relay.ak_line(a.name, a.pubkey)
         load_relay_config(env)                        # 壊れた設定に書き足さない
         cpath, data = relay.read_config_data(env)
-    except ValueError as e:
+        c_text = relay.read_text_or_empty(cpath)
+        ak = relay.authorized_keys_path(env)
+        ak_text = relay.read_text_or_empty(ak)
+        kh = relay.known_hosts_path(env)
+        kh_text = relay.read_text_or_empty(kh)
+    except ValueError as e:                           # UnicodeDecodeError も
         print(f"claude-relay: {e}", file=sys.stderr)
         return 2
-    ak = relay.authorized_keys_path(env)
-    ak_text = relay.read_text_or_empty(ak)
     new_ak, action = relay.ak_replace(ak_text, a.name, line)
     peer = {"host": a.host, "user": a.user, "port": a.port}
     old = _plan_peer(data, a.name, peer)
@@ -136,11 +163,15 @@ def cmd_trust(a, env):
     mark = {"add": "+", "replace": "~", "same": "="}[action]
     print(f"{mark} {ak} に受け取り専用の行（この鍵でできるのは claude-relay recv だけ。鍵の指紋 {relay.fingerprint(b64)}）:")
     print(f"    {line}")
+    dup = relay.ak_other_lines_with_key(ak_text, b64)
+    if dup:
+        # sshd は先に合った行を使う。強制コマンドの無い行が残っていると、この鍵でシェルが開けてしまう
+        print(f"! {ak} に同じ鍵の別の行がある（強制コマンドが効かない）。その行を消してから trust をもう一度。何も書いていない")
+        return 1
     print(f"{'=' if old == peer else '~' if old else '+'} {cpath} の relay.peers.{a.name} = {json.dumps(peer, ensure_ascii=False)}")
     marker = relay.host_marker(a.host, a.port)
-    kh = relay.known_hosts_path(env)
-    kh_text = relay.read_text_or_empty(kh)
     new_kh = kh_text
+    key_changed = False
     if not a.no_keyscan:
         scanned = relay.keyscan(env, a.host, a.port)
         if scanned:
@@ -151,6 +182,7 @@ def cmd_trust(a, env):
             for _x, t, fp in scanned:
                 print(f"    {t} {fp}")
             if have and not same:
+                key_changed = True
                 print("! 前に登録した host key と違う。相手が sshd を入れ直したのでなければ、別の機械に繋がっているかもしれない")
             new_kh = relay.kh_replace(kh_text, marker, [x for x, _t, _f in scanned])
         else:
@@ -164,6 +196,10 @@ def cmd_trust(a, env):
                 and relay.kh_lines(new_kh, was):
             print(f"- {kh} の前の宛先（{was}）の host key")
             new_kh = relay.kh_replace(new_kh, was, [])
+    if key_changed and not a.replace_host_key:
+        # --yes（Claude のセッションから流すときなど）でも、変わった host key は黙って受け入れない
+        print("止めた（何も書いていない）。相手に確かめて、入れ替えるなら --replace-host-key を付けてもう一度")
+        return 1
     changed = new_ak != ak_text or old != peer or new_kh != kh_text
     if not changed:
         print("（変えるものは無い）")
@@ -171,18 +207,18 @@ def cmd_trust(a, env):
     if not confirm("これで登録しますか", a.yes):
         print("止めた（何も書いていない）")
         return 1
-    try:
-        with relay.locked(relay.conf_dir(env)):
-            if new_ak != ak_text:
-                bak = relay.write_authorized_keys(env, new_ak)
-                if bak:
-                    print(f"  （前の authorized_keys は {bak}）")
-            if old != peer:
-                relay.write_config_data(cpath, data)
-            if new_kh != kh_text:
-                relay.write_private(kh, new_kh)
-    except OSError as e:
-        print(f"claude-relay: 書けない: {e}", file=sys.stderr)
+    writes = []
+    if new_ak != ak_text:
+        def w_ak():
+            bak = relay.write_authorized_keys(env, new_ak)
+            if bak:
+                print(f"  （前の authorized_keys は {bak}）")
+        writes.append(w_ak)
+    if old != peer:
+        writes.append(lambda: relay.write_config_data(cpath, data))
+    if new_kh != kh_text:
+        writes.append(lambda: relay.write_private(kh, new_kh))
+    if _write_checked(relay, env, {ak: ak_text, cpath: c_text, kh: kh_text}, writes):
         return 1
     p = relay.ssh_dir_problem(env)
     if p:
@@ -196,16 +232,17 @@ def cmd_untrust(a, env):
     try:
         relay._checked(a.name, "端末")
         cpath, data = relay.read_config_data(env)
+        c_text = relay.read_text_or_empty(cpath)
+        ak = relay.authorized_keys_path(env)
+        ak_text = relay.read_text_or_empty(ak)
+        kh = relay.known_hosts_path(env)
+        kh_text = relay.read_text_or_empty(kh)
     except ValueError as e:
         print(f"claude-relay: {e}", file=sys.stderr)
         return 2
-    ak = relay.authorized_keys_path(env)
-    ak_text = relay.read_text_or_empty(ak)
     new_ak, action = relay.ak_replace(ak_text, a.name, None)
     peers = data.get("relay", {}).get("peers", {})
     old = peers.pop(a.name, None)
-    kh = relay.known_hosts_path(env)
-    kh_text = relay.read_text_or_empty(kh)
     new_kh = kh_text
     if isinstance(old, dict) and isinstance(old.get("host"), str):
         port = old.get("port", 22)
@@ -225,18 +262,18 @@ def cmd_untrust(a, env):
     if not confirm("外しますか", a.yes):
         print("止めた（何も書いていない）")
         return 1
-    try:
-        with relay.locked(relay.conf_dir(env)):
-            if action == "remove":
-                bak = relay.write_authorized_keys(env, new_ak)
-                if bak:
-                    print(f"  （前の authorized_keys は {bak}）")
-            if old is not None:
-                relay.write_config_data(cpath, data)
-            if new_kh != kh_text:
-                relay.write_private(kh, new_kh)
-    except OSError as e:
-        print(f"claude-relay: 書けない: {e}", file=sys.stderr)
+    writes = []
+    if action == "remove":
+        def w_ak():
+            bak = relay.write_authorized_keys(env, new_ak)
+            if bak:
+                print(f"  （前の authorized_keys は {bak}）")
+        writes.append(w_ak)
+    if old is not None:
+        writes.append(lambda: relay.write_config_data(cpath, data))
+    if new_kh != kh_text:
+        writes.append(lambda: relay.write_private(kh, new_kh))
+    if _write_checked(relay, env, {ak: ak_text, cpath: c_text, kh: kh_text}, writes):
         return 1
     print("外した")
     return 0
@@ -284,9 +321,14 @@ def cmd_inbox(a, env):
         if len(roles) != 1:
             print("claude-relay: --deliver は役割を 1 つに（--role）", file=sys.stderr)
             return 2
-        text = relay.take(env, roles[0])
+        try:
+            text, rest = relay.take(env, roles[0])
+        except relay.Refused as e:
+            print(f"claude-relay: {e}", file=sys.stderr)
+            return 1
         if text:
-            print(text)
+            print(text, flush=True)
+        relay.finish(env, roles[0], rest)
         return 0
     rows = [dict(r, role=role) for role in roles for r in relay.inbox_items(env, role)]
     if a.json:
@@ -351,6 +393,7 @@ def main(argv=None):
     p.add_argument("name"); p.add_argument("host"); p.add_argument("user"); p.add_argument("pubkey")
     p.add_argument("--port", type=int, default=22); p.add_argument("--yes", "-y", action="store_true")
     p.add_argument("--no-keyscan", action="store_true", help="相手の host key を取らない（known_hosts を自分で書くとき）")
+    p.add_argument("--replace-host-key", action="store_true", help="前に登録した host key と違っても入れ替える（相手に確かめてから）")
     p = sub.add_parser("untrust", help="相手の登録を外す"); p.add_argument("name"); p.add_argument("--yes", "-y", action="store_true")
     p = sub.add_parser("send", help="送る"); p.add_argument("target"); p.add_argument("text"); p.add_argument("--reply-to")
     p = sub.add_parser("ping", help="届くかの確認"); p.add_argument("target")

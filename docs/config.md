@@ -153,7 +153,7 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 |---|---|---|
 | `enabled` | `true` | `false` で受け取りを全部止める（recv が拒否し、hook も渡さない）。送ることはできる |
 | `name` | `null` | 自分の端末名（`claude-relay pair` が相手に渡す 1 行に使う）。`null` ならホスト名の頭 |
-| `receivers` | `["left"]` | 受け取ってよい役割。`"left"` は `view.left`（統括）の役割を指す。宛先を省いた送信は最初の役割へ |
+| `receivers` | `["left"]` | 受け取ってよい役割。`"left"` は設定ファイルの `view.left`（統括）の役割を指す（`$CLAUDE_VIEW_LEFT` は見ない。sshd から動く受け取りの側と食い違わないよう）。宛先を省いた送信は最初の役割へ |
 | `max_bytes` | `16384` | 1 通の本文の上限（UTF-8 のバイト数。1〜1048576） |
 | `rate` | `{"count": 30, "per_seconds": 600}` | 送り元ごとの通数の上限（`per_seconds` 秒に `count` 通） |
 | `peers` | `{}` | 送る相手: 名前 → `{"host", "user", "port"}`（`port` の既定は 22）。名前は英数字と `. _ -`（64 字まで） |
