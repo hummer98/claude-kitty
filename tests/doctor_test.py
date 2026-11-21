@@ -277,7 +277,8 @@ class ConfigExample(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_every_section_present(self):
-        self.assertEqual(set(self.data), {"view", "kitty", "browser", "state", "lang", "guard_hook", "session_stats", "roster"})
+        self.assertEqual(set(self.data), {"view", "kitty", "browser", "state", "lang", "guard_hook", "session_stats", "roster",
+                                          "relay"})
 
     def test_loaders_read_example(self):
         from config import load_roster_config, load_state_config, load_view_config
@@ -308,6 +309,12 @@ class ConfigExample(unittest.TestCase):
         self.assertEqual(r, self.data["roster"])
         from config import load_kitty_config
         self.assertEqual(load_kitty_config(self.env, self.PATH), self.data["kitty"])
+        from config import load_relay_config
+        rl = load_relay_config(self.env, self.PATH)
+        self.assertEqual(rl["receivers"], ["main"])  # "left" は view.left
+        self.assertEqual(rl["peers"], self.data["relay"]["peers"])
+        self.assertEqual({k: rl[k] for k in self.data["relay"] if k not in ("receivers",)},
+                         {k: v for k, v in self.data["relay"].items() if k != "receivers"})
 
     def test_example_guard_blocks_nothing_when_copied(self):
         import guardhook as gh
@@ -342,6 +349,9 @@ class ConfigExample(unittest.TestCase):
             self.assertEqual(default_of(k, "kitty"), f"`{json.dumps(v)}`", k)
         for k, v in DEFAULT_ROSTER.items():
             self.assertEqual(default_of(k, "roster"), f"`{json.dumps(v)}`", k)
+        from config import DEFAULT_RELAY
+        for k, v in DEFAULT_RELAY.items():
+            self.assertEqual(default_of(k, "relay"), f"`{json.dumps(v)}`", k)
         self.assertEqual(default_of("left", "view"), f"`{json.dumps(DEFAULT_VIEW['left'])}`")
 
 

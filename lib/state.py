@@ -40,7 +40,7 @@ STALE_WAIT = 2.0
 DEFAULT_NOTICE = {"contains": [], "prefix": []}
 _PEER = re.compile(r"<cross-session-message\b[^>]*>(.*?)</cross-session-message>", re.S)
 # 待ちの理由の強さ（list と waiting の reason に出すのは、いちばん強いもの）
-KIND_ORDER = ("manual", "ask", "permission", "notify")
+KIND_ORDER = ("manual", "ask", "permission", "notify", "relay")
 
 
 def parse_hook_input(text):
@@ -110,21 +110,21 @@ def running_agents(rec):
 def derive(rec):
     """ペインの状態: 待ちが 1 つでもあれば waiting > 本体かサブエージェントが動いていれば working
     > まだ見ていなければ done > idle。"""
-    if rec.get("waits"):
+    if rec.get("waits") or rec.get("relay"):
         return "waiting"
     if rec.get("main") or running_agents(rec):
         return "working"
     return "idle" if rec.get("seen") else "done"
 
 
-_COMPARED = ("state", "reason", "waits", "agents", "main", "seen", "quiet")
+_COMPARED = ("state", "reason", "waits", "agents", "main", "seen", "quiet", "relay")
 
 
 def _finish(prev, rec, now):
     st = derive(rec)
     if st in ("working", "waiting") and not rec.get("quiet"):
         rec["seen"] = False  # 次に終わったら未読にする（通知のターンは、終わっても前の状態に戻す）
-    kinds = [w.get("kind") for w in rec["waits"].values()]
+    kinds = [w.get("kind") for w in rec["waits"].values()] + (["relay"] if rec.get("relay") else [])
     rec["reason"] = next((k for k in KIND_ORDER if k in kinds), None) if st == "waiting" else None
     if prev.get("state") != st:
         rec["since"] = now
@@ -339,6 +339,12 @@ def transition(prev, event, payload, now):
         if derive(rec) != "done":
             return None
         rec["seen"] = True
+    elif event == "relay":
+        # 別の端末から届いた（claude-relay recv）。waits に入れないのは、Stop・入力で外れず、渡したとき（relay-clear）だけ外すため
+        rec["relay"] = rec.get("relay") or {"at": now}
+    elif event == "relay-clear":
+        if not rec.pop("relay", None):
+            return None
     else:
         return None
     return _finish(prev, rec, now)

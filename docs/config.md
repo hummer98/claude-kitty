@@ -1,6 +1,6 @@
 # 設定ファイル（config.json）
 
-claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`）から読みます。
+claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`）から読みます。
 **どの節も、どの項目も省けます。** ファイルが無ければ、すべて下の表の既定値で動きます。
 
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
@@ -145,6 +145,19 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `keep_absent_hours` | `24` | ペインが無くなった役割を、自動の保存で名簿に残す時間 |
 
 名簿の場所は `$CLAUDE_ROSTER_DIR`（既定 `~/.local/share/claude-kitty`）。詳細は [roster.md](roster.md)。
+
+## relay（claude-relay: 端末をまたぐ連絡）
+
+この節があると `claude-kitty doctor` が relay の行（sshd・鍵・相手・受け取りの登録・hook）を出す。`peers` は `claude-relay trust` / `untrust` が書き換える（手で書いてもよい）。詳細は [relay.md](relay.md)。
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `enabled` | `true` | `false` で受け取りを全部止める（recv が拒否し、hook も渡さない）。送ることはできる |
+| `name` | `null` | 自分の端末名（`claude-relay pair` が相手に渡す 1 行に使う）。`null` ならホスト名の頭 |
+| `receivers` | `["left"]` | 受け取ってよい役割。`"left"` は設定ファイルの `view.left`（統括）の役割を指す（`$CLAUDE_VIEW_LEFT` は見ない。sshd から動く受け取りの側と食い違わないよう）。宛先を省いた送信は最初の役割へ |
+| `max_bytes` | `16384` | 1 通の本文の上限（UTF-8 のバイト数。1〜1048576） |
+| `rate` | `{"count": 30, "per_seconds": 600}` | 送り元ごとの通数の上限（`per_seconds` 秒に `count` 通） |
+| `peers` | `{}` | 送る相手: 名前 → `{"host", "user", "port"}`（`port` の既定は 22）。名前は英数字と `. _ -`（64 字まで） |
 
 ## 設定ファイルの外のもの
 

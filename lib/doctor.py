@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO / "tools"))
 UNITS = ["claude-state-watch.service", "claude-roster-save.timer", "claude-session-stats.timer"]
 AGENTS = ["claude-kitty.state-watch", "claude-kitty.roster-save", "claude-kitty.session-stats"]
 MIN_PYTHON = (3, 9)  # macOS の Command Line Tools の /usr/bin/python3 が 3.9
-HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-check", "guard": "claude-guard"}
+HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-check", "guard": "claude-guard", "relay": "claude-relay"}
 
 
 class Ctx:
@@ -304,6 +304,8 @@ def check_hooks(ctx, rep):
         rep.ng("settings.json", str(e), "JSON を直す（tools/install.sh はこのままでは書き換えない）")
         return
     for part, (state, missing) in M.status(data).items():
+        if part == "relay":
+            continue  # 使う人だけのもの。設定に relay の節があるときに check_relay が調べる
         name = f"hook: {HOOK_LABELS[part]}"
         if state == "none":
             rep.warn(name, "入っていない", f"使うなら tools/install.sh --hooks={part}")
@@ -445,6 +447,9 @@ def check_config(ctx, rep):
     strict("roster", lambda: load_roster_config(ctx.env, path))
     strict("kitty", lambda: load_kitty_config(ctx.env, path))
     strict("browser", lambda: load_browser_config(ctx.env, path))
+    if uses_relay(path):
+        from config import load_relay_config
+        strict("relay", lambda: load_relay_config(ctx.env, path))
 
 
 # ---- デスクトップ・Chrome ------------------------------------------------------
@@ -511,7 +516,111 @@ def check_desktop(ctx, rep):
         rep.skip("KWin / Chrome", f"{ctx.os_name} では調べない")
 
 
-CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_systemd, check_config, check_desktop]
+# ---- relay（設定に relay の節があるときだけ） ------------------------------------------------
+
+def uses_relay(path):
+    try:
+        data = json.loads(Path(path).read_text() or "{}")
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("relay") is not None
+
+
+def check_sshd(ctx, rep):
+    name = "relay: sshd"
+    if ctx.os_name == "Linux":
+        sc = ctx.which("systemctl")
+        if not sc:
+            rep.warn(name, "systemctl が無いので確認できない（受け取るには sshd が要る）")
+            return
+        for unit in ("sshd", "ssh", "sshd.socket", "ssh.socket"):  # Ubuntu などは socket で起動する
+            rc, out = ctx.run([sc, "is-active", unit])
+            if rc == 0 and (out or "").strip() == "active":
+                rep.ok(name, f"{unit} が動いている")
+                return
+        rep.warn(name, "動いていない（このままでは受け取れない。送るだけなら要らない）",
+                 "sudo systemctl enable --now sshd（Debian・Ubuntu は ssh。無ければ openssh-server を入れる）")
+    elif ctx.os_name == "Darwin":
+        # 「リモートログイン」の入り切りを確かめる systemsetup は root が要る。launchctl print で分かる範囲だけ見る
+        lc = ctx.which("launchctl") or ("/bin/launchctl" if os.path.exists("/bin/launchctl") else None)
+        rc = ctx.run([lc, "print", "system/com.openssh.sshd"])[0] if lc else None
+        if rc == 0:
+            rep.ok(name, "リモートログイン（com.openssh.sshd）が読み込まれている")
+        else:
+            rep.warn(name, "リモートログインが入っているか確認できない（受け取るには要る）",
+                     "システム設定 → 一般 → 共有 → リモートログインを入れる（SETUP.md の「端末をまたぐ連絡」）")
+    else:
+        rep.skip(name, f"{ctx.os_name} では調べない")
+
+
+def check_relay(ctx, rep):
+    from config import config_path, load_relay_config
+    if not uses_relay(config_path(ctx.env)):
+        return  # relay を使っていない（行を出さない）
+    import relay as R
+    try:
+        conf = load_relay_config(ctx.env)
+    except ValueError:
+        return  # 「設定: relay」の行で NG にする
+    renv = dict(ctx.env, HOME=str(ctx.home))
+    check_sshd(ctx, rep)
+    key = R.key_path(renv)
+    if not key.exists():
+        if conf["peers"]:
+            rep.ng("relay: 鍵", f"無い（{key}。送れない）", "claude-relay pair")
+        else:
+            rep.warn("relay: 鍵", f"無い（{key}。受け取るだけなら要らない）", "送るなら claude-relay pair")
+    elif key.stat().st_mode & 0o077:
+        rep.ng("relay: 鍵", f"ほかの人が読める（{key}）", f"chmod 600 {key}")
+    else:
+        rep.ok("relay: 鍵", str(key))
+    kh = R.read_text_or_empty(R.known_hosts_path(renv))
+    no_hk = [n for n, p in conf["peers"].items() if not R.kh_lines(kh, R.host_marker(p["host"], p["port"]))]
+    if not conf["peers"]:
+        rep.warn("relay: 送る相手", "relay.peers に誰もいない（送れない）", "相手の claude-relay pair の 1 行を claude-relay trust で")
+    elif no_hk:
+        rep.ng("relay: 送る相手", f"host key が無い: {', '.join(no_hk)}（送れない）",
+               "相手の sshd が動いてから claude-relay trust をもう一度（host key を取る）")
+    else:
+        rep.ok("relay: 送る相手", f"{len(conf['peers'])} 人（{', '.join(sorted(conf['peers']))}）")
+    ak = R.authorized_keys_path(renv)
+    text = R.read_text_or_empty(ak)
+    names = R.ak_names(text)
+    if not names:
+        rep.warn("relay: 受け取りの登録", f"{ak} に claude-relay の行が無い（誰からも受け取らない）",
+                 "相手の claude-relay pair の 1 行を claude-relay trust で")
+    else:
+        bad = []
+        for line in text.splitlines():
+            if R.ak_is_ours(line):
+                prog = (R.forced_command(line) or [None])[0]
+                if not prog or not (os.path.isfile(prog) and os.access(prog, os.X_OK)):
+                    bad.append(line.strip().split()[-1])
+        problem = R.ssh_dir_problem(renv)
+        if bad:
+            rep.ng("relay: 受け取りの登録", f"強制コマンドの claude-relay が見つからない: {', '.join(bad)}",
+                   "リポジトリを動かしたなら claude-relay trust をもう一度（同じ名前の行を置き換える）")
+        elif problem:
+            rep.ng("relay: 受け取りの登録", problem, "権限を直す")
+        else:
+            rep.ok("relay: 受け取りの登録", f"{len(names)} 人（{', '.join(names)}）。受け取りの役割: {', '.join(conf['receivers'])}"
+                   + ("" if conf["enabled"] else "。ただし relay.enabled が false で、受け取りを止めている"))
+    import merge_hooks as M
+    try:
+        data = M.load(ctx.settings)
+    except M.Broken:
+        return  # settings.json の行で NG にする
+    state, missing = M.status(data)["relay"]
+    if state == "all":
+        rep.ok("hook: claude-relay", "入っている")
+    elif state == "some":
+        rep.ng("hook: claude-relay", f"一部だけ（無い: {', '.join(missing)}）", "tools/install.sh --hooks=relay")
+    else:
+        rep.warn("hook: claude-relay", "入っていない（届いたものがセッションに渡らない）", "tools/install.sh --hooks=relay")
+
+
+CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_systemd, check_config, check_desktop,
+          check_relay]
 MARK = {"ok": "OK  ", "ng": "NG  ", "warn": "注意", "skip": "--  "}
 
 

@@ -34,7 +34,7 @@ claude-kitty doctor                        # 足りないものと直し方
 | 部品 | 行うこと | 外す（`--uninstall`） |
 |---|---|---|
 | `--links` | `bin/` の全コマンドを `~/.local/bin`（`$CLAUDE_KITTY_BIN_DIR`）にリンク。既にある別のファイルは上書きしない | このリポジトリを指すリンクだけ消す |
-| `--hooks[=state,lang,guard]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。既存のキーと hook は残し、同じ道具・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じ道具の hook を外す（手で入れたものも）。`--all --uninstall` は lang も外す |
+| `--hooks[=state,lang,guard,relay]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。`relay`（claude-relay。7.）も `--hooks=relay` と明示したときだけ。既存のキーと hook は残し、同じ道具・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じ道具の hook を外す（手で入れたものも）。`--all --uninstall` は lang と relay も外す |
 | `--kitty` | kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）を足し（末尾なので、自分の `listen_on`・`enabled_layouts`・`allow_remote_control`・`filter_notification` は上書きされる。あれば先に「!」で見せる）、`claude_state_watcher.py` と `claude3.session` のリンクを張る。kitty.conf がこのリポジトリの `kitty/kitty.conf` へのリンクなら触らない | 足した行とリンクだけ外す |
 | `--systemd` | `contrib/systemd/` のユニットを `~/.config/systemd/user/` に、パスを置き換えて写し、`daemon-reload` と `enable --now`（Linux だけ）。手で入れた中身の違うユニットは上書きしない | 自分が入れたユニットを止めて消す |
 | `--launchd` | `contrib/launchd/` の LaunchAgent を `~/Library/LaunchAgents/`（`$CLAUDE_KITTY_LAUNCH_AGENTS`）に、パス・PATH・HOME を置き換えて写し、`launchctl bootstrap gui/<uid>`（macOS だけ）。中身が変わったら `bootout` してから読み込み直す。手で入れた中身の違うものは上書きしない | 自分が入れたものを `launchctl bootout` して消す |
@@ -185,7 +185,9 @@ name=$(printf '%s' "$input" | jq -r '.session_name // "?"')
 command -v claude-state >/dev/null 2>&1 && [ -n "$sid" ] && name=$(claude-state paint "$sid" "$name")
 # サブエージェントの要約（動いている数 / 終わったまま残っている数と、いちばん古いものからの時間）。無ければ空
 subs=$(command -v claude-state >/dev/null 2>&1 && [ -n "$sid" ] && claude-state subagents "$sid")
-printf '%s%s' "$name" "${subs:+ | $subs}"
+# 別の端末から届いていれば「端末 mac-a から 1 通」（claude-relay を使うときだけ。7.）
+relay=$(command -v claude-relay >/dev/null 2>&1 && [ -n "$sid" ] && claude-relay status "$sid")
+printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 ```
 
 ## 6. 守るべき決まり
@@ -196,6 +198,50 @@ printf '%s%s' "$name" "${subs:+ | $subs}"
 - kitty を Claude Code の Bash ツールから直接起動しない。`CLAUDE_*` を引き継いで、中の claude が子セッション扱いになり会話記録を残さない。`claude-kitty` がそれらを消してから起動する。
 - kitty を縮めたり、窓を動かしたりしない（全ペインの claude-code が再描画で崩れることがある）。`claude-browser` は kitty の上に重ねるだけ。
 - `bin/` の道具は動いているプロセスが読んでいることがある。更新するときは別のファイルに書いてから `mv` で差し替える（シェルスクリプトは実行中に読み進めるため）。
+
+## 7. 端末をまたぐ連絡（claude-relay）
+
+別の端末（別の人・別の claude.ai アカウントでもよい）の Claude Code セッションと、LAN の中でメッセージをやりとりする。使う人だけが入れる。仕組みと安全の考え方は [docs/relay.md](docs/relay.md)。ここでは、こちら（例: Linux の `linux-desk`、ユーザー `taro`）と先方（例: mac の `mac-a`、ユーザー `hanako`）の両方で受け取れるようにする手順を書く。片方だけが受け取ればよいなら、その側だけ 1.〜2. と、相手の 3. を行う。
+
+**sshd をインターネットに出さないこと**（ルーターのポート転送をしない）。LAN の中だけで使う。
+
+### 1. 受け取る側の sshd を動かす
+
+- **macOS**: 「システム設定」→「一般」→「共有」→「リモートログイン」を入れる。右の (i) で「アクセスを許可」を自分のユーザーだけにしてよい（「すべてのユーザー」でなくてよい）。古い macOS では「システム環境設定」→「共有」→「リモートログイン」。入ったかは別の端末から `ssh hanako@mac-a.local true`、または `claude-kitty doctor` の「relay: sshd」（root なしで分かる範囲を調べる。分からなければ「注意」になる）。ターミナルから入れるなら `sudo systemsetup -setremotelogin on`（新しい macOS では、ターミナルに「フルディスクアクセス」が要ることがある）。
+- **Linux**: `sudo systemctl enable --now sshd`（Debian・Ubuntu はサービス名が `ssh`。無ければ `openssh-server` を入れる）。ファイアウォールがあれば LAN からの 22 番を通す（Fedora: `sudo firewall-cmd --add-service=ssh --permanent && sudo firewall-cmd --reload`）。
+- ホスト名: mac は `mac-a.local` のような名前で届く（「共有」の画面の上に出る）。Linux も avahi（mDNS）があれば `<ホスト名>.local`。届かなければ LAN の IP でもよい（変わらないようにルーターで固定する）。
+
+### 2. 両方の端末で鍵を作り、相手に渡す 1 行を出す
+
+```sh
+claude-relay pair --name linux-desk               # 先方は claude-relay pair --name mac-a
+```
+
+`claude-relay trust linux-desk linux-desk.local taro 'ssh-ed25519 AAAA…'` のような 1 行が出る。ホスト名が相手から届くものでなければ `--host 192.168.1.20` などで出し直す。この 1 行を相手に渡す（公開鍵なので、チャットやメールで渡してよい）。設定の `relay.name` に名前を書いておくと、次から `--name` は要らない。
+
+### 3. 相手の 1 行を実行する
+
+```sh
+claude-relay trust mac-a mac-a.local hanako 'ssh-ed25519 AAAA…'   # 先方から受け取った 1 行
+```
+
+- 何をするか（authorized_keys に足す受け取り専用の行・設定の `relay.peers`・相手の host key の指紋）を見せて、確認を取る。前に登録した host key と違えば止まる（相手に確かめてから `--replace-host-key`）。
+- **host key の指紋を相手と見比べる**: 相手の端末で `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`（mac も同じ場所）を出してもらい、trust が見せた `ssh-ed25519 SHA256:…` と同じなら y。違えば止める（別の機械に繋がっているかもしれない）。
+- 相手の sshd がまだ動いていなければ、host key を取れないと出る。残りは登録されるので、相手の sshd が動いてから同じ 1 行をもう一度（同じ名前は置き換えるので二重にならない）。
+
+### 4. hook を入れ、確かめる
+
+```sh
+~/claude-kitty/tools/install.sh --hooks=relay    # 受け取る側。UserPromptSubmit と Stop に claude-relay hook を足す
+claude-kitty doctor                             # relay: sshd・鍵・送る相手・受け取りの登録・hook
+claude-relay ping mac-a                         # 「届く: mac-a/main は受け取れる」
+claude-relay send mac-a "テストです"              # 先方の統括のペインが待受の色になり、統括が次のターンで読む
+claude-relay log                                # 送受信の記録
+```
+
+- 受け取るのは統括（`view.left`、既定 `main`）の役割のセッションだけ。統括が kitty の中にいなければ受信箱に置かれ、統括が動いたときに渡る。
+- ステータス行に「端末 mac-a から 1 通」を出すなら、5. の例に `claude-relay status "$sid"` を足す（[docs/relay.md の「ステータス行」](docs/relay.md#ステータス行)）。
+- 止めるとき: 設定の `relay.enabled` を `false`（受け取らない）。相手を外すとき: `claude-relay untrust mac-a`。hook を外すとき: `tools/install.sh --hooks=relay --uninstall`。
 
 ## macOS での導入
 
