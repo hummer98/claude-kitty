@@ -175,14 +175,16 @@ def load_roster_config(env, path=None):
     return out
 
 
-DEFAULT_BROWSER = {"command": None, "profile_root": None}
+DEFAULT_BROWSER = {"enabled": True, "command": None, "profile_root": None}
 
 
 def load_browser_config(env, path=None):
-    """claude-browser の設定 {"command", "profile_root"} を返す（無ければ既定: どちらも null で自動で探す）。
+    """claude-browser の設定 {"enabled", "command", "profile_root"} を返す（無ければ既定: 使う・どちらも null で自動で探す）。
 
       {"browser": {"command": ["flatpak", "run", "com.google.Chrome"], "profile_root": "~/chrome-profiles"}}
 
+    enabled が false なら claude-browser は Chrome を起動・操作せず、claude-show は OS の既定のアプリで開く
+    （ブラウザの使い方を自分で決めている人の邪魔をしないため）。
     command は起動のコマンド（文字列のリスト。引数を足してもよい）。探す順と置き場の既定は lib/browser.py。
     壊れていれば ValueError（別のブラウザ・別のプロファイルで黙って開かないよう、呼ぶ側は止める）。"""
     path = Path(path) if path else config_path(env)
@@ -196,13 +198,16 @@ def load_browser_config(env, path=None):
     b = data.get("browser", {}) if isinstance(data, dict) else {}
     if not isinstance(b, dict):
         raise ValueError(f"{path} の browser がオブジェクトでない")
+    e = b.get("enabled", True)
+    if not isinstance(e, bool):  # "false" や 0 を黙って「使う」「使わない」のどちらかに読み替えない
+        raise ValueError(f"{path} の browser.enabled は true / false: {e!r}")
     c = b.get("command")
     if c is not None and not (isinstance(c, list) and c and all(isinstance(x, str) and x for x in c)):
         raise ValueError(f"{path} の browser.command は空でない文字列のリスト（[\"google-chrome\"] など）か null: {c!r}")
     r = b.get("profile_root")
     if r is not None and not (isinstance(r, str) and r):
         raise ValueError(f"{path} の browser.profile_root はフォルダのパスの文字列か null: {r!r}")
-    out.update(command=list(c) if c else None, profile_root=r)
+    out.update(enabled=e, command=list(c) if c else None, profile_root=r)
     return out
 
 

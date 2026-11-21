@@ -255,6 +255,9 @@ def check_runtimes(ctx, rep):
         fix = ("brew install python で 3.9 以降を入れ、PATH で /usr/bin より前にする" if ctx.os_name == "Darwin"
                else f"python3 を {want} 以降にする")
         rep.ng("python3", f"{v}（{want} より古い）", fix)
+    if browser_off(ctx):  # node を使うのは claude-browser の CDP だけ
+        rep.skip("node", "調べない（browser.enabled: false）")
+        return
     node = ctx.which("node")
     if not node:
         rep.warn("node", "無い（claude-browser の shot などの CDP が使えない）", "Node.js 22 以降を入れる")
@@ -454,14 +457,26 @@ def check_config(ctx, rep):
 
 # ---- デスクトップ・Chrome ------------------------------------------------------
 
+def browser_off(ctx):
+    """設定の browser.enabled が false か（壊れた設定は「設定: browser」の行で NG にするので、ここでは False）。"""
+    from config import load_browser_config
+    try:
+        return not load_browser_config(ctx.env)["enabled"]
+    except ValueError:
+        return False
+
+
 def check_browser(ctx, rep):
     """claude-browser と同じ探し方（lib/browser.py）で、起動する Chrome とプロファイルの置き場を出す。"""
     from browser import FLATPAK_CHROME, SEARCHED, find_browser
     from config import load_browser_config
+    if browser_off(ctx):  # Chrome を探さない（flatpak info も呼ばない）
+        rep.ok("browser", "オフ（browser.enabled: false）")
+        return
     try:
         conf = load_browser_config(ctx.env)
     except ValueError:
-        conf = {"command": None, "profile_root": None}  # 壊れた設定は「設定: browser」の行で NG にする
+        conf = {"enabled": True, "command": None, "profile_root": None}  # 壊れた設定は「設定: browser」の行で NG にする
 
     def flatpak_has(app):
         fp = ctx.which("flatpak")

@@ -23,7 +23,7 @@ from config import load_browser_config  # noqa: E402
 
 HOME = Path("/home/u")
 LEGACY = HOME / ".var/app/com.google.Chrome/claude-profiles"
-NONE = {"command": None, "profile_root": None}
+NONE = {"enabled": True, "command": None, "profile_root": None}
 
 
 def find(paths=(), flatpaks=(), dirs=(), conf=None, env=None, os_name="Linux"):
@@ -187,7 +187,16 @@ class Config(unittest.TestCase):
 
     def test_values(self):
         got = self.load({"browser": {"command": ["flatpak", "run", "com.google.Chrome"], "profile_root": "~/p"}})
-        self.assertEqual(got, {"command": ["flatpak", "run", "com.google.Chrome"], "profile_root": "~/p"})
+        self.assertEqual(got, {"enabled": True, "command": ["flatpak", "run", "com.google.Chrome"], "profile_root": "~/p"})
+        self.assertFalse(self.load({"browser": {"enabled": False}})["enabled"])
+        self.assertTrue(self.load({"browser": {"enabled": True}})["enabled"])
+
+    def test_bad_enabled(self):
+        # "false" や 0 を黙って「使う」「使わない」のどちらかに読み替えない
+        for bad in ("false", "off", 0, 1, None, [], {}):
+            with self.assertRaises(ValueError, msg=repr(bad)) as cm:
+                self.load({"browser": {"enabled": bad}})
+            self.assertIn("browser.enabled", str(cm.exception))
 
     def test_bad_shapes(self):
         for bad in ({"browser": []}, {"browser": {"command": "google-chrome"}}, {"browser": {"command": []}},
@@ -310,6 +319,70 @@ class Cli(unittest.TestCase):
     def test_list_without_browser_still_works(self):
         r = self.run_("list")
         self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+
+    LOGGING_CHROME = """#!/bin/sh
+echo "$*" >> "$FAKE_LOG/chrome.calls"
+exit 0
+"""
+
+    def off(self):
+        self.put("google-chrome", self.LOGGING_CHROME)
+        self.put("flatpak", FAKE_FLATPAK)
+        self.cfg.write_text(json.dumps({"browser": {"enabled": False}}))
+
+    def test_off_every_subcommand_but_close_exits_3(self):
+        self.off()
+        for cmd in (["open", "https://example.com"], ["open", "https://e", "--mode", "show"], ["move"],
+                    ["shot", str(self.root / "s.png")], ["url"], ["status"], ["list"], ["profiles"], ["note", "x"]):
+            r = self.run_("--key", "role-x", *cmd)
+            self.assertEqual(r.returncode, 3, (cmd, r.stderr))
+            self.assertEqual(r.stdout, "", cmd)
+            lines = r.stderr.strip().splitlines()
+            self.assertEqual(len(lines), 1, (cmd, r.stderr))
+            self.assertIn("browser.enabled が false なのでオフ", lines[0])
+            self.assertIn(str(self.cfg), lines[0])
+        r = self.run_("list")  # --key 無し（kitty の外）でも同じ
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertFalse((self.log / "chrome.calls").exists())  # Chrome を起動しない
+        self.assertFalse((self.log / "flatpak.calls").exists())  # 探しもしない
+        self.assertFalse((self.root / "run/claude-browser").exists())  # 状態も作らない
+        self.assertFalse((self.home / ".local/share/claude-kitty").exists())  # note で台帳も作らない
+
+    def test_off_still_allows_close_help_version(self):
+        self.off()
+        r = self.run_("--key", "role-x", "close")  # 前に開いた Chrome の片づけ（動いていなければ何もしない）
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "closed")
+        self.assertFalse((self.log / "chrome.calls").exists())
+        for args in (["--help"], ["open", "--help"]):
+            r = self.run_(*args)
+            self.assertEqual(r.returncode, 0, args)
+            self.assertIn("usage", r.stdout)
+            self.assertNotIn("オフ", r.stderr)
+        r = self.run_("--version")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("claude-browser", r.stdout)
+
+    def test_enabled_true_or_missing_is_as_before(self):
+        self.put("google-chrome", FAKE_CHROME)
+        for conf in ({"browser": {"enabled": True}}, {"browser": {}}, {}):
+            self.cfg.write_text(json.dumps(conf))
+            self.assertEqual(self.status()["browser"], [str(self.fake / "google-chrome")], conf)
+            r = self.run_("list")
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_bad_enabled_value_is_a_broken_config(self):
+        # 文字列の "false" はオフでもオンでもなく設定の誤り: 今までの壊れた設定と同じく open / move は止め、ほかは知らせて続ける
+        self.put("google-chrome", self.LOGGING_CHROME)
+        self.cfg.write_text(json.dumps({"browser": {"enabled": "false"}}))
+        r = self.run_("--key", "role-x", "status")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("browser.enabled", r.stderr)
+        for cmd in (["open", "https://example.com"], ["move"]):
+            r = self.run_("--key", "role-x", *cmd)
+            self.assertEqual(r.returncode, 1, cmd)
+            self.assertIn("browser.enabled", r.stderr)
+        self.assertFalse((self.log / "chrome.calls").exists())
 
     def test_launch_argv_keeps_class_for_native(self):
         import importlib.machinery as m
@@ -443,6 +516,51 @@ class Doctor(unittest.TestCase):
         rep = D.Report()
         D.check_config(ctx, rep)
         self.assertEqual({i["name"]: i for i in rep.items}["設定: browser"]["status"], "ng")
+
+    def ctx(self, os_name="Linux"):
+        return D.Ctx(env={"HOME": str(self.home), "PATH": "/nowhere", "CLAUDE_KITTY_CONFIG": str(self.cfg)},
+                     os_name=os_name, run=self.fake_run, which=self.which_map.get, repo=ROOT)
+
+    def test_off_does_not_look_for_chrome(self):
+        self.which_map.update({"flatpak": "/usr/bin/flatpak", "google-chrome": "/usr/bin/google-chrome",
+                               "node": "/usr/bin/node"})
+        self.flatpaks.add("com.google.Chrome")
+        self.cfg.write_text(json.dumps({"browser": {"enabled": False}}))
+        items = self.items()
+        self.assertNotIn("Chrome", items)
+        self.assertEqual((items["browser"]["status"], items["browser"]["detail"]), ("ok", "オフ（browser.enabled: false）"))
+        self.assertFalse([c for c in self.calls if os.path.basename(c[0]) == "flatpak"])  # flatpak info も呼ばない
+        rep = D.Report()
+        D.check_runtimes(self.ctx(), rep)
+        self.assertEqual({i["name"]: i for i in rep.items}["node"]["status"], "skip")  # node は claude-browser だけが使う
+        self.assertFalse([c for c in self.calls if os.path.basename(c[0]) == "node"])
+        rep = D.Report()
+        D.check_config(self.ctx(), rep)
+        self.assertEqual({i["name"]: i for i in rep.items}["設定: browser"]["status"], "ok")
+        rep = D.Report()
+        D.check_desktop(self.ctx("Darwin"), rep)  # macOS でも同じ
+        self.assertEqual({i["name"]: i for i in rep.items}["browser"]["status"], "ok")
+        self.assertNotIn("Chrome", {i["name"] for i in rep.items})
+
+    def test_enabled_true_still_looks_for_chrome(self):
+        self.which_map.update({"google-chrome": "/usr/bin/google-chrome", "node": "/usr/bin/node"})
+        self.cfg.write_text(json.dumps({"browser": {"enabled": True}}))
+        items = self.items()
+        self.assertEqual(items["Chrome"]["status"], "ok")
+        self.assertNotIn("browser", items)
+        rep = D.Report()
+        D.check_runtimes(self.ctx(), rep)
+        self.assertNotEqual({i["name"]: i for i in rep.items}["node"]["status"], "skip")
+
+    def test_bad_enabled_is_ng_in_config_and_chrome_still_checked(self):
+        self.which_map["google-chrome"] = "/usr/bin/google-chrome"
+        self.cfg.write_text(json.dumps({"browser": {"enabled": "no"}}))
+        self.assertIn("Chrome", self.items())  # オフとは読まない
+        rep = D.Report()
+        D.check_config(self.ctx(), rep)
+        it = {i["name"]: i for i in rep.items}["設定: browser"]
+        self.assertEqual(it["status"], "ng")
+        self.assertIn("browser.enabled", it["detail"])
 
     def test_qdbus6_counts_as_kwin(self):
         self.which_map["qdbus6"] = "/usr/bin/qdbus6"
@@ -922,6 +1040,142 @@ class ShowStaged(unittest.TestCase):
         self.assertEqual(out["warnings"], ["claude-browser: ../x.png は写していない"])  # 呼び手に届く
         self.assertEqual(self.show.browser_staged(""), {})
         self.assertEqual(self.show.browser_staged("[1]"), {})
+
+
+class ShowOff(unittest.TestCase):
+    """browser.enabled が false なら、kitty の中でも HTML・画像・URL を OS の既定のアプリで開く。"""
+
+    def setUp(self):
+        import importlib.machinery as m
+        import importlib.util as u
+        loader = m.SourceFileLoader("claude_show_off", str(ROOT / "bin/claude-show"))
+        self.show = u.module_from_spec(u.spec_from_loader("claude_show_off", loader))
+        loader.exec_module(self.show)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        self.cfg = self.d / "c.json"
+        self.html = self.d / "r.html"; self.html.write_text("<p>x")
+        self.img = self.d / "a.png"; self.img.write_bytes(b"\x89PNG")
+        self.env = {"CLAUDE_KITTY_CONFIG": str(self.cfg), "KITTY_WINDOW_ID": "4",
+                    "KITTY_LISTEN_ON": "unix:/fake/kitty-1"}
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def conf(self, browser):
+        self.cfg.write_text(json.dumps({"view": {"guard": []}, **({"browser": browser} if browser is not None else {})}))
+
+    def fake_run(self, argv, **kw):
+        self.calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def no_kitten(self, *a, **kw):
+        raise AssertionError("オフなのに kitty の overlay を使った")
+
+    def test_html_image_url_go_to_xdg_open(self):
+        self.conf({"enabled": False})
+        with mock.patch.object(self.show, "Kitten", self.no_kitten), mock.patch.object(self.show, "PLATFORM", "linux"):
+            for target, want in ((str(self.html), str(self.html)), (str(self.img), str(self.img)),
+                                 (self.html.as_uri(), str(self.html)), ("https://example.com/", "https://example.com/")):
+                self.calls.clear()
+                code, out = self.show.show(target, self.env, None, run=self.fake_run)
+                self.assertEqual(code, 0, target)
+                self.assertEqual(self.calls, [["xdg-open", want]], target)  # claude-browser は呼ばない
+                self.assertEqual(out, {"shown": "xdg-open", "target": want, "via": "browser.enabled: false"})
+
+    def test_other_kind_goes_to_xdg_open_like_outside_kitty(self):
+        pdf = self.d / "a.pdf"; pdf.write_bytes(b"%PDF")
+        self.conf({"enabled": False})
+        with mock.patch.object(self.show, "PLATFORM", "linux"):
+            code, out = self.show.show(str(pdf), self.env, None, run=self.fake_run)
+        self.assertEqual((code, self.calls), (0, [["xdg-open", str(pdf)]]))
+        self.conf({})  # オンなら今まで通り「開き方が分からない種類」
+        self.calls.clear()
+        code, out = self.show.show(str(pdf), self.env, None, run=self.fake_run)
+        self.assertEqual((code, self.calls), (1, []))
+        self.assertIn("開き方が分からない", out["error"])
+
+    def test_macos_uses_open(self):
+        self.conf({"enabled": False})
+        with mock.patch.object(self.show, "Kitten", self.no_kitten), mock.patch.object(self.show, "PLATFORM", "darwin"):
+            code, out = self.show.show(str(self.img), self.env, None, run=self.fake_run)
+        self.assertEqual((code, self.calls, out["shown"]), (0, [["open", str(self.img)]], "open"))
+
+    def test_opener_failure_is_reported(self):
+        self.conf({"enabled": False})
+        run = lambda argv, **kw: SimpleNamespace(returncode=4, stdout="", stderr="no handler\n")  # noqa: E731
+        with mock.patch.object(self.show, "PLATFORM", "linux"):
+            code, out = self.show.show(str(self.html), self.env, None, run=run)
+        self.assertEqual((code, out["shown"], out["error"], out["via"]), (1, "xdg-open", "no handler", "browser.enabled: false"))
+
+        def boom(argv, **kw):
+            raise OSError("no xdg-open")
+        code, out = self.show.show(str(self.html), self.env, None, run=boom)
+        self.assertEqual(code, 1)
+        self.assertIn("no xdg-open", out["error"])
+
+    def test_missing_file_and_guard_still_checked(self):
+        self.conf({"enabled": False})
+        code, out = self.show.show(str(self.d / "nope.html"), self.env, None, run=self.fake_run)
+        self.assertEqual(code, 1)
+        self.assertIn("ファイルが無い", out["error"])
+        with mock.patch.object(self.show, "is_guarded", lambda env, **kw: (True, "保護する窓")):
+            code, out = self.show.show(str(self.html), self.env, None, run=self.fake_run)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.calls, [])
+
+    def test_enabled_default_and_bad_value_keep_browser_and_overlay(self):
+        # キー無し・true・壊れた値（"false" はオフと読まない）は今まで通り: HTML は claude-browser、画像は overlay
+        launched = []
+
+        class FakeKitten:
+            def __init__(self, *a):
+                pass
+
+            def ls(self):
+                return [{"tabs": [{"is_active": True, "windows": [{"id": 4}]}]}]
+
+            def __call__(self, *args):
+                launched.append(args)
+                return ""
+        for browser in (None, {}, {"enabled": True}, {"enabled": "false"}):
+            self.conf(browser)
+            self.calls.clear()
+            launched.clear()
+            code, out = self.show.show(str(self.html), self.env, None, run=self.fake_run)
+            self.assertEqual(self.calls[0][:2], [str(self.show.BROWSER), "open"], browser)
+            self.assertEqual(out["shown"], "browser")
+            self.assertNotIn("via", out)
+            with mock.patch.object(self.show, "Kitten", FakeKitten), \
+                    mock.patch.object(self.show, "find_window", lambda ls, wid: (ls[0], ls[0]["tabs"][0], {"id": wid})):
+                code, out = self.show.show(str(self.img), self.env, None, run=self.fake_run)
+            self.assertEqual((code, out["shown"]), (0, "overlay"), browser)
+            self.assertEqual(len(launched), 1)
+            self.assertEqual(len(self.calls), 1)  # 画像で xdg-open は呼ばない
+
+    def test_outside_kitty_unchanged(self):
+        self.conf({"enabled": False})
+        env = {"CLAUDE_KITTY_CONFIG": str(self.cfg)}
+        with mock.patch.object(self.show, "PLATFORM", "linux"):
+            code, out = self.show.show(str(self.img), env, None, run=self.fake_run)
+        self.assertEqual((code, out), (0, {"shown": "xdg-open", "target": str(self.img)}))
+
+    def test_cli_with_fake_xdg_open(self):
+        # 実物の bin/claude-show を、偽の xdg-open を置いた PATH で動かす（呼ばれた引数を記録する）
+        self.conf({"enabled": False})
+        fake = self.d / "fake"; fake.mkdir()
+        log = self.d / "xdg.calls"
+        (fake / "xdg-open").write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexit 0\n')
+        (fake / "xdg-open").chmod(0o755)
+        env = {**self.env, "PATH": str(fake), "HOME": str(self.d), "XDG_RUNTIME_DIR": str(self.d / "run")}
+        for target in (self.html, self.img):
+            r = subprocess.run([sys.executable, str(ROOT / "bin/claude-show"), str(target)], env=env,
+                               capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            out = json.loads(r.stdout)
+            self.assertEqual((out["shown"], out["target"], out["via"]), ("xdg-open", str(target), "browser.enabled: false"))
+        self.assertEqual(log.read_text().splitlines(), [str(self.html), str(self.img)])
 
 
 if __name__ == "__main__":

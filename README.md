@@ -150,6 +150,7 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
 - 返り値の `cdp` URL に Playwright の `connectOverCDP` などで接続して操作できる。
 - プロファイルは置き場の `<key>` に残るので、パスキー等のログインは一度人が済ませれば以後使える。
 - 窓の配置は KDE Plasma の KWin（`qdbus`・`qdbus6`・`qdbus-qt6` のどれか）。Linux で KWin が無ければ、何が足りないかを出して止まる。macOS は試験的に、kitty の窓の位置を CoreGraphics で読み、Chrome の窓を CDP で置く（「常に最前面」は無い。置けなければ止めずに普通の窓のまま開く。[SETUP.md](SETUP.md#macos-で使えるもの試験的なもの使えないもの)）。
+- 使わないときは設定で `{"browser": {"enabled": false}}`。`close` のほかは何もしないで終了コード 3 で終わり、`claude-show` は OS の既定のアプリで開く（[docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)）。
 
 ## claude-state（状態の色）
 
@@ -237,6 +238,7 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - 入力先は変えない（overlay も常に `--keep-focus`。ユーザーが打っている途中の文字が overlay に吸われないように）。自分のペインが表示されていないタブにあれば、その旨を `note` に書く。
 - 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確認できないときも同じ）。
 - kitty の外では `xdg-open`（macOS は `open`）に渡す。
+- 設定の `browser.enabled` が `false` なら、kitty の中でも HTML・画像・URL（ほかの種類のファイルも、kitty の外と同じく）を `xdg-open`（macOS は `open`）に渡す（結果の `via` が `"browser.enabled: false"`）。
 - overlay は重ねた先のペインと同じ window group に入るので、claude-view は並べ替えの対象に数えない。
 
 ## claude-relay（端末をまたぐ連絡）

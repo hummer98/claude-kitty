@@ -292,7 +292,7 @@ class ConfigExample(unittest.TestCase):
         self.assertEqual(s["colors"]["waiting"], {"background": "#2e2a22", "name": 208})
         self.assertEqual(s["notice"], {"contains": [], "prefix": []})  # 既定と同じ（印は例として docs/config.md に）
         from config import load_browser_config
-        self.assertEqual(load_browser_config(self.env, self.PATH), {"command": None, "profile_root": None})
+        self.assertEqual(load_browser_config(self.env, self.PATH), {"enabled": True, "command": None, "profile_root": None})
         lang, problems = load_lang_config(self.env, self.PATH)
         self.assertEqual(problems, [])
         self.assertEqual(lang, self.data["lang"])

@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### 追加
+
+- 設定 `browser.enabled`（既定 `true`）: `false` でブラウザの機能（おまけの `claude-browser`・`claude-show` の Chrome）を止める。ブラウザの使い方を自分で決めている人の邪魔をしないため（[docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)）。
+  - `claude-browser` は `close` のほかを何もしないで、stderr に 1 行出して終了コード 3 で終わる（`close` は前に開いた Chrome を片づけるためだけに動く）。
+  - `claude-show` は HTML・画像・URL を OS の既定のアプリ（`xdg-open`、macOS は `open`）で開く（結果の `via` が `"browser.enabled: false"`）。
+  - `claude-kitty doctor` は Chrome を探さず「browser: オフ（browser.enabled: false）」と出し、node も調べない。
+
 ### 修正
 
 - `claude-view equalize`・`add` などが、`claude-show` の画像（overlay）を重ねたペインを「kitty に見つからない」として止まることがあった。kitty（0.51 で確認）は window group の並びで overlay を先に置くことがあり、group の 2 つめ以降を overlay とみなしていたため本体が外れていた。group に window が 2 つ以上あるときは role を持つ window を本体とする（role を持つものが無い・2 つ以上なら従来どおり先頭）。
