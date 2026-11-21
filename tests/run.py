@@ -3037,6 +3037,7 @@ SIDE_TESTS = {
     "launch_test": "Launch",
     "browser_test": "Browser",
     "macos_test": "Mac",
+    "relay_test": "Relay",
 }
 
 

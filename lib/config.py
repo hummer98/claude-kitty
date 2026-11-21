@@ -236,6 +236,86 @@ def load_kitty_config(env, path=None):
     return out
 
 
+DEFAULT_RELAY = {"enabled": True, "name": None, "receivers": ["left"], "max_bytes": 16384,
+                 "rate": {"count": 30, "per_seconds": 600}, "peers": {}}
+# 終わりは \Z（$ は末尾の改行の前でも当たり、authorized_keys に行を足されうるため）
+RELAY_NAME_CORE = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+RELAY_NAME = rf"^{RELAY_NAME_CORE}\Z"                # 端末名・役割名（ファイル名・authorized_keys・ssh の引数に入る）
+RELAY_HOST = r"^[A-Za-z0-9_][A-Za-z0-9._:%-]{0,252}\Z"  # 頭に - を許さない（ssh のオプションと取り違えない）
+RELAY_USER = r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}\Z"
+
+
+def load_relay_config(env, path=None):
+    """claude-relay の設定 {"enabled", "name", "receivers", "max_bytes", "rate", "peers", "present"} を返す。
+
+      {"relay": {"name": "linux-desk", "receivers": ["left"],
+                 "peers": {"mac-a": {"host": "mac-a.local", "user": "taro", "port": 22}}}}
+
+    receivers の "left" は view.left の役割（既定 main）を指す（返す値では役割名に置き換え、重なりを除く）。
+    present は設定ファイルに relay の節があるか（doctor が relay を調べるか決める）。
+    壊れていれば ValueError（受け取る側は拒否し、送る側は止める。黙って別の相手に送らないため）。"""
+    import re
+    path = Path(path) if path else config_path(env)
+    out = json.loads(json.dumps(DEFAULT_RELAY))
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    r = data.get("relay", {}) if isinstance(data, dict) else {}
+    if not isinstance(r, dict):
+        raise ValueError(f"{path} の relay がオブジェクトでない")
+    out["present"] = isinstance(data, dict) and "relay" in data
+    e = r.get("enabled", True)
+    if not isinstance(e, bool):
+        raise ValueError(f"{path} の relay.enabled は true / false: {e!r}")
+    n = r.get("name")
+    if n is not None and not (isinstance(n, str) and re.match(RELAY_NAME, n)):
+        raise ValueError(f"{path} の relay.name は英数字と . _ - の名前（64 字まで）か null: {n!r}")
+    rc = r.get("receivers", ["left"])
+    if isinstance(rc, str):
+        rc = [rc]
+    if not (isinstance(rc, list) and all(isinstance(x, str) and re.match(RELAY_NAME, x) for x in rc)):
+        raise ValueError(f"{path} の relay.receivers は役割名のリスト: {rc!r}")
+    mb = r.get("max_bytes", DEFAULT_RELAY["max_bytes"])
+    if isinstance(mb, bool) or not isinstance(mb, int) or not 1 <= mb <= 1024 * 1024:
+        raise ValueError(f"{path} の relay.max_bytes は 1〜1048576 の整数: {mb!r}")
+    rate = r.get("rate", DEFAULT_RELAY["rate"])
+    if not isinstance(rate, dict):
+        raise ValueError(f"{path} の relay.rate は {{\"count\": N, \"per_seconds\": S}}: {rate!r}")
+    cnt = rate.get("count", DEFAULT_RELAY["rate"]["count"])
+    per = rate.get("per_seconds", DEFAULT_RELAY["rate"]["per_seconds"])
+    if isinstance(cnt, bool) or not isinstance(cnt, int) or cnt < 0:
+        raise ValueError(f"{path} の relay.rate.count は 0 以上の整数: {cnt!r}")
+    if isinstance(per, bool) or not isinstance(per, (int, float)) or not 0 < per <= 7 * 86400:
+        raise ValueError(f"{path} の relay.rate.per_seconds は 0 より大きく 604800 までの数: {per!r}")
+    peers = r.get("peers", {})
+    if not isinstance(peers, dict):
+        raise ValueError(f"{path} の relay.peers は 名前 → {{host, user, port}}")
+    clean = {}
+    for name, p in peers.items():
+        where = f"{path} の relay.peers.{name}"
+        if not re.match(RELAY_NAME, name):
+            raise ValueError(f"{where}: 名前は英数字と . _ - （64 字まで）")
+        if not isinstance(p, dict):
+            raise ValueError(f"{where} がオブジェクトでない")
+        host, user, port = p.get("host"), p.get("user"), p.get("port", 22)
+        if not (isinstance(host, str) and re.match(RELAY_HOST, host)):
+            raise ValueError(f"{where}.host が正しくない: {host!r}")
+        if not (isinstance(user, str) and re.match(RELAY_USER, user)):
+            raise ValueError(f"{where}.user が正しくない: {user!r}")
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError(f"{where}.port は 1〜65535: {port!r}")
+        clean[name] = {"host": host, "user": user, "port": port}
+    view = data.get("view") if isinstance(data, dict) else None
+    left = env.get("CLAUDE_VIEW_LEFT") or (view.get("left") if isinstance(view, dict) and isinstance(view.get("left"), str)
+                                          and view.get("left") else DEFAULT_VIEW["left"])
+    roles = list(dict.fromkeys(left if x == "left" else x for x in rc))
+    out.update(enabled=e, name=n, receivers=roles, max_bytes=mb, rate={"count": cnt, "per_seconds": per}, peers=clean)
+    return out
+
+
 if __name__ == "__main__":
     # bin/claude-kitty（bash）用: "kitty-launch" で「デスクトップの番号（無ければ -） 最大化（1/0）」を 1 行出す。
     # 設定が壊れていれば stderr に理由を出し、既定（移さない・最大化しない）を出す（起動は止めない）
