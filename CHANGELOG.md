@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-22
+
 ### 追加
 
 - 設定 `browser.enabled`（既定 `true`）: `false` でブラウザの機能（おまけの `claude-browser`・`claude-show` の Chrome）を止める。ブラウザの使い方を自分で決めている人の邪魔をしないため（[docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)）。
@@ -276,7 +278,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/hummer98/claude-kitty/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/hummer98/claude-kitty/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/hummer98/claude-kitty/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/hummer98/claude-kitty/compare/v0.6.1...v0.6.2
