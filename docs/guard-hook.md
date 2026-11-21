@@ -46,7 +46,7 @@
 注釈は語の頭の `#` だけ（`a#b` は注釈でない）。`2>/dev/null` の `2` は引数に数えない。バッククォートと `$(...)` の中も読む。`then` `do` `else` `{` `!` などの予約語は外して後ろのコマンドを見る（`for x in ...` の頭は見ない）。
 
 - **cd を追う**: `cd X`（`pushd`）の後のコマンドは X で動くとみる（`cd <保護したパス> && git pull` を捕まえるため）。サブシェル `( ... )` の中の cd は外に持ち出さない。`~`、`$HOME`、同じコマンドの中で代入した変数（`D=...; cd "$D"`）は展開する。
-- **コマンドの位置の変数**: 同じ Bash のコマンドの中で前に代入した変数（`T=…;`・`T="…";`・`export T=…`・`&&` や改行でつないだもの）が、コマンドの位置に語まるごとの `$T` / `${T}` で来たら、値を語に分けて（シェルの引用の規則で）読む。`T="python3 /x/svcctl.py --owner a"; $T deploy` は `svcctl.py deploy` として見る。前に付けたもの（`timeout 5 $T`・`X=1 $T`）や `python3 $T` の後ろでも同じ。引数の位置の `$T` は今までどおり値 1 語のまま置き換える。展開しないもの: コマンド置換で作った値（`T=$(…)`）、関数、このコマンドの中で代入していない変数（hook の環境の変数は値 1 語として置き換えるだけで分けない）、サブシェル `( … )` の中の代入、前の Bash の呼び出しで代入したもの。引用の有無は読めないので、`"$T"` も分けて読む（bash では動かない形なので、止める側に寄るだけ）。
+- **コマンドの位置の変数**: 同じ Bash のコマンドの中で前に代入した変数（`T=…;`・`T="…";`・`export T=…`・`&&` や改行でつないだもの）が、コマンドの位置に語まるごとの `$T` / `${T}` で来たら、値を語に分けて（シェルの引用の規則で）読む。`T="python3 /x/svcctl.py --owner a"; $T deploy` は `svcctl.py deploy` として見る。前に付けたもの（`timeout 5 $T`・`X=1 $T`）や `python3 $T` の後ろでも同じ。引数の位置の `$T` は今までどおり値 1 語のまま置き換える。展開しないもの: コマンド置換で作った値（`T=$(…)`）、関数、このコマンドの中で代入していない変数（hook の環境の変数は値 1 語として置き換えるだけで分けない）、サブシェル `( … )` の中の代入、前の Bash の呼び出しで代入したもの。引用の有無は（語に分けた後では）読めない。`"$T"` は bash では分けずに 1 語で動く（`S="/opt/my tools/svcctl"; "$S" deploy` は動く）ので、コマンドの位置の変数は分けた形と分けない形の両方で読み、どちらかが止める形なら止める。分けない形のプログラム名は `svcctl.py --owner a` のようになるので、`program` を `^svcctl(\\.py)?$` のように `$` まで書けば当たらない。`$` で終わらない正規表現だと分けない形にも当たり、そこでは名乗りが読めないので、`$T` に `--owner X` を入れた形は `allow_owner` の例外にならない。
 - **パスへの書き込み**（`paths` の下に当たるもの）:
   - git の `merge` `pull` `checkout` `switch` `restore` `reset` `commit` `rebase` `cherry-pick` `revert` `am` `apply` `clean` `mv` `rm` `stash`（`list` / `show` は除く）`bisect` `submodule`（`status` などは除く）`sparse-checkout` `checkout-index` `read-tree -u`。場所は cwd、`-C` / `--work-tree` / `--git-dir`、前に付けた `GIT_WORK_TREE=` / `GIT_DIR=`。`clone` / `init` / `worktree add` / `archive -o` / `format-patch` は行き先で見る。`status` `log` `diff` `show` `add` `branch` `tag` などは通す。
   - `mkdir` `rm` `rmdir` `mv` `touch` `unlink` `truncate` `shred` `chmod` `chown` `chgrp` `tee` `patch`: 引数のどれか。
@@ -75,7 +75,7 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 1. 環境変数 `CLAUDE_GUARD_ALLOW=<名前>`（カンマ区切り可）か `all`（`1` も all）。hook のプロセスの環境にあれば全部、Bash のコマンドの前に付ければそのコマンドだけ（`CLAUDE_GUARD_ALLOW=app-running svcctl deploy a`）、`export CLAUDE_GUARD_ALLOW=...` ならその後のコマンド。
 2. 許可のファイル: `claude-guard allow <名前|all> --minutes 30 --reason "e2e"`。`$XDG_RUNTIME_DIR/claude-guard/<名前>.allow` に期限と理由を書く。期限が過ぎれば無効。`claude-guard revoke <名前|all>` で消す。
 3. ロックの持ち主（下）。
-4. 起動した担当（`commands` の `{"program"}` の項目の `allow_owner`。下）。その項目の形だけを通す。
+4. 起動した担当（`commands` の `{"program"}` の項目の `allow_owner`。下）。その項目の形だけを通す。旗・ロックの間は使わない。
 
 ### 起動した担当だけ通す（allow_owner）
 
@@ -100,7 +100,7 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 3. その `pid` が動いていて、引数（`pgrep -f` と同じく空白でつないだもの）が、そのガードの `process` のどれかに当たる（pid の使い回しや、残った古い記録を効かせないため。macOS は `lib/proc.py` で読む）。
 4. `same_role` なら、セッションの役割が X。役割は claude-state の記録（`$XDG_RUNTIME_DIR/claude-state/<session_id>.json` の `role`）から読む（hook を遅くしないよう kitty には聞かない）。**役割が分からないセッション（記録が無い・ペインに role が無い・kitty の外）は通さない**: 例外は止めを緩める側なので、確かでないときは今までの止める側に倒す。kitty の外で使うなら `"same_role": false`。
 
-記録が無い・読めない・壊れている・どれかが合わないときは例外にならず、今までどおり止める。設定の誤り（`file` の形が違う、`option` / `env` が無いなど）は、その例外を使わずに「問題:」に出す。`allow_owner` は `process` のあるガードの `commands` の `{"program"}` の項目にだけ書ける。例外はその項目の `block` 全部に効く。起動した担当にも一部（`load` など）は止めたいなら、項目を 2 つに分け、`allow_owner` は通してよいサブコマンド（`quit` など）の項目にだけ書く。旗で働いているときも、項目の形の理由だけを外す（同じコマンドの保護したパスへの書き込みは止める）。
+記録が無い・読めない・壊れている・どれかが合わないときは例外にならず、今までどおり止める。設定の誤り（`file` の形が違う、`option` / `env` が無いなど）は、その例外を使わずに「問題:」に出す。`allow_owner` は `process` のあるガードの `commands` の `{"program"}` の項目にだけ書ける。例外はその項目の `block` 全部に効く。起動した担当にも一部（`load` など）は止めたいなら、項目を 2 つに分け、`allow_owner` は通してよいサブコマンド（`quit` など）の項目にだけ書く。例外が外すのは項目の形の理由だけ（同じコマンドの保護したパスへの書き込みは止める）。**旗（`claude-guard on <名前>`）・ロック（`acquire`）が立っている間は例外を使わない**（旗は「全員を止める」ため。process も同時に動いていても止める）。例外が効くのは、旗もロックも無く、`process`（か `command`）で働いているときだけ。`claude-guard status` は旗の間「旗（ロック）の間は使わない」と出す。
 
 理由の文には通す道を書かない（止められたサブエージェントが自分で外さないように）。外すのは依頼主か統括の判断。
 

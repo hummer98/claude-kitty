@@ -734,13 +734,25 @@ def _split_assignments(words):
     return assigns, words[i:]
 
 
-def _unwrap(words):
+def _var_word(word, split):
+    """コマンドの位置の $T の値。split なら語に分け、そうでなければ 1 語（"$T" の形。空なら語にならないとみる）。"""
+    value = word[len(SPLIT):]
+    if split:
+        return _split_value(value)
+    value = value.replace(SPLIT, "")
+    return [value] if value else []
+
+
+def _unwrap(words, split=True):
     """予約語（then / do / ! など）と env / nohup / timeout などを外し、python3 x.py の形は x.py をプログラムとみる。
-    (words, assigns)。for / case の頭は語の並びでコマンドでないので、空にする。"""
+    (words, assigns)。for / case の頭は語の並びでコマンドでないので、空にする。
+
+    split はコマンドの位置の $T（目印 SPLIT の付いた語）を語に分けるか。引用の有無（$T か "$T" か）は shlex の後で
+    読めないので、呼ぶ側が両方で読む。"""
     assigns = {}
     while words:
         if words[0].startswith(SPLIT):          # T="python3 x.py"; $T quit の $T
-            words = _split_value(words[0][len(SPLIT):]) + words[1:]
+            words = _var_word(words[0], split) + words[1:]
             continue
         name = os.path.basename(words[0])
         if words[0] in RESERVED:
@@ -786,7 +798,7 @@ def _unwrap(words):
                 i += 2 if words[i] in PYTHON_VALUE_OPTS else 1
             if i < len(words):
                 if words[i].startswith(SPLIT):      # python3 $T quit の $T（値に引数が入っていれば分ける）
-                    words = words[:i] + _split_value(words[i][len(SPLIT):]) + words[i + 1:]
+                    words = words[:i] + _var_word(words[i], split) + words[i + 1:]
                     continue
                 return words[i:], assigns
         break
@@ -981,9 +993,10 @@ def session_role(env, session):
 class Context:
     """1 回の判定で共有するもの（hook の環境・セッション）と、記録・役割の読みの控え（同じコマンドの中で 1 度だけ読む）。"""
 
-    def __init__(self, env, session=None):
+    def __init__(self, env, session=None, owner_ok=True):
         self.env = env
         self.session = session
+        self.owner_ok = owner_ok                  # allow_owner を使うか（旗・ロックで働いている間は使わない）
         self._launch = {}
         self._role = None
         self._role_read = False
@@ -1120,24 +1133,42 @@ class Analyzer:
             self.local |= set(assigns)
             self.allowed |= allow_names(assigns.get(ALLOW_ENV))
             return
-        rest, more = _unwrap(rest)
+        raw = rest
+        rest, more = _unwrap(raw)
         rest = _unmark(rest)                   # 引数の位置の $T は値 1 語のまま（今までどおり）
         assigns.update(more)
+        # コマンドの位置の $T は、"$T"（分けない）でも bash は動く。引用の有無は読めないので、分けない形でも読み、
+        # どちらかが止める形なら止める（S="/opt/my tools/svcctl"; "$S" deploy を見逃さない）
+        alt, alt_more = _unwrap(raw, split=False)
+        alt = _unmark(alt)
         self._paths, self._cmds = [], []
         for r in redirs:
             if self.protected(r):
                 self.add(f"保護したパスへのリダイレクト（> {r}）")
+        cmds = []
+        if alt != rest and alt:
+            saved = (self.cwd, dict(self.vars), set(self.allowed), set(self.exported), set(self.local))
+            self.command(alt, dict(assigns, **alt_more))
+            self.cwd, self.vars, self.allowed, self.exported, self.local = saved   # 状態（cd・export）は分けた形のだけ残す
+            cmds = self.allowed_cmds(alt)
+        self._cmds = []
         if rest:
             self.command(rest, assigns)
             self.stdin_bodies(rest, bodies)
+        cmds += [c for c in self.allowed_cmds(rest) if c not in cmds]
         if self.lets_through(self.allowed | allow_names(assigns.get(ALLOW_ENV))):
             return
-        # allow_commands はコマンドの形の理由だけを消す（git push --dry-run > <保護したパス> は止める）
-        if self._cmds and rest and any(match_entry(e, rest) for e in self.guard["allow_commands"]):
-            self._cmds = []
-        for r in self._paths + self._cmds:
+        for r in self._paths + cmds:
             if r not in self.reasons:
                 self.reasons.append(r)
+
+    def allowed_cmds(self, rest):
+        """いまの self._cmds から、allow_commands に当たる形の理由を外したもの。
+
+        allow_commands はコマンドの形の理由だけを消す（git push --dry-run > <保護したパス> は止める）。"""
+        if self._cmds and rest and any(match_entry(e, rest) for e in self.guard["allow_commands"]):
+            return []
+        return list(self._cmds)
 
     def stdin_bodies(self, words, bodies):
         """bash <<'EOF' … や ssh host <<'EOF' … は、本文をコマンドとして動かす。本文を bash -c の中身と同じに読む。"""
@@ -1197,7 +1228,7 @@ class Analyzer:
         """allow_owner の例外に当たるか（起動した担当が、自分で起動したものに対して使うとき）。"""
         kind, spec = entry
         o = spec.get("allow_owner") if kind == "program" else None
-        if not o:
+        if not o or not self.ctx.owner_ok:
             return False
         claimed = claimed_owner(o, words, assigns, self.vars, self.exported, spec["value_options"])
         if not claimed:
@@ -1572,8 +1603,8 @@ def active(guard, env, probe=Probe, now=None, assume=False):
 
 # ---- 判定 ------------------------------------------------------------------
 
-def find_reasons(guard, tool, tool_input, cwd, env, session=None):
-    """1 つのガードについて、止める候補の理由のリスト（働いているかは見ない）。"""
+def find_reasons(guard, tool, tool_input, cwd, env, session=None, owner_ok=True):
+    """1 つのガードについて、止める候補の理由のリスト（働いているかは見ない）。owner_ok は allow_owner を使うか。"""
     if tool in FILE_TOOLS:
         roots = Roots(guard["paths"])
         p = tool_input.get(FILE_TOOLS[tool]) or tool_input.get("file_path") or tool_input.get("notebook_path")
@@ -1586,7 +1617,7 @@ def find_reasons(guard, tool, tool_input, cwd, env, session=None):
         cmd = tool_input.get("command")
         if not isinstance(cmd, str) or not cmd.strip():
             return []
-        return Analyzer(guard, cwd, env, ctx=Context(env, session)).run(cmd)
+        return Analyzer(guard, cwd, env, ctx=Context(env, session, owner_ok)).run(cmd)
     return []
 
 
@@ -1623,11 +1654,11 @@ def evaluate(data, env, probe=Probe, now=None, path=None, assume=False):
     for g in guards:
         if not g["enabled"] or allowed & {"all", g["name"]}:
             continue
-        if session:
-            flag = read_state(env, g["name"], "on", now)
-            if flag and flag.get("owner") == session:
-                continue                  # ロックの持ち主（デプロイしている本人）は、このガードでは止めない
-        reasons = find_reasons(g, tool, tool_input, cwd, env, session)
+        flag = read_state(env, g["name"], "on", now)
+        if session and flag and flag.get("owner") == session:
+            continue                      # ロックの持ち主（デプロイしている本人）は、このガードでは止めない
+        # 旗・ロックは「全員を止める」。allow_owner（起動した担当の例外）は process だけで働いているときに使う
+        reasons = find_reasons(g, tool, tool_input, cwd, env, session, owner_ok=not flag)
         if not reasons:
             continue                      # 止める候補が無ければ、働く条件も調べない（pgrep を呼ばない）
         if read_state(env, g["name"], "allow", now) or read_state(env, "all", "allow", now):
@@ -1659,9 +1690,10 @@ def decide(stdin_text, env, probe=Probe, now=None, path=None):
 
 # ---- status ----------------------------------------------------------------
 
-def owner_status(guard, env):
+def owner_status(guard, env, now=None):
     """allow_owner の例外ごとに（記録のファイルごとに 1 つ）、記録の owner と pid が動いているか。"""
     out, seen = [], set()
+    flagged = bool(read_state(env, guard["name"], "on", now))
     ctx = Context(env)
     for kind, spec in guard["commands"]:
         o = spec.get("allow_owner") if kind == "program" else None
@@ -1673,7 +1705,9 @@ def owner_status(guard, env):
         seen.add(path)
         rec, why = ctx.launch(guard, o)
         head = f"起動した担当の例外（{path}）: "
-        if rec and not why:
+        if flagged:
+            out.append(head + "旗（ロック）の間は使わない（全員を止める）")
+        elif rec and not why:
             out.append(head + f"owner {rec['owner']}、pid {rec['pid']} が動いている → {rec['owner']} は通す"
                        + ("（役割も同じとき）" if o["same_role"] else ""))
         elif rec:
@@ -1707,7 +1741,7 @@ def status_lines(env, probe=Probe, now=None, path=None):
             parts.append(f"許可あり（残り {_minutes_left(allow['until'], now)} 分、{allow.get('reason', '')}）")
         if env_allowed & {"all", g["name"]}:
             parts.append(f"{ALLOW_ENV} で通す")
-        parts.extend(owner_status(g, env))
+        parts.extend(owner_status(g, env, now))
         lines.append("、".join(parts))
     for p in problems:
         lines.append(f"問題: {p}")

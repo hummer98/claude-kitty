@@ -563,6 +563,38 @@ class VarCommand(Base):
         self.assertIsNotNone(self.bash("$T deploy s1", env=dict(self.env, T="svcctl")))
         self.assertIsNone(self.bash("$T deploy s1", env=dict(self.env, T="python3 /x/svcctl.py --owner a")))
 
+    def test_quoted_value_with_spaces_at_command_position(self):
+        # "$S" は bash では分けずに 1 語で動く。引用の有無は読めないので、分けた形と分けない形の両方で読む（退行の修正）
+        tf3 = self.default_guards()
+        for c in ('S="/opt/my tools/svcctl"; "$S" deploy s1',
+                  "S='/opt/my tools/svcctl'; \"${S}\" deploy s1",
+                  'S="/opt/my tools/svcctl"; timeout 5 "$S" deploy s1',
+                  'S="/opt/my tools/svcctl.py"; python3 "$S" deploy s1',
+                  'S=/opt/svcctl; $S deploy s1',
+                  'S=/opt/svcctl; "$S" deploy s1',
+                  'D=5; timeout $D svcctl deploy s1'):
+            self.assertIsNotNone(self.bash(c), c)
+        tf3["app-running"]["commands"].append({"program": "^tf3ctl(\\.py)?$", "value_options": ["--owner"],
+                                               "block": ["quit"]})
+        self.write_config(tf3)
+        for c in ('T="python3 /p/tf3ctl.py --owner x"; $T quit',
+                  'T="python3 /p/tf3ctl.py --owner x"; timeout 5 $T quit',
+                  'T="python3 /p/tf3ctl.py --owner x"; env $T quit',
+                  'T="/p/tf3ctl.py --owner x"; python3 $T quit',
+                  'T="python3 /p/tf3ctl.py --owner x"; if true; then $T quit; fi'):
+            self.assertIsNotNone(self.bash(c), c)
+        # 分けない形で読んでも、cd などの状態は分けた形のものだけが残る / 通すものは通す
+        self.assertIsNone(self.bash('S="/opt/my tools/svcctl"; "$S" status'))
+        self.assertIsNone(self.bash('T="python3 /p/tf3ctl.py --owner x"; $T status'))
+
+    def test_quoted_argument_with_spaces_unchanged(self):
+        # 引数の位置の "$Q" は今までどおり値 1 語（空白入りのパス）
+        d = self.shared_dir / "a b"
+        d.mkdir()
+        self.assertIsNotNone(self.bash(f'Q="{d}"; rm "$Q"'))
+        self.assertIsNone(self.bash(f'Q="{self.real_home}/dev/a b"; rm "$Q"'))
+        self.assertIsNone(self.bash(f'Q="{self.real_home}/dev {self.shared_dir}"; rm "$Q"'))
+
     def test_empty_value_and_paths_still_expand(self):
         self.assertIsNone(self.bash('T=""; $T ls'))
         self.assertIsNotNone(self.bash(f"D={self.shared_dir}/m1; rm -rf $D"))
@@ -626,6 +658,23 @@ class AllowOwner(Base):
             self.assertIsNotNone(self.bash(c, session="s-probe"), c)
         # 同じコマンドの中で、例外に当たるものと当たらないものが並んでいれば止める
         self.assertIsNotNone(self.bash("svcctl --owner probe quit && svcctl --owner x deploy", session="s-probe"))
+
+    def test_flag_or_lock_disables_owner(self):
+        # 旗・ロックは「全員を止める」。process も動いていて owner が合っていても、起動した担当を止める
+        self.launched()
+        self.role("s-probe", "probe")
+        c = "svcctl --owner probe quit"
+        self.assertIsNone(self.bash(c, session="s-probe"))                 # 旗なし + process 動作中 → 通す
+        gh.write_state(self.env, "app-running", "on", 10, "maintenance")
+        self.assertIsNotNone(self.bash(c, session="s-probe"))
+        self.assertIsNotNone(self.bash('T="python3 /x/svcctl.py --owner probe"; $T quit', session="s-probe"))
+        line = next(l for l in gh.status_lines(self.env, fake_probe(process=True))[0] if l.startswith("app-running:"))
+        self.assertIn("旗（ロック）の間は使わない", line)
+        gh.remove_state(self.env, "app-running", "on")
+        self.assertTrue(gh.acquire(self.env, "app-running", 10, "deploy", "s-deployer")[0])   # 別のセッションのロック
+        self.assertIsNotNone(self.bash(c, session="s-probe"))
+        gh.release(self.env, "app-running", "s-deployer")
+        self.assertIsNone(self.bash(c, session="s-probe"))
 
     def test_pid_dead_or_other_process(self):
         self.role("s-probe", "probe")
@@ -752,9 +801,8 @@ class AllowOwner(Base):
         self.assertIsNone(self.bash("svcctl --owner probe quit", session="s-probe"))
         self.launched(pid=os.getpid())                                       # 生きているが別のプロセス
         self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-probe"))
-        # 本物の hook（proc を差し替えない）で、旗で働いているときも例外が効き、速い
+        # 本物の hook（proc・pgrep を差し替えない）で、process で働いているときは例外が効き、速い
         self.launched(pid=child.pid)
-        gh.write_state(self.env, "app-running", "on", 5, "")
         e = dict(os.environ, **self.env)
         e.pop("CLAUDE_GUARD_ALLOW", None)
 
@@ -766,6 +814,10 @@ class AllowOwner(Base):
         self.assertLess(time.monotonic() - t0, 1.0)
         self.assertEqual((r.returncode, r.stdout), (0, ""))
         r = run("svcctl --owner probe quit", "s-other")
+        self.assertIn("deny", r.stdout)
+        # 旗が立てば「全員を止める」。起動した担当も止める
+        gh.write_state(self.env, "app-running", "on", 5, "")
+        r = run("svcctl --owner probe quit", "s-probe")
         self.assertIn("deny", r.stdout)
 
 
