@@ -650,6 +650,8 @@ def cmd_sleep(args, view, conf):
         os.replace(tmp, nxt)
     # 止める直前にもう一度: 同じプロセスのまま idle か（--force なら idle は見ない）
     st = start_time(target)
+    front = pane.get("front_pid")
+    front_st = start_time(front) if front and front != target else None  # 背景セッションの前面を、あとで同じか比べる
     again = next((s for s in live_sessions() if s.get("sessionId") == sid), None)
     word = "" if args.force else state_word(sid)
     if (st is None or not again or guard_running(view["guard"])
@@ -668,26 +670,34 @@ def cmd_sleep(args, view, conf):
             print(f"claude-roster: {args.timeout:.0f} 秒で止まらなかったので、ペインは閉じない（名簿も変えない）",
                   file=sys.stderr)
             return 1
-    front = pane.get("front_pid")
-    if sj.get("kind") == "bg" and front and front != target and start_time(front):
+    if sj.get("kind") == "bg" and front_st is not None and start_time(front):
         time.sleep(3)
-        # restart と同じく、まだそのペインの claude-wait の子のときだけ（pid の再利用で別のプロセスを止めない）
-        if start_time(front) and (not waiter or ppid_of(front) == waiter["pid"]):
+        if R.bg_front_stoppable(front_st, start_time(front), ppid_of(front), waiter["pid"] if waiter else None):
             os.kill(front, signal.SIGTERM)
     # 閉じる前に: そのセッションの claude がどこにもいないこと、ペインの前面にシェルしか残っていないこと
-    closed, closable = False, False
+    closed, closable, ls_failed, unreadable = False, False, False, False
     while time.monotonic() < deadline + min(10.0, args.timeout):
         now_ls = ls(sock)
-        if now_ls is not None:  # ls に失敗したときを「閉じた」と取り違えない
+        ls_failed = now_ls is None  # ls に失敗したときを「閉じた」と取り違えない
+        if not ls_failed:
             w2 = pane_by_id(now_ls, wid)
-            closed = w2 is None  # claude-wait が終わってペインが自分で閉じた
+            closed = closed or w2 is None  # claude-wait が終わってペインが自分で閉じた（window id は使い回されない）
             closable = closed or R.pane_closable(w2)
+            unreadable = not closed and not (w2 or {}).get("foreground_processes")
         if closable and not sid_live(sid):
             break
         time.sleep(0.3)
     else:
         if nxt:
             nxt.unlink(missing_ok=True)
+        if not closed and ls_failed:
+            print(f"claude-roster: claude は止めたが、kitten @ ls に失敗し続けてペインの中を確かめられないので閉じない"
+                  f"（名簿も変えない。確認して閉じてから claude-roster sleep {role} で印を付ける）", file=sys.stderr)
+            return 1
+        if not closed and unreadable:
+            print(f"claude-roster: claude は止めたが、ペインの前面のプロセスが読めない（空）ので閉じない"
+                  f"（名簿も変えない。確認して閉じてから claude-roster sleep {role} で印を付ける）", file=sys.stderr)
+            return 1
         if not closed:
             print(f"claude-roster: claude は止めたが、ペインに claude か claude-wait かシェル以外が残っているので閉じない"
                   f"（名簿も変えない。確認して閉じてから claude-roster sleep {role} で印を付ける）", file=sys.stderr)
@@ -697,9 +707,11 @@ def cmd_sleep(args, view, conf):
     if not closed:
         kitten(sock, "close-window", "--match", f"id:{wid}", "--ignore-no-match")
         time.sleep(0.3)
-        if pane_by_id(ls(sock) or [{"tabs": [{"windows": [{"id": wid}]}]}], wid) is not None:
+        after = ls(sock)
+        if after is None or pane_by_id(after, wid) is not None:
             # ペインが残ると次の保存で印が外れるので、ここでは書かない（閉じたあとの sleep は印を付けるだけ）
-            print(f"claude-roster: ペイン（window {wid}）が閉じなかった（名簿は変えない。手で閉じてから "
+            why = "閉じたか ls で確かめられなかった" if after is None else "閉じなかった"
+            print(f"claude-roster: ペイン（window {wid}）が{why}（名簿は変えない。閉じたのを確かめてから "
                   f"claude-roster sleep {role} で印を付ける）", file=sys.stderr)
             return 1
     was_main = any(role in t["roles"] and "rows" in t for t in base["tabs"])

@@ -9,6 +9,7 @@ kitten は偽のスクリプト（ls の JSON を返し、ほかの呼び出し�
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -564,16 +565,68 @@ class Sleep(unittest.TestCase):
         self.assertIsNone(json.loads(text)["session_id"])
 
     def test_pane_closable(self):
-        self.assertTrue(R.pane_closable(win(1, "a", [])))
-        self.assertTrue(R.pane_closable(win(1, "a", None)))
+        # 前面が読めない・空なら、何が動いているか分からないので閉じない
+        self.assertFalse(R.pane_closable(win(1, "a", [])))
+        self.assertFalse(R.pane_closable(win(1, "a", None)))
+        self.assertFalse(R.pane_closable(None))
         self.assertTrue(R.pane_closable(win(1, "a", [proc(1, "-bash"), proc(2, "/bin/zsh", "-l")])))
+        self.assertTrue(R.pane_closable(win(1, "a", [proc(1, "bash", "--login")])))
+        self.assertTrue(R.pane_closable(win(1, "a", [proc(1, "bash", "-l", "-c", f"claude-wait a {SID_A}")])))
         self.assertTrue(R.pane_closable(win(1, "a", [proc(1, "bash", "-lic", f"/x/claude-wait a {SID_A}")])))
+        self.assertTrue(R.pane_closable(win(1, "a", [proc(1, "bash", "-lic",
+                                                         f"/x/claude-wait a {SID_A} --model 'my model' --rename")])))
+        # シェルがスクリプトを動かしている途中は閉じない
+        self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash", "run-claude.sh")])))
+        self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash", "-l", "run-claude.sh")])))
+        self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash", "-")])))
+        # claude-wait のあとに続きがある形・置換を含む形・-c の後ろに引数がある形は閉じない
+        for cmd in (f"claude-wait a {SID_A}; make deploy", f"claude-wait a {SID_A} && echo done",
+                    f"claude-wait a {SID_A} | tee log", f"claude-wait a $(cat sid)", f"claude-wait a `cat sid`",
+                    f"claude-wait a {SID_A}\nmake deploy", f"claude-wait a {SID_A} &"):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash", "-lic", cmd)])))
+        self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash", "-c", f"claude-wait a {SID_A}", "name", "x")])))
+        self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash", "-c")])))
         self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash", "-lic", "make test")])))
         self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash", "-c", "'unterminated")])))
         self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash"), proc(2, "claude", "--resume", SID_A)])))
         self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "python3", "/x/claude-wait", "a", SID_A)])))
         self.assertFalse(R.pane_closable(win(1, "a", [proc(1, "bash"), proc(2, "vim", "x")])))
         self.assertFalse(R.pane_closable(win(1, "a", [proc(1)])))  # コマンド行が読めないものは閉じない
+
+    def test_single_role_side_tab_returns_to_its_tab(self):
+        # 統括のタブ以外で 1 人だけだったタブ（work）の役割は、寝ている間も wake のあとも work に載る
+        r = R.check_roster({"version": 1, "saved_at": 1.0, "left": "lead",
+                            "tabs": [{"title": "main", "roles": ["lead", "a"], "rows": [["a"]]},
+                                     {"title": "work", "roles": ["w"]}, {"title": "standby", "roles": ["s"]}],
+                            "sessions": {"lead": {"session_id": SID_L}, "a": {"session_id": SID_A},
+                                         "w": {"session_id": SID_B}, "s": {"session_id": SID_C}}})
+        r = R.mark_sleeping(r, "w", r["sessions"]["w"], 500.0)
+        self.assertEqual(r["sessions"]["w"]["sleep_place"], {"tab": "work"})
+        self.assertEqual(next(t for t in r["tabs"] if t["title"] == "work")["roles"], ["w"])
+        self.assertNotIn("w", next(t for t in r["tabs"] if t["title"] == "standby")["roles"])
+        # ペインと一緒に work のタブが kitty から無くなったあとの保存でも、work の題で残す
+        cur = {"version": 1, "saved_at": 600.0, "left": "lead", "sessions": {k: dict(r["sessions"][k]) for k in ("lead", "a", "s")},
+               "tabs": [{"title": "main", "roles": ["lead", "a"], "rows": [["a"]]}, {"title": "standby", "roles": ["s"]}]}
+        for kw in ({}, {"drop_absent": True}):
+            with self.subTest(**kw):
+                new = R.carry_over(cur, r, 600.0, 3600, **kw)
+                self.assertEqual(next(t for t in new["tabs"] if t["title"] == "work")["roles"], ["w"])
+                self.assertEqual(R.target_tab(new, "w"), "work")
+                awake = R.mark_awake(new, "w")
+                self.assertEqual(R.target_tab(awake, "w"), "work")
+                R.check_roster(json.loads(json.dumps(awake)))
+        # 統括のタブと同じ題では作らない（standby へ）
+        tabs = [{"title": "main", "roles": ["lead"], "rows": []}]
+        self.assertEqual(R._side_tab(tabs, "main", create=True)["title"], R.STANDBY)
+
+    def test_bg_front_stoppable(self):
+        self.assertTrue(R.bg_front_stoppable("100", "100", 7, None))  # claude-wait がいなくても、同じプロセスなら
+        self.assertTrue(R.bg_front_stoppable("100", "100", 7, 7))
+        self.assertFalse(R.bg_front_stoppable("100", "200", 7, None))  # pid が別のプロセスに再利用された
+        self.assertFalse(R.bg_front_stoppable("100", None, 7, None))  # もう終わった
+        self.assertFalse(R.bg_front_stoppable(None, "100", 7, None))  # 止める前に覚えていない
+        self.assertFalse(R.bg_front_stoppable("100", "100", 8, 7))  # claude-wait の子でない
 
     def test_status_line(self):
         r = self.slept("b")
@@ -599,7 +652,7 @@ printf '{"pid":%d,"sessionId":"%s","cwd":"%s","procStart":"%s","status":"%s","ki
 if [ -n "$FAKE_HOOK" ]; then "$FAKE_HOOK" "$sid"; fi
 if [ -n "$FAKE_ONESHOT" ]; then rm -f "$CLAUDE_SESSIONS_DIR/$$.json"; exit 0; fi
 if [ -n "$FAKE_IGNORE_TERM" ]; then trap 'echo "ignored $sid" >> "$FAKE_CLAUDE_LOG"' TERM
-else trap 'rm -f "$CLAUDE_SESSIONS_DIR/$$.json"; echo "term $sid" >> "$FAKE_CLAUDE_LOG"; kill $! 2>/dev/null; exit 0' TERM; fi
+else trap 'rm -f "$CLAUDE_SESSIONS_DIR/$$.json"; echo "term $sid" >> "$FAKE_CLAUDE_LOG"; [ -n "$FAKE_TERM_TOUCH" ] && touch "$FAKE_TERM_TOUCH"; kill $! 2>/dev/null; exit 0' TERM; fi
 sleep 120 & while :; do wait && break; done
 """
 
@@ -621,10 +674,14 @@ data = json.load(open(os.environ["FAKE_LS"])) if a[:1] in (["ls"], ["close-windo
 if a[:1] == ["close-window"] and os.environ.get("FAKE_LS_LIVE"):
     # --match id:N のペインを ls から消す（本物の kitty が閉じたのと同じに見せる）
     wid = int(a[a.index("--match") + 1].split(":", 1)[1])
+    if os.environ.get("FAKE_CLOSE_BREAKS_LS"):
+        open(os.environ["FAKE_LS_FAIL_FILE"], "w").close()  # 閉じたあと kitty に繋がらなくなる
     for osw in data:
         for t in osw["tabs"]:
             t["windows"] = [w for w in t["windows"] if w["id"] != wid]
     json.dump(data, open(os.environ["FAKE_LS"], "w"))
+if a[:1] == ["ls"] and os.environ.get("FAKE_LS_FAIL_FILE") and os.path.exists(os.environ["FAKE_LS_FAIL_FILE"]):
+    sys.exit(1)  # kitty に繋がらない
 if a[:1] == ["ls"]:
     if os.environ.get("FAKE_LS_LIVE"):
         # 終わったプロセスは前面から消す（claude が終わったあとのペインを見せる）
@@ -632,6 +689,13 @@ if a[:1] == ["ls"]:
             for t in osw["tabs"]:
                 for w in t["windows"]:
                     w["foreground_processes"] = [p for p in w.get("foreground_processes") or [] if alive(p["pid"])]
+                    if os.environ.get("FAKE_LS_REAL_CMDLINE"):
+                        # exec したあとのコマンド行（claude-wait がシェルになった）を見せる
+                        for p in w["foreground_processes"]:
+                            try:
+                                p["cmdline"] = open(f"/proc/{p['pid']}/cmdline").read().split("\0")[:-1]
+                            except OSError:
+                                pass
                 if os.environ.get("FAKE_LS_AUTOCLOSE"):
                     # 中のプロセスが全部終わったペインは、本物の kitty と同じく自分で閉じる
                     t["windows"] = [w for w in t["windows"] if w["foreground_processes"] or w.get("keep")]
@@ -671,6 +735,8 @@ class Live(unittest.TestCase):
             p.wait()
             if p.stdout:
                 p.stdout.close()
+            if p.stdin:
+                p.stdin.close()
         # 偽の claude が残っていれば止める
         for f in (self.d / "sessions").glob("*.json"):
             try:
@@ -1045,13 +1111,14 @@ json.dump(roster.exit_payload(pid, {SID_A!r}, time.time()), open({str(self.d / '
         self.assertFalse((self.d / "rt/claude-wait" / f"{SID_A}.next").exists())
 
     def sleep_ls(self, a_procs):
-        self.write_ls([win(1, "lead", []), win(2, "a", a_procs), win(3, "b", [])])
+        # keep: FAKE_LS_AUTOCLOSE で、中のプロセスを書いていない統括と b のペインまで閉じないように
+        self.write_ls([dict(win(1, "lead", []), keep=True), win(2, "a", a_procs), dict(win(3, "b", []), keep=True)])
 
     def kcalls(self):
         return [json.loads(x) for x in self.klog.read_text().splitlines()] if self.klog.exists() else []
 
     def test_sleep_wake_roundtrip_with_claude_wait(self):
-        self.env["FAKE_LS_LIVE"] = "1"
+        self.env.update(FAKE_LS_LIVE="1", FAKE_LS_AUTOCLOSE="1")
         # restore は全部のプロセスのコマンド行で二重開きを見るので、同時に走るほかのテストと ID が重ならないように
         sid = str(uuid.uuid4())
         p, front = self.start_pane("a", sid, "opus")
@@ -1064,8 +1131,8 @@ json.dump(roster.exit_payload(pid, {SID_A!r}, time.time()), open({str(self.d / '
         p.wait(timeout=15)
         self.assertIn("寝かせました", p.stdout.read().decode())  # claude-wait はシェルに戻らずに終わった
         self.assertEqual(self.lines(), [f"start {sid} model=opus cwd={self.d / 'work'}", f"term {sid}"])
-        closes = [c for c in self.kcalls() if c[:1] == ["close-window"]]
-        self.assertEqual(closes, [["close-window", "--match", "id:2", "--ignore-no-match"]])
+        # claude-wait が終わってペインが自分で閉じたので、close-window は送らない
+        self.assertFalse([c for c in self.kcalls() if c[:1] == ["close-window"]])
         self.assertIn("並べ直す: claude-view equalize", out)
         r = self.saved()
         e = r["sessions"]["a"]
@@ -1111,6 +1178,100 @@ json.dump(roster.exit_payload(pid, {SID_A!r}, time.time()), open({str(self.d / '
             self.assertNotIn(k, r["sessions"]["a"])
         self.assertEqual(r["tabs"][0]["rows"], [["a"], ["b"]])
         self.roster("wake", "a", ok=(1,))  # もう寝ていない
+
+    def test_sleep_with_previous_claude_wait_closes_its_shell(self):
+        # 前の版（main の 2f030ba）の claude-wait: 「終わる」の指示を断ってシェルに戻る。開き直さず、残ったシェルを閉じる
+        old = self.d / "old"
+        old.mkdir()
+        subprocess.run(f"git -C {shlex.quote(str(ROOT))} archive 2f030ba bin/claude-wait lib | tar -x -C {shlex.quote(str(old))}",
+                       shell=True, check=True)
+        shell = self.d / "oldbin/bash"  # 戻る先のシェル（本物の bash。HOME を仮のものにして、入力を開いたままにする）
+        shell.parent.mkdir()
+        shell.symlink_to(shutil.which("bash"))
+        self.env.update(FAKE_LS_LIVE="1", FAKE_LS_REAL_CMDLINE="1", SHELL=str(shell), HOME=str(self.d))
+        self.env.pop("CLAUDE_WAIT_NO_SHELL")
+        p = subprocess.Popen([sys.executable, str(old / "bin/claude-wait"), "a", SID_A, "--model", "opus"], env=self.env,
+                             cwd=self.d / "work", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE)
+        self.procs.append(p)
+        front = self.wait_until(lambda: self.session_json(SID_A), what="偽の claude の起動")["pid"]
+        self.sleep_ls([proc(p.pid, "python3", "claude-wait"), proc(front, "claude")])  # コマンド行は /proc から読み直す
+        out = self.roster("sleep", "a").stdout
+        self.assertIn("claude-wait にシェルへ戻らず終わるよう伝える", out)  # .waiter はあるので指示は書く
+        self.assertIn("寝かせた: a", out)
+        self.assertEqual(self.lines(), [f"start {SID_A} model=opus cwd={self.d / 'work'}", f"term {SID_A}"])  # 開き直さない
+        self.assertEqual(Path(f"/proc/{p.pid}/cmdline").read_text().split("\0")[0], str(shell))  # シェルに戻った
+        self.assertEqual([c for c in self.kcalls() if c[:1] == ["close-window"]],
+                         [["close-window", "--match", "id:2", "--ignore-no-match"]])
+        self.assertTrue(self.saved()["sessions"]["a"]["sleeping"])
+        self.assertFalse((self.d / "rt/claude-wait" / f"{SID_A}.next").exists())
+
+    def test_sleep_force_skips_idle_check(self):
+        self.env.update(FAKE_LS_LIVE="1", FAKE_LS_AUTOCLOSE="1")
+        (self.d / "status").write_text("busy")
+        p, front = self.start_pane("a", SID_A, "opus")
+        self.sleep_ls([proc(p.pid, "python3", "claude-wait", "a", SID_A),
+                       proc(front, "/bin/bash", str(self.d / "bin/claude"), "--resume", SID_A)])
+        self.roster("sleep", "a", ok=(3,))
+        out = self.roster("sleep", "a", "--force").stdout
+        self.assertIn("寝かせた: a", out)
+        self.assertEqual(self.lines()[-1], f"term {SID_A}")
+        self.assertTrue(self.saved()["sessions"]["a"]["sleeping"])
+
+    def test_sleep_ls_failing_keeps_roster(self):
+        # claude を止めたあと kitten @ ls が失敗し続ける: 閉じたか確かめられないので、閉じず名簿も変えない
+        fail = self.d / "ls-fail"
+        self.env.update(FAKE_LS_LIVE="1", FAKE_TERM_TOUCH=str(fail), FAKE_LS_FAIL_FILE=str(fail))
+        p, front = self.start_pane("a", SID_A, "opus")
+        self.sleep_ls([proc(p.pid, "python3", "claude-wait", "a", SID_A),
+                       proc(front, "/bin/bash", str(self.d / "bin/claude"), "--resume", SID_A)])
+        r = self.roster("sleep", "a", "--timeout", "1", ok=(1,))
+        self.assertIn("ls に失敗し続けて", r.stderr)
+        self.assertNotIn("claude か claude-wait かシェル以外", r.stderr)
+        self.assertFalse([c for c in self.kcalls() if c[:1] == ["close-window"]])
+        self.assertFalse((self.d / "data/roster.json").exists())
+
+    def test_sleep_ls_failing_after_close_keeps_roster(self):
+        # close-window のあと ls が失敗: 閉じたか確かめられないので名簿を変えない
+        self.env.update(FAKE_LS_LIVE="1", FAKE_CLOSE_BREAKS_LS="1", FAKE_LS_FAIL_FILE=str(self.d / "ls-fail"))
+        self.bare_claude()
+        r = self.roster("sleep", "a", ok=(1,))
+        self.assertIn("閉じたか ls で確かめられなかった", r.stderr)
+        self.assertEqual(len([c for c in self.kcalls() if c[:1] == ["close-window"]]), 1)
+        self.assertFalse((self.d / "data/roster.json").exists())
+
+    def test_sleep_empty_front_message(self):
+        # 中のプロセスが終わったのにペインが残り、前面が空: 原因に合った文で断る
+        self.env["FAKE_LS_LIVE"] = "1"
+        p, front = self.start_pane("a", SID_A, "opus")
+        self.sleep_ls([proc(p.pid, "python3", "claude-wait", "a", SID_A),
+                       proc(front, "/bin/bash", str(self.d / "bin/claude"), "--resume", SID_A)])
+        r = self.roster("sleep", "a", "--timeout", "1", ok=(1,))
+        self.assertIn("前面のプロセスが読めない", r.stderr)
+        self.assertFalse([c for c in self.kcalls() if c[:1] == ["close-window"]])
+        self.assertFalse((self.d / "data/roster.json").exists())
+
+    def detached(self, *argv):
+        """親の無い（init が片付ける）プロセスの pid。止めたあとゾンビで「動いている」と見えないように。"""
+        r = subprocess.run(["sh", "-c", shlex.join(argv) + " >/dev/null 2>&1 & echo $!"], capture_output=True, text=True)
+        pid = int(r.stdout.strip())
+        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(pid)], capture_output=True))
+        return pid
+
+    def test_sleep_bg_stops_host_then_same_front(self):
+        # 背景セッション: daemon の中の host を止め、残った前面は、止める前と同じプロセスのときだけ止める
+        self.env["FAKE_LS_LIVE"] = "1"
+        host, front, sh = self.detached("sleep", "61"), self.detached("sleep", "62"), self.detached("sleep", "63")
+        st = Path(f"/proc/{host}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        (self.d / "sessions" / f"{host}.json").write_text(json.dumps(
+            {"pid": host, "sessionId": SID_A, "procStart": st, "status": "idle", "kind": "bg", "cwd": str(self.d / "work")}))
+        self.sleep_ls([proc(sh, "bash"), proc(front, "claude", "--resume", SID_A)])
+        self.roster("sleep", "a", ok=(3,))  # --allow-bg が無ければ止めない
+        out = self.roster("sleep", "a", "--allow-bg").stdout
+        self.assertIn("寝かせた: a", out)
+        for pid in (host, front):
+            self.assertFalse(Path(f"/proc/{pid}").exists(), pid)
+        self.assertTrue(Path(f"/proc/{sh}").exists())  # シェルは close-window に任せる
+        self.assertEqual(len([c for c in self.kcalls() if c[:1] == ["close-window"]]), 1)
 
     def test_sleep_pane_closes_by_itself(self):
         # claude-wait が「終わる」の指示で終わり、ペインが自分で閉じた: close-window は送らず、印は付ける

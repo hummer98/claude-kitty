@@ -321,15 +321,22 @@ def carry_over(new, old, now, keep_seconds, drop_absent=False):
         if prev.get("session_id"):
             held.add(prev["session_id"])
         # 前と同じ題のタブに置く（無ければ standby）。段組みには入れない（いまの配置を崩さない）
-        _side_tab(tabs, title)["roles"].append(role)
+        # 寝ている役割は、元のタブが閉じて無くなっていても、その題のタブを名簿に作って載せる（wake で元のタブに開く）
+        _side_tab(tabs, title, create=bool(prev.get("sleeping")))["roles"].append(role)
     out["sessions"], out["tabs"] = sess, tabs
     dedupe_ids(sess)
     return out
 
 
-def _side_tab(tabs, title):
-    """段組みの無い、題が title のタブ（無ければ standby。それも無ければ作る）。"""
+def _side_tab(tabs, title, create=False):
+    """段組みの無い、題が title のタブ（無ければ standby。それも無ければ作る）。
+
+    create: 題が title のタブがどこにも無ければ、standby でなくその題で作る（統括のタブと同じ題なら作らない）。
+    """
     dest = next((t for t in tabs if t["title"] == title and "rows" not in t), None)
+    if dest is None and create and title and not any(t["title"] == title for t in tabs):
+        dest = {"title": title, "roles": []}
+        tabs.append(dest)
     if dest is None:
         dest = next((t for t in tabs if t["title"] == STANDBY), None)
     if dest is None:
@@ -664,27 +671,62 @@ def exit_payload(waiter_pid, wait_id, now):
             "by": "claude-roster sleep"}
 
 
-def pane_closable(win):
-    """閉じてよいペインか: 前面のプロセスが無いか、シェルだけ（claude も claude-wait も残っていない）。"""
-    for p in (win or {}).get("foreground_processes") or []:
-        argv = p.get("cmdline") or []
-        if parse_argv(argv):
-            return False
-        name = os.path.basename(argv[0]).lstrip("-") if argv else ""
-        if name not in SHELLS:
-            return False
-        # bash -c '…' のように、シェルが別のコマンドを動かしている途中なら閉じない（ログインシェルと対話だけ）。
-        # ただし restore が開く形（bash -lic 'claude-wait …'）の親は、claude-wait が終わったあとにだけ残るので閉じてよい
-        flags = [a for a in argv[1:] if a.startswith("-") and not a.startswith("--") and "c" in a]
-        if flags:
-            cmd = argv[argv.index(flags[0]) + 1] if argv.index(flags[0]) + 1 < len(argv) else ""
-            try:
-                first = shlex.split(cmd)[:1]
-            except ValueError:
-                return False
-            if not first or os.path.basename(first[0]) != "claude-wait":
-                return False
+def _only_claude_wait(cmd):
+    """シェルの -c の文字列が claude-wait の呼び出し 1 つだけか（; や && で続きがある・置換を含むものは違う）。"""
+    if any(c in cmd for c in ";&|<>()`$\n"):
+        return False  # 区切り・置換・改行（shlex は改行を空白として読むので、分ける前に見る）
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        words = list(lex)
+    except ValueError:
+        return False
+    if not words or os.path.basename(words[0]) != "claude-wait":
+        return False
     return True
+
+
+def pane_closable(win):
+    """閉じてよいペインか: 前面がシェルだけ（claude も claude-wait も、シェルが動かしているスクリプトも無い）。
+
+    前面のプロセスが読めない・空のときは、何が動いているか分からないので閉じない側に倒す
+    （中のプロセスが全部終わったペインは kitty が自分で閉じるので、ここに来ない）。
+    """
+    procs = (win or {}).get("foreground_processes")
+    if not isinstance(procs, list) or not procs:
+        return False
+    for p in procs:
+        argv = (p or {}).get("cmdline") or []
+        if not argv or parse_argv(argv):
+            return False
+        if os.path.basename(argv[0]).lstrip("-") not in SHELLS:
+            return False
+        args = argv[1:]
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a.startswith("--"):
+                i += 1  # --login など
+                continue
+            if not a.startswith("-") or a == "-":
+                return False  # bash run-claude.sh のように、スクリプトを動かしている途中
+            if "c" in a[1:]:
+                # bash -c '…' は閉じない。restore が開く形（bash -lic 'claude-wait …'）の親だけは、claude-wait が
+                # 終わったあとにだけ残るので閉じてよい（その後ろに引数があれば、別の使い方なので閉じない）
+                return i + 2 == len(args) and _only_claude_wait(args[i + 1])
+            i += 1
+    return True
+
+
+def bg_front_stoppable(start_before, start_now, ppid_now, waiter_pid):
+    """背景セッションの host を止めたあと、残った前面も止めてよいか。
+
+    止める前に覚えた起動時刻と同じプロセスのままのときだけ（pid の再利用で別のプロセスを止めない）。
+    claude-wait がいれば、その子であることも見る（restart と同じ）。
+    """
+    if start_before is None or start_now is None or start_now != start_before:
+        return False
+    return waiter_pid is None or ppid_now == waiter_pid
 
 
 def _remove_role(rows, role):
@@ -708,12 +750,13 @@ def mark_sleeping(roster, role, entry, now):
             if "rows" in t:
                 t["rows"] = _remove_role(t["rows"], role)
             t["roles"] = [r for r in t["roles"] if r != role]
-    roster["tabs"] = [t for t in tabs if t.get("roles") or "rows" in t]
     e = dict(entry or sess.get(role) or {})
     e.pop("absent_since", None)
     e.update(sleeping=True, slept_at=now, sleep_place=place, state="sleeping", window_id=None, pid=None, status=None)
     sess[role] = e
-    _side_tab(roster["tabs"], place["tab"])["roles"].append(role)
+    # 空になったタブを消す前に載せる（1 人だけのタブにいた役割が standby へ移らず、元のタブに残るように）
+    _side_tab(tabs, place["tab"], create=True)["roles"].append(role)
+    roster["tabs"] = [t for t in tabs if t.get("roles") or "rows" in t]
     return roster
 
 

@@ -43,7 +43,8 @@ claude-roster show [--from FILE]   # 名簿の中身
 - ペインごと無くなった役割は、自動の保存（`--auto`）では `absent_since` を付けて 24 時間（`roster.keep_absent_hours`）残す。
   誤ってペインを閉じても `claude-roster restore <役割>` で戻せる。手で `save` したときは、いまの kitty が正として消す。
 - 寝かせた役割（`sleeping`。[sleep](#sleep--wake)）は、自動の保存でも手の保存でも、`keep_absent_hours` を過ぎても消さない。
-  段組みには入れず、寝かせる前のタブ（統括のタブにいたなら standby）に載せる。その役割のペインが kitty に戻っていれば
+  段組みには入れず、寝かせる前のタブ（統括のタブにいたなら standby）に載せる。1 人だけのタブにいて、そのタブがペインと一緒に
+  kitty から無くなっても、名簿にはその題のタブを作って載せる（wake でそのタブに開く）。その役割のペインが kitty に戻っていれば
   （手で開いたなど）、いまの kitty が正として印は外れる。その ID をほかの役割がいま開いていれば、寝ている記録は残さない
   （同じ ID を 2 人に持たせない。会話はそちらにある）。
 - kitty が無いとき・役割のあるペインが 1 つも無いとき・（自動の保存で）統括のペインが無いときは保存しない
@@ -119,11 +120,15 @@ systemctl --user daemon-reload && systemctl --user enable --now claude-roster-sa
    `session_id` は null）を書く。claude-wait は claude が終わったあと、シェルに戻らずに終わる（ペインが閉じる）。
    前の版の claude-wait はこの指示を ID の形で断ってシェルに戻るだけで、同じ会話を開き直すことは無い。
 4. 止める直前にもう一度 idle と保護するプロセスを確かめ、claude に SIGTERM を送る（restart と同じ。send-text の /exit は使わない。
-   打ち込む先を取り違えないように）。背景セッション（kind=bg）は `--allow-bg` を付けたときだけ。
+   打ち込む先を取り違えないように）。背景セッション（kind=bg）は `--allow-bg` を付けたときだけ。host を止めたあとに前面が残っていれば、
+   止める前に覚えた起動時刻と同じプロセスのとき（claude-wait がいればその子のときも）だけ前面も止める。
 5. `--timeout`（既定 30 秒）で止まらなければ、続きの指示を消し、ペインは閉じず名簿も変えない（exit 1）。
-6. 閉じる前に、そのセッションの claude がどこにもいないこと（`~/.claude/sessions`）と、ペインの前面にシェル（bash・zsh など。
-   restore が開く形の `bash -lic 'claude-wait …'` の親を含む）しか残っていないことを確かめる。claude-wait や別のコマンド（エディタなど）が
-   残っていれば閉じない（exit 1。名簿も変えない）。ペインが自分で閉じていなければ `kitten @ close-window --match id:<window>` で閉じる。
+6. 閉じる前に、そのセッションの claude がどこにもいないこと（`~/.claude/sessions`）と、ペインの前面にシェル（bash・zsh など）しか
+   残っていないことを確かめる。シェルはオプションだけのもの（`bash -l`・`bash --login`）と、restore が開く形の親
+   （`bash -lic 'claude-wait …'`。claude-wait の呼び出し 1 つだけで、`;`・`&&`・`|`・置換・改行で続きが無いもの）に限る。
+   スクリプトを動かしているシェル（`bash run-claude.sh`）、claude-wait、別のコマンド（エディタなど）が残っていれば閉じない。
+   前面のプロセスが読めない・空のときも閉じない（中が全部終わったペインは kitty が自分で閉じる）。`kitten @ ls` が失敗し続けて
+   確かめられないときも閉じない（どれも exit 1。名簿も変えない）。ペインが自分で閉じていなければ `kitten @ close-window --match id:<window>` で閉じる。
    見るのは前面のプロセスだけなので、そのシェルの背景のジョブ（`npm run dev &` など）は閉じると止まる。素のシェルから claude を開いた役割は
    先に確かめる。閉じたのにペインが残ったときは、名簿を変えない（残ったペインで次の保存が印を外すので）。
 7. 名簿のその役割に `sleeping: true`・`slept_at`（時刻）・`sleep_place`（寝かせる前のタブ、段組みの段・列・1 人だけの段だったか）を書く。
