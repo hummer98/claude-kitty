@@ -261,6 +261,103 @@ class ShellForms(Base):
         for c in ("submodule status", "read-tree HEAD", "archive HEAD", "add -A", "branch -a", "tag"):
             self.assertIsNone(self.bash(f"cd {m}/m1 && git {c}"), c)
 
+    def test_git_clone_value_options(self):
+        # 回帰: clone の値をとるオプション（--branch master）の値を元、元を行き先と読み、保護した所から外へ写すのを止めていた
+        m, out = self.shared_dir / "m1", self.real_home / "dev" / "wt"
+        for opts in ("-q --branch master", "--branch=master", "-b master", "-bmaster", "-qb master", "-qbmaster",
+                     "--depth 1", "--bra master", "-o up -c core.x=1 --filter blob:none", "--reference ~/dev/m1",
+                     "-j 4 --shallow-since 2020-01-01 --revision v1", "--no-template --single-branch", "-- "):
+            self.assertIsNone(self.bash(f"git clone {opts} {m} {out}"), opts)
+            self.assertIsNotNone(self.bash(f"git clone {opts} ~/dev/m1 {m}/new"), opts)
+        self.assertIsNone(self.bash(f"git clone {m} {out}"))
+        self.assertIsNotNone(self.bash(f"cd {m} && git clone -b master ~/dev/m1"))   # 行き先なしは cwd の下
+        self.assertIsNone(self.bash(f"cd {m} && git clone -b master ~/dev/m1 ~/dev/x"))
+
+    def test_git_clone_init_git_dir_options(self):
+        m = self.shared_dir
+        for opts in (f"--separate-git-dir {m}/g", f"--separate-git-dir={m}/g", f"--sep {m}/g", f"--template {m}/t",
+                     f"--template={m}/t"):
+            self.assertIsNotNone(self.bash(f"git clone {opts} ~/dev/m1 ~/dev/wt"), opts)
+            self.assertIsNotNone(self.bash(f"git init {opts} ~/dev/wt"), opts)
+        self.assertIsNone(self.bash("git clone --separate-git-dir ~/dev/g ~/dev/m1 ~/dev/wt"))
+        self.assertIsNotNone(self.bash(f"git clone --sep={m}/g ~/dev/m1 ~/dev/wt"))
+        # GIT_DIR / --git-dir の場所にもリポジトリを作る
+        self.assertIsNotNone(self.bash(f"GIT_DIR={m}/g git init ~/dev/x"))
+        self.assertIsNotNone(self.bash(f"git --git-dir={m}/g init ~/dev/x"))
+        self.assertIsNone(self.bash("GIT_DIR=~/dev/g git init ~/dev/x"))
+        self.assertIsNone(self.bash(f"cd {m} && git init ~/dev/x"))     # cwd だけなら行き先で決める
+
+    def test_git_clone_attached_and_unknown_values(self):
+        m = self.shared_dir
+        for opts in ("-ccore.x=1", "-nb x", "-qj4"):
+            self.assertIsNone(self.bash(f"git clone {opts} {m} ~/dev/wt"), opts)
+            self.assertIsNotNone(self.bash(f"git clone {opts} ~/dev/m1 {m}/x"), opts)
+        # 知らない値をとるオプション（--future v）で行き先がずれても、後ろの引数を全部見る
+        self.assertIsNotNone(self.bash(f"git clone --future v ~/dev/m1 {m}/x"))
+        self.assertIsNotNone(self.bash(f"git init --future v {m}/x"))
+
+    def test_git_format_patch_o_inside_other_short_options(self):
+        # 回帰: -Sfoo / -Gbo の中の o を -o と読み、前の -o <保護> を上書きして通していた
+        m = self.shared_dir
+        for extra in ("-Sfoo", "-Gbo"):
+            self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git format-patch -o {m}/p {extra} HEAD~1"), extra)
+            self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git format-patch {extra} -o {m}/p HEAD~1"), extra)
+            self.assertIsNone(self.bash(f"cd ~/dev/m1 && git format-patch -o ~/dev/p {extra} HEAD~1"), extra)
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git format-patch -ko {m}/p HEAD~1"))    # 本当の -o のまとまり
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git archive -9o{m}/a.tar HEAD"))
+        self.assertIsNone(self.bash("cd ~/dev/m1 && git archive -9 HEAD"))                      # 標準出力へ
+
+    def test_git_clone_init_work_tree_and_git_dir_separately(self):
+        # 回帰: GIT_WORK_TREE / --work-tree が保護した所で GIT_DIR / --git-dir が外だと、最後の値だけを見て通していた
+        m = self.shared_dir
+        for sub in ("clone ~/dev/m1 ~/dev/out", "init ~/dev/out"):
+            for pre in (f"GIT_WORK_TREE={m}/w GIT_DIR=~/dev/x git", f"GIT_DIR={m}/g GIT_WORK_TREE=~/dev/w git",
+                        f"git --work-tree={m}/w --git-dir=~/dev/x", f"git --git-dir={m}/g --work-tree ~/dev/w"):
+                self.assertIsNotNone(self.bash(f"{pre} {sub}"), f"{pre} {sub}")
+            self.assertIsNone(self.bash(f"GIT_WORK_TREE=~/dev/w GIT_DIR=~/dev/x git {sub}"), sub)
+
+    def test_git_clone_init_dash_c_only_moves_cwd(self):
+        # 回帰: -C を GIT_DIR などと同じく「明示した場所」と数え、-C <保護> で外へ clone するのを止めていた
+        m = self.shared_dir
+        self.assertIsNone(self.bash(f"git -C {m} clone -b master ~/dev/src ~/dev/out"))
+        self.assertIsNone(self.bash(f"git -C {m} init ~/dev/out"))
+        self.assertIsNotNone(self.bash(f"git -C {m} clone -b master ~/dev/src out"))     # 相対は -C の下
+        self.assertIsNotNone(self.bash(f"git -C {m} init"))
+        self.assertIsNotNone(self.bash(f"git -C ~/dev clone ~/dev/src ../app/shared/files/x"))
+
+    def test_git_worktree_prune_lock_unlock_in_protected_cwd(self):
+        m = self.shared_dir
+        for c in ("prune", "prune -n", "lock ~/dev/wt", "lock --reason r ~/dev/wt", "unlock ~/dev/wt"):
+            self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree {c}"), c)
+            self.assertIsNone(self.bash(f"cd ~/dev/m1 && git worktree {c}"), c)
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree list --porcelain"))
+
+    def test_git_archive_format_patch_output_forms(self):
+        m = self.shared_dir
+        for c in (f"archive -o{m}/a.tar HEAD", f"archive --out={m}/a.tar HEAD", f"archive --output {m}/a.tar HEAD",
+                  f"format-patch -o{m}/p HEAD~1", f"format-patch --output-dir {m}/p HEAD~1",
+                  f"format-patch -o {m}/p HEAD~1"):
+            self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git {c}"), c)
+        self.assertIsNone(self.bash("cd ~/dev/m1 && git archive -o~/dev/a.tar HEAD"))
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git format-patch -o ~/dev/p HEAD~1"))
+
+    def test_git_init_value_options(self):
+        # init -b main <dir> の main を行き先と読むと、保護した <dir> を通してしまう
+        m = self.shared_dir
+        for opts in ("-b main", "--initial-branch main", "--initial-branch=main", "-qb main", "--object-format sha256"):
+            self.assertIsNotNone(self.bash(f"git init {opts} {m}/new"), opts)
+            self.assertIsNone(self.bash(f"git init {opts} ~/dev/new"), opts)
+        self.assertIsNotNone(self.bash(f"cd {m} && git init -b main"))
+
+    def test_git_worktree_branch_options(self):
+        m = self.shared_dir
+        for opts in ("-b feat", "-B feat", "--orphan feat", "--lock --reason r", "-f --detach"):
+            self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree add {opts} {m}/wt"), opts)
+            self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree add {opts} ~/dev/wt"), opts)   # cwd が保護した所
+            self.assertIsNone(self.bash(f"cd ~/dev/m1 && git worktree add {opts} ~/dev/wt"), opts)
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree repair {m}/wt"))
+        self.assertIsNone(self.bash("cd ~/dev/m1 && git worktree list"))
+
     def test_subshell_cd_does_not_leak(self):
         self.assertIsNone(self.bash(f"(cd {self.shared_dir}; ls) ; mkdir ~/dev/x"))
         self.assertIsNone(self.bash(f"(cd {self.shared_dir}; ls) && mkdir x"))
