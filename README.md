@@ -263,7 +263,7 @@ claude-relay ping mac-a / peers / inbox / log / untrust mac-a
 
 人がいないときの作業はゆっくりでよくトークンの少ない方を、人がいるときは速さを優先する。人がいるかは、最後に人が打ってからの時間で決める（claude-state の UserPromptSubmit の hook が記録。通知・他のセッションからのメッセージ・claude-relay の知らせは数えない）。
 
-- 設定 `model_policy.enabled: true`（既定は `false`）と `tools/install.sh --hooks=model`（Agent ツールの PreToolUse の hook）で使う。`away_minutes`（既定 20 分）だれも打たなければ、実装のサブエージェントの `model` を `away_model`（既定 `haiku`）に書き換える。レビュー・評価・調べもの（`keep` の語）、`Explore`・`Plan` などの種類、`fable` は変えない。在席なら呼び出しどおり。
+- 設定 `model_policy.enabled: true`（既定は `false`）と `tools/install.sh --hooks=model`（Agent ツールの PreToolUse の hook）で使う。`away_minutes`（既定 20 分）だれも打たなければ、実装のサブエージェントの呼び出しを断り（`permissionDecision: "deny"`）、`model` を `away_model`（既定 `haiku`）にして出し直すよう頼む（入力は書き換えない。auto mode で同じ返答のほかの呼び出しを巻き込まないため）。同じ依頼を 2 度は断らない。レビュー・評価・調べもの（`keep` の語）、`Explore`・`Plan` などの種類、`fable` は変えない。在席なら呼び出しどおり。
 - `claude-presence [--json]` で最後の入力からの分数・判定・設定・直近の切り替えを見る。詳しくは [docs/config.md](docs/config.md#model_policyclaude-presence-離席中のサブエージェントのモデル)。
 
 ## ライセンス
