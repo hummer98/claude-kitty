@@ -25,6 +25,18 @@ INSTALL = ROOT / "tools" / "install.sh"
 REPO = Path(os.path.realpath(ROOT))
 COMMANDS = sorted(p.name for p in (ROOT / "bin").iterdir() if p.is_file() and os.access(p, os.X_OK))
 
+FAKE_LAUNCHCTL = r"""#!/bin/sh
+# 偽の launchctl: 呼ばれた引数を $FAKE_LAUNCHD/calls に残し、読み込みの状態を $FAKE_LAUNCHD/loaded.<label> で持つ
+d="$FAKE_LAUNCHD"; mkdir -p "$d"; echo "$*" >> "$d/calls"
+case "$1" in
+print) [ -e "$d/loaded.${2##*/}" ] ;;
+bootstrap) b=${3##*/}; touch "$d/loaded.${b%.plist}" ;;
+bootout) rm -f "$d/loaded.${2##*/}" ;;
+*) exit 0 ;;
+esac
+"""
+
+
 FAKE_SYSTEMCTL = """#!/bin/sh
 # 偽の systemctl: enable の状態を $FAKE_SYSTEMD/en.<unit> で持ち、呼ばれた引数を calls に残す
 d=${FAKE_SYSTEMD:?}; mkdir -p "$d"; echo "$*" >> "$d/calls"
@@ -192,6 +204,11 @@ class Install(unittest.TestCase):
         self.systemctl = fake / "systemctl"
         self.systemctl.write_text(FAKE_SYSTEMCTL)
         self.systemctl.chmod(0o755)
+        # launchctl も偽物にする。本物のまま os_name="Darwin" で流すと、gui/<uid> の本物の
+        # claude-kitty.state-watch などを bootout してしまう（HOME を一時のフォルダにしても、launchd のドメインは本物）
+        self.launchctl = fake / "launchctl"
+        self.launchctl.write_text(FAKE_LAUNCHCTL)
+        self.launchctl.chmod(0o755)
         self.sd = self.root / "sd"
         self.bin = self.home / ".local" / "bin"
         self.settings = self.home / ".claude" / "settings.json"
@@ -204,7 +221,8 @@ class Install(unittest.TestCase):
     def run_install(self, *args, os_name="Linux", stdin=subprocess.DEVNULL):
         env = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.home), "LANG": "C.UTF-8",
                "CLAUDE_KITTY_UNAME": os_name, "CLAUDE_KITTY_SYSTEMCTL": str(self.systemctl),
-               "FAKE_SYSTEMD": str(self.sd), "TMPDIR": str(self.root)}
+               "FAKE_SYSTEMD": str(self.sd), "TMPDIR": str(self.root),
+               "CLAUDE_KITTY_LAUNCHCTL": str(self.launchctl), "FAKE_LAUNCHD": str(self.root / "launchd")}
         return subprocess.run(["sh", str(INSTALL), *args], env=env, stdin=stdin, capture_output=True, text=True, timeout=120)
 
     def calls(self):
@@ -429,6 +447,9 @@ class Install(unittest.TestCase):
         self.assertIn(f"include {REPO}/kitty/claude-kitty-macos.conf", conf)
         r = self.run_install("--all", "--uninstall", "--yes", os_name="Darwin")
         self.assertNotIn("include", (self.kdir / "kitty.conf").read_text())
+        calls = (self.root / "launchd" / "calls").read_text()  # launchctl は偽物だけが呼ばれた
+        self.assertIn("bootstrap gui/", calls)
+        self.assertIn("bootout gui/", calls)
 
     def test_hand_made_unit_is_not_overwritten(self):
         self.udir.mkdir(parents=True)
