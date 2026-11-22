@@ -8,7 +8,7 @@
 
 ### 追加
 
-- `claude-guard`: `commands` の `{"program"}` の `block` の項目に `but_if_any`。`unless_any` のフラグで通すものでも、`but_if_any` のどれかがあれば止める（`{"sub": "road", "unless_any": ["--dry-run", "--inspect-node"], "but_if_any": ["--engine-check"]}`）。読むだけの形でも、エンジンに評価させるフラグを足すとゲームが落ちる余地があるため。`if_any` / `unless_any` だけの項目の意味は変わらない。`unless_any` 無しの `but_if_any` は設定の誤りとして知らせる（[docs/guard-hook.md](docs/guard-hook.md)）。
+- `claude-guard`: `commands` の `{"program"}` の `block` の項目に `but_if_any`。`unless_any` のフラグで通すものでも、`but_if_any` のどれかがあれば止める（`{"sub": "road", "unless_any": ["--dry-run", "--inspect-node"], "but_if_any": ["--engine-check"]}`）。読むだけの形でも、エンジンに評価させるフラグを足すとゲームが落ちる余地があるため。`if_any` / `unless_any` だけの項目の意味は変わらない。止める側の `if_any` と `but_if_any` は argparse の省略形（`--eng`）にも当て、通す側の `unless_any` は完全一致のまま。`unless_any` 無しの `but_if_any` は設定の誤りとして知らせる（[docs/guard-hook.md](docs/guard-hook.md)）。
 
 ## [0.7.4] - 2026-11-23
 

@@ -909,6 +909,11 @@ def normalize(words):
     return [prog] + args
 
 
+def has_flag_prefix(word):
+    """長いオプションの省略形になりうる語か（"--x" 以上。"--" だけは除く）。"""
+    return word.startswith("--") and len(word) > 2
+
+
 def match_entry(entry, words):
     """commands / allow_commands の 1 つが、単純なコマンド words に当たれば、その印（文字列）を返す。"""
     kind, spec = entry
@@ -939,10 +944,20 @@ def match_entry(entry, words):
 
     def has(flag):
         return any(r == flag or r.startswith(flag + "=") for r in rest)
-    if if_any and not any(has(f) for f in if_any):
+
+    def has_abbrev(flag):
+        # 止める側（if_any / but_if_any）は省略形にも当てる: argparse は既定で --eng を --engine-check と読むため。
+        # 長さの下限は付けない（止める側に倒す）。"--" だけはオプションの終わりの印なので当てない
+        for r in rest:
+            key = r.split("=", 1)[0]
+            if has_flag_prefix(key) and flag.startswith(key):
+                return True
+        return has(flag)
+    if if_any and not any(has_abbrev(f) for f in if_any):
         return None
-    # unless_any で通すものでも、but_if_any のどれかがあれば止める（読むだけの形に危ないフラグを足した場合）
-    if unless_any and any(has(f) for f in unless_any) and not any(has(f) for f in but_if_any):
+    # unless_any で通すものでも、but_if_any のどれかがあれば止める（読むだけの形に危ないフラグを足した場合）。
+    # unless_any は完全一致のまま（省略形の --dry は通さない＝止める側）
+    if unless_any and any(has(f) for f in unless_any) and not any(has_abbrev(f) for f in but_if_any):
         return None
     return f"{prog} {sub}"
 

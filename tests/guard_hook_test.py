@@ -480,6 +480,24 @@ class Commands(Base):
         # --engine-checker のような別のフラグは but_if_any に当てない
         self.assertIsNone(self.bash("gamectl road --dry-run --engine-checker"))
 
+    def test_abbrev_flags_block(self):
+        # argparse の省略形（allow_abbrev）: 止める側の if_any / but_if_any は前方一致で当てる
+        self.road_config({"sub": "road", "unless_any": ["--dry-run", "--inspect-node"],
+                          "but_if_any": ["--engine-check"]})
+        for c in ("gamectl road --dry-run --engine", "gamectl road --dry-run --eng", "gamectl road --inspect-node 5 --e",
+                  "gamectl road --dry-run --eng=1", "gamectl road --e --dry-run",
+                  "gamectl road --dry",                     # unless_any は完全一致のまま（省略形では通さない）
+                  "gamectl road --inspect 5"):
+            self.assertIsNotNone(self.bash(c), c)
+        for c in ("gamectl road --dry-run", "gamectl road --dry-run -- --x",   # "--" だけは省略形とみない
+                  "gamectl road --dry-run --engine-checker", "gamectl road --dry-run -e"):
+            self.assertIsNone(self.bash(c), c)
+        # 既存の if_any も省略形で当てる（svcctl config --se 1 は argparse では --set）
+        for c in ("svcctl config --se 1", "svcctl config --s=1", "svcctl config --set"):
+            self.assertIsNotNone(self.bash(c), c)
+        for c in ("svcctl config --get x", "svcctl config --setx 1", "svcctl config --", "svcctl config -s 1"):
+            self.assertIsNone(self.bash(c), c)
+
     def test_but_if_any_with_if_any(self):
         # if_any を満たさなければ but_if_any があっても通す（if_any が先）
         self.road_config({"sub": "road", "if_any": ["--apply"], "unless_any": ["--dry-run"],
