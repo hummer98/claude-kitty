@@ -116,11 +116,11 @@ class Decide(unittest.TestCase):
     def test_away_implementation_goes_to_haiku(self):
         p = agent(model="opus", run_in_background=True, isolation="worktree")
         d = P.decide(p, ON, last(25), NOW)
-        self.assertEqual(d["input"], dict(p["tool_input"], model="haiku"))  # ほかの項目はそのまま写す
+        self.assertNotIn("input", d)  # 入力は書き換えない（断って出し直してもらう）
         self.assertEqual((d["from"], d["to"], d["idle_minutes"], d["description"]), ("opus", "haiku", 25.0, "Implement the parser"))
         self.assertEqual(p["tool_input"]["model"], "opus")  # 元の入力は変えない
         d = P.decide(agent(), ON, last(25), NOW)  # model を指定していない（親と同じ）
-        self.assertEqual((d["from"], d["input"]["model"]), (None, "haiku"))
+        self.assertEqual((d["from"], d["to"]), (None, "haiku"))
         d = P.decide(dict(agent(), tool_name="Task"), ON, last(25), NOW)  # 古い名前
         self.assertEqual(d["to"], "haiku")
         d = P.decide(agent(), dict(ON, away_model="sonnet", away_minutes=60), last(61), NOW)
@@ -171,36 +171,184 @@ class HookRun(unittest.TestCase):
     def policy(self, **mp):
         self.cfg.write_text(json.dumps({"model_policy": mp}))
 
-    def test_switch_is_logged_with_role(self):
+    def away(self):
         self.policy(enabled=True)
         P.record_human(self.env, "s0", "main", None, now=NOW - 30 * 60)
+
+    def denials(self):
+        return P.read_log(self.env, P.DENIALS, 50)
+
+    def test_away_call_is_denied_not_rewritten(self):
+        # auto mode では updatedInput が判定を無効にし、同じ返答のほかの呼び出しまで断られた。判定（deny）だけを返す
+        self.away()
+        out = P.run_hook(json.dumps(agent(model="opus", run_in_background=True)), self.env, now=NOW)
+        hso = out["hookSpecificOutput"]
+        self.assertEqual(set(hso), {"hookEventName", "permissionDecision", "permissionDecisionReason"})
+        self.assertEqual((hso["hookEventName"], hso["permissionDecision"]), ("PreToolUse", "deny"))
+        self.assertNotIn("updatedInput", hso)
+        reason = hso["permissionDecisionReason"]
+        for want in ("離席中", "model を haiku にして同じ呼び出しを出し直して", "ほかの項目はそのまま", "opus"):
+            self.assertIn(want, reason)
+        self.assertNotIn("そのまま出し直せば", reason)  # 2 度目を通す安全弁は知らせない
+        self.assertEqual(P.recent_switches(self.env), [])  # 断っただけでは切り替えの記録にしない
+        self.assertEqual(len(self.denials()), 1)
+        d = P.decide(agent(), dict(ON, away_model="sonnet"), last(25), NOW)
+        self.assertIn("model を sonnet にして", P.hook_output(d)["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_retry_with_away_model_passes_and_is_logged_with_role(self):
+        self.away()
         (self.d / "claude-state").mkdir()
         (self.d / "claude-state" / "s1.json").write_text(json.dumps({"state": "working", "role": "dev-a"}))
-        out = P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW)
-        hso = out["hookSpecificOutput"]
-        self.assertEqual(hso["hookEventName"], "PreToolUse")
-        self.assertEqual(hso["updatedInput"]["model"], "haiku")
-        self.assertNotIn("permissionDecision", hso)  # 許可の判断はしない
-        self.assertIn("haiku", hso["additionalContext"])
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 5))  # 出し直しは通す
         log = P.recent_switches(self.env)
         self.assertEqual(len(log), 1)
         self.assertEqual({k: log[0][k] for k in ("session_id", "role", "from", "to", "description", "idle_minutes")},
                          {"session_id": "s1", "role": "dev-a", "from": "opus", "to": "haiku",
                           "description": "Implement the parser", "idle_minutes": 30.0})
+        self.assertIn("denied_at", log[0])
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 6))  # 2 度出し直しても 1 件
+        self.assertEqual(len(P.recent_switches(self.env)), 1)
 
-    def test_retry_of_same_call_is_not_switched_again(self):
-        # auto mode で断られて元の model のまま出し直されたとき、書き換えと断りをくり返さない
-        self.policy(enabled=True)
-        P.record_human(self.env, "s0", "main", None, now=NOW - 30 * 60)
+    def test_away_model_call_without_denial_is_not_logged(self):
+        # 初めから haiku の呼び出し・断ってから時間がたったもの・別のセッションは、切り替えではない
+        self.away()
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW))
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        self.assertIsNone(P.run_hook(json.dumps(dict(agent(model="haiku"), session_id="s2")), self.env, now=NOW + 1))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + P.RETRY_SECONDS + 1))
+        self.assertEqual(P.recent_switches(self.env), [])
+
+    def test_second_try_with_original_model_is_not_denied_again(self):
+        # Claude が従わず元の model のまま出し直したとき、断りをくり返して作業を止めない
+        self.away()
         call = json.dumps(agent(model="opus"))
         self.assertIsNotNone(P.run_hook(call, self.env, now=NOW))
         self.assertIsNone(P.run_hook(call, self.env, now=NOW + 10))
-        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 20))  # 書き換えた形での出し直し
+        self.assertIsNone(P.run_hook(json.dumps(agent()), self.env, now=NOW + 15))  # model を外しても同じ依頼
+        self.assertEqual(P.recent_switches(self.env), [])  # 切り替わっていない
         self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus", prompt="別の作業")), self.env, now=NOW + 30))
         other = dict(agent(model="opus"), session_id="s2")
         self.assertIsNotNone(P.run_hook(json.dumps(other), self.env, now=NOW + 40))  # 別のセッション
         self.assertIsNotNone(P.run_hook(call, self.env, now=NOW + P.RETRY_SECONDS + 1))  # 時間がたてば新しい呼び出し
-        self.assertEqual(len(P.recent_switches(self.env, 10)), 4)
+        self.assertEqual(len(self.denials()), 4)
+
+    def test_unwritable_denial_log_lets_the_call_through(self):
+        # 断りを記録できないと 2 度目を見分けられず、断りがくり返しうる: 切り替えずに通す
+        self.away()
+        (self.d / "claude-presence" / P.DENIALS).mkdir()
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        self.assertIn("断らない", (self.d / "claude-presence" / "errors.log").read_text())
+
+    def test_broken_line_in_denial_log_does_not_hide_denials(self):
+        # 書きかけで切れた行があっても、ほかの断りの記録は読む（見失うと断りがくり返される）
+        self.away()
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        log = self.d / "claude-presence" / P.DENIALS
+        log.write_bytes(b'{"half": "\xe3\x81\n' + log.read_bytes())
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 10))
+
+    def test_unreadable_denial_log_lets_the_call_through(self):
+        # 書けるが読めない（chmod 200）とき、断りを見分けられないまま断り続けない
+        if os.geteuid() == 0:
+            self.skipTest("root は読める")
+        self.away()
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        log = self.d / "claude-presence" / P.DENIALS
+        log.chmod(0o200)
+        try:
+            for i in range(3):
+                self.assertIsNone(P.run_hook(json.dumps(agent(model="opus", prompt=f"別 {i}")), self.env, now=NOW + i), i)
+        finally:
+            log.chmod(0o600)
+        self.assertIn("読めないので断らない", (self.d / "claude-presence" / "errors.log").read_text())
+
+    def test_unterminated_last_line_does_not_swallow_next_record(self):
+        # 前の書き込みが改行の前で切れていても、次の断りの記録は別の行になり、出し直しを 1 回余分に断らない
+        self.away()
+        log = self.d / "claude-presence" / P.DENIALS
+        log.parent.mkdir(exist_ok=True)
+        log.write_text('{"cut": ')
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 5))
+        self.assertEqual(len(self.denials()), 1)
+        self.assertEqual(log.read_text().count("\n"), 2)  # 切れた行の後の区切り + 記録の 1 行
+        sw = self.d / "claude-presence" / P.SWITCHES
+        sw.write_text('{"i": 0}\n{"cut')
+        P.append_switch(self.env, {"i": 1})
+        P.append_switch(self.env, {"i": 2})
+        self.assertEqual([r.get("i") for r in P.recent_switches(self.env, 10)], [0, 1, 2])
+
+    def test_write_only_log_is_still_appended(self):
+        # 書けるが読めないファイルにも書く（末尾の確かめは省く）
+        if os.geteuid() == 0:
+            self.skipTest("root は読める")
+        P.append_switch(self.env, {"i": 1})
+        sw = self.d / "claude-presence" / P.SWITCHES
+        sw.chmod(0o200)
+        try:
+            P.append_switch(self.env, {"i": 2})
+        finally:
+            sw.chmod(0o600)
+        self.assertEqual([r.get("i") for r in P.recent_switches(self.env, 10)], [1, 2])
+
+    def test_denial_found_among_many_other_sessions(self):
+        # ほかのセッションの断りが 50 件より多くても、時間の内の自分の断りを見失わない
+        self.away()
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        for i in range(80):
+            other = dict(agent(model="opus", prompt=f"p{i}"), session_id=f"o{i}")
+            self.assertIsNotNone(P.run_hook(json.dumps(other), self.env, now=NOW + 1))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 2))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 3))
+        self.assertEqual(len(P.recent_switches(self.env)), 1)
+
+    def test_denial_found_after_rotation(self):
+        self.away()
+        old = P.LOG_MAX
+        P.LOG_MAX = 300
+        try:
+            self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+            for i in range(3):  # 回して、自分の断りを denials.jsonl.1 に送る
+                other = dict(agent(model="opus", prompt=f"p{i}"), session_id=f"o{i}")
+                self.assertIsNotNone(P.run_hook(json.dumps(other), self.env, now=NOW + 1))
+        finally:
+            P.LOG_MAX = old
+        d = self.d / "claude-presence"
+        self.assertIn('"session_id": "s1"', (d / (P.DENIALS + ".1")).read_text())
+        self.assertNotIn('"session_id": "s1"', (d / P.DENIALS).read_text())
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 2))
+
+    def test_denial_counts(self):
+        self.away()
+        self.assertEqual(P.denial_counts(self.env), {"denied": 0, "switched": 0})
+        P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW)
+        P.run_hook(json.dumps(agent(model="opus", prompt="別")), self.env, now=NOW + 1)
+        P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 2)  # 1 件目だけ従った
+        self.assertEqual(P.denial_counts(self.env), {"denied": 2, "switched": 1})
+
+    def test_unwritable_switch_log_lets_the_retry_through(self):
+        self.away()
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        (self.d / "claude-presence" / P.SWITCHES).mkdir()
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 5))
+        self.assertIn(P.SWITCHES, (self.d / "claude-presence" / "errors.log").read_text())
+
+    def test_retry_after_human_returns_is_still_logged(self):
+        # 断った後に人が打っても、away_model での出し直しは切り替えとして載る
+        self.away()
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        P.record_human(self.env, "s0", "main", None, now=NOW + 1)
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 5))
+        self.assertEqual(len(P.recent_switches(self.env)), 1)
+
+    def test_present_keep_and_fable_do_nothing(self):
+        self.away()
+        for p in (agent(description="差分のレビュー"), agent(prompt="VERIFY the fix"), agent(model="fable"),
+                  agent(subagent_type="Explore")):
+            self.assertIsNone(P.run_hook(json.dumps(p), self.env, now=NOW), p)
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW - 29 * 60))  # 在席
+        self.assertEqual((self.denials(), P.recent_switches(self.env)), ([], []))
 
     def test_nothing_when_disabled_present_or_broken(self):
         P.record_human(self.env, "s0", "main", None, now=NOW - 30 * 60)
@@ -394,7 +542,10 @@ class PresenceCli(unittest.TestCase):
         self.assertEqual(self.run_("hook", stdin=json.dumps(agent())), "")  # 既定は無効
         self.cfg.write_text('{"model_policy": {"enabled": true}}')
         out = json.loads(self.run_("hook", stdin=json.dumps(agent(model="opus"))))
-        self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["model"], "haiku")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertNotIn("updatedInput", out["hookSpecificOutput"])
+        self.assertEqual(self.run_("hook", stdin=json.dumps(agent(model="haiku"))), "")  # 出し直しは通す
+        self.assertEqual(json.loads(self.run_("--json"))["recent"][-1]["to"], "haiku")
         for bad in ("", "{broken", "\x00\xff", json.dumps(agent(description="レビュー"))):
             self.assertEqual(self.run_("hook", stdin=bad), "", bad)
         P.record_human(self.env, "s0", "main", None)  # いま打った
@@ -414,6 +565,13 @@ class PresenceCli(unittest.TestCase):
         text = self.run_()
         for want in ("判定: 離席", "役割 main", "有効", "haiku", "dev-a  opus → haiku  Implement"):
             self.assertIn(want, text)
+        self.assertNotIn("断った呼び出し", text)  # 断りが無ければ出さない
+        self.assertEqual(s["denials"], {"denied": 0, "switched": 0})
+        P.append_log(self.env, P.DENIALS, {"at": "x", "t": 1, "session_id": "s1", "prompt_key": "k"})
+        P.append_log(self.env, P.DENIALS, {"at": "y", "t": 2, "session_id": "s1", "prompt_key": "k2"})
+        P.append_switch(self.env, {"at": "z", "t": 3, "session_id": "s1", "prompt_key": "k", "denied_at": "x", "to": "haiku"})
+        self.assertIn("断った呼び出し: 2 件、うち出し直しで切り替わった 1 件", self.run_())
+        self.assertEqual(json.loads(self.run_("--json"))["denials"], {"denied": 2, "switched": 1})
         self.cfg.write_text('{"model_policy": {"away_minutes": -1}}')
         s = json.loads(self.run_("--json"))
         self.assertIn("away_minutes", s["policy_error"])

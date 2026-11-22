@@ -6,8 +6,9 @@
 
 人が打った時刻は claude-state の UserPromptSubmit の hook が記録する（人の入力のときだけ。lib/presence.py）。
 hook は設定 model_policy.enabled が true のときだけ、離席中（away_minutes 分以上だれも打っていない）の実装の
-呼び出しの model を away_model に書き換える（updatedInput）。在席・記録が無い・レビューや調べもの・設定が壊れている・
-何かが失敗したときは何もしない（呼び出しどおりに通す）。詳しくは docs/config.md の model_policy。
+呼び出しを断り（permissionDecision: deny）、model を away_model にして出し直すよう理由の文で頼む（入力は書き換えない）。
+出し直しは通し、切り替えとして記録する。同じ依頼を元の model のまま出し直したものも 2 度目は通す。在席・記録が無い・
+レビューや調べもの・設定が壊れている・何かが失敗したときは何もしない（呼び出しどおりに通す）。詳しくは docs/config.md の model_policy。
 """
 import json
 import os
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 
 def cmd_hook(env):
-    """何が起きても exit 0。書き換えるときだけ stdout に JSON を出す。"""
+    """何が起きても exit 0。断るときだけ stdout に JSON を出す。"""
     try:
         text = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
         from presence import run_hook
@@ -49,7 +50,7 @@ def hook_installed(env):
 
 def status(env, recent=5, now=None):
     from config import load_model_policy
-    from presence import idle_minutes, is_away, load_last, presence_dir, recent_switches
+    from presence import denial_counts, idle_minutes, is_away, load_last, presence_dir, recent_switches
     now = time.time() if now is None else now
     last = load_last(env)
     try:
@@ -61,7 +62,7 @@ def status(env, recent=5, now=None):
     return {"last": last, "idle_minutes": None if m is None else round(m, 1),
             "away": is_away(last, now, policy) if last else None,
             "policy": policy, "policy_error": error, "hook": hook_installed(env),
-            "recent": recent_switches(env, recent), "dir": str(presence_dir(env))}
+            "recent": recent_switches(env, recent), "denials": denial_counts(env), "dir": str(presence_dir(env))}
 
 
 def fmt_time(t):
@@ -95,6 +96,9 @@ def format_status(s):
             out.append(f"  {r.get('at', '?')}  {who}  {r.get('from') or '（指定なし）'} → {r.get('to')}  {r.get('description') or ''}".rstrip())
     else:
         out.append("直近の切り替え: 無い")
+    dc = s["denials"]
+    if dc["denied"]:
+        out.append(f"断った呼び出し: {dc['denied']} 件、うち出し直しで切り替わった {dc['switched']} 件（記録にある分）")
     return "\n".join(out)
 
 
