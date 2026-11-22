@@ -498,6 +498,18 @@ class Commands(Base):
         for c in ("svcctl config --get x", "svcctl config --setx 1", "svcctl config --", "svcctl config -s 1"):
             self.assertIsNone(self.bash(c), c)
 
+    def test_abbrev_not_in_allow_commands(self):
+        # allow_commands（通す側）の if_any は完全一致のまま: 省略形で例外が広がらない
+        g = self.default_guards()
+        g["app-running"]["allow_commands"] = [{"program": "^svcctl$", "block": [{"sub": "deploy", "if_any": ["--dry-run"]}]}]
+        self.write_config(g)
+        self.assertIsNone(self.bash("svcctl deploy --dry-run"))
+        self.assertIsNotNone(self.bash("svcctl deploy --d"))
+        self.assertIsNotNone(self.bash("svcctl deploy --dry"))
+        entry = gh._compile_entry({"program": "^svcctl$", "block": [{"sub": "deploy", "if_any": ["--dry-run"]}]}, "x", [])
+        self.assertTrue(gh.match_entry(entry, ["svcctl", "deploy", "--d"]))
+        self.assertIsNone(gh.match_entry(entry, ["svcctl", "deploy", "--d"], abbrev=False))
+
     def test_but_if_any_with_if_any(self):
         # if_any を満たさなければ but_if_any があっても通す（if_any が先）
         self.road_config({"sub": "road", "if_any": ["--apply"], "unless_any": ["--dry-run"],

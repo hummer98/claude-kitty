@@ -914,8 +914,10 @@ def has_flag_prefix(word):
     return word.startswith("--") and len(word) > 2
 
 
-def match_entry(entry, words):
-    """commands / allow_commands の 1 つが、単純なコマンド words に当たれば、その印（文字列）を返す。"""
+def match_entry(entry, words, abbrev=True):
+    """commands / allow_commands の 1 つが、単純なコマンド words に当たれば、その印（文字列）を返す。
+    abbrev は if_any / but_if_any を省略形にも当てるか。commands（止める側）は True、
+    allow_commands（通す側）は False（前方一致にすると例外として通すものが広がるため）。"""
     kind, spec = entry
     norm = normalize(words)
     prog = norm[0]
@@ -950,7 +952,7 @@ def match_entry(entry, words):
         # 長さの下限は付けない（止める側に倒す）。"--" だけはオプションの終わりの印なので当てない
         for r in rest:
             key = r.split("=", 1)[0]
-            if has_flag_prefix(key) and flag.startswith(key):
+            if abbrev and has_flag_prefix(key) and flag.startswith(key):
                 return True
         return has(flag)
     if if_any and not any(has_abbrev(f) for f in if_any):
@@ -1235,7 +1237,7 @@ class Analyzer:
         """いまの self._cmds から、allow_commands に当たる形の理由を外したもの。
 
         allow_commands はコマンドの形の理由だけを消す（git push --dry-run > <保護したパス> は止める）。"""
-        if self._cmds and rest and any(match_entry(e, rest) for e in self.guard["allow_commands"]):
+        if self._cmds and rest and any(match_entry(e, rest, abbrev=False) for e in self.guard["allow_commands"]):
             return []
         return list(self._cmds)
 
