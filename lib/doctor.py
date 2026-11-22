@@ -32,8 +32,9 @@ HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-c
 class Ctx:
     """調べる環境。テストでは run / which / os_name / env を差し替える。"""
 
-    def __init__(self, env=None, os_name=None, run=None, which=None, repo=REPO, python=None):
+    def __init__(self, env=None, os_name=None, run=None, which=None, repo=REPO, python=None, statvfs=None):
         self.env = dict(os.environ if env is None else env)
+        self.statvfs = statvfs or os.statvfs
         self.home = Path(self.env.get("HOME") or os.path.expanduser("~"))
         self.os_name = os_name or os.uname().sysname
         self._run = run
@@ -456,6 +457,8 @@ def check_config(ctx, rep):
         strict("relay", lambda: load_relay_config(ctx.env, path))
     from config import load_model_policy
     strict("model_policy", lambda: load_model_policy(ctx.env, path))
+    from config import load_disk_watch_config
+    strict("disk_watch", lambda: load_disk_watch_config(ctx.env, path))
 
 
 # ---- デスクトップ・Chrome ------------------------------------------------------
@@ -674,8 +677,44 @@ def check_model_policy(ctx, rep):
         rep.ok(name, f"{what}。hook も入っている")
 
 
+# ---- ディスクの見張り（claude-state watch の disk_watch） --------------------------------------------
+
+def check_disk(ctx, rep):
+    """各 path の容量と inode の使用率と、閾値を超えているか（statvfs を読むだけ。直下は数えない）。"""
+    from config import load_disk_watch_config
+    from diskwatch import KIND_LABEL, status_rows
+    try:
+        dc = load_disk_watch_config(ctx.env)
+    except ValueError:
+        return  # 「設定: disk_watch」の行で NG にする
+    if not dc["enabled"]:
+        rep.skip("ディスク", "見張らない（disk_watch.enabled が false）")
+        return
+    to = dc["notify_role"] or "デスクトップの通知だけ"
+    by_path = {}
+    for path, kind, used, total, pct, over in status_rows(ctx.env, dc, ctx.statvfs):
+        by_path.setdefault(path, []).append((kind, used, total, pct, over))
+    for path, items in by_path.items():
+        name = f"ディスク: {path}"
+        if items[0][0] is None:
+            rep.skip(name, "無い（飛ばす）")
+            continue
+        parts, worst = [], None
+        for kind, used, total, pct, over in items:
+            parts.append(f"{KIND_LABEL[kind]} {pct:.0f}%" + (f"（{over:g}% を超えている）" if over is not None else ""))
+            if over is not None:
+                worst = over if worst is None else max(worst, over)
+        if not any(k == "inodes" for k, *_ in items):
+            parts.append("inode は数を持たないので見ない")
+        detail = "・".join(parts) + f"。閾値 {', '.join(f'{t:g}' for t in dc['thresholds'])}%、知らせる先: {to}"
+        if worst is None:
+            rep.ok(name, detail)
+        else:
+            rep.warn(name, detail, f"{path} の中の要らないもの（テストの一時フォルダの残りなど）を確認して消す")
+
+
 CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_systemd, check_config, check_desktop,
-          check_relay, check_model_policy]
+          check_relay, check_model_policy, check_disk]
 MARK = {"ok": "OK  ", "ng": "NG  ", "warn": "注意", "skip": "--  "}
 
 

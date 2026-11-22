@@ -1,5 +1,6 @@
 # claude-state watch: done（完了・未読）のペインに 2 秒続けてフォーカスしたら idle に戻す常駐。
 # kitty の watcher は、動いている kitty で設定を読み直しても前からあるペインに付かないため、kitty の外で同じ規則を行う。
+# あわせて 1 分ごとにディスクの使用率を見て、閾値を超えたら知らせる（config.json の disk_watch。docs/config.md）。
 #
 #   cp contrib/systemd/claude-state-watch.service ~/.config/systemd/user/
 #   （ExecStart のパスを、このリポジトリの場所に合わせる）

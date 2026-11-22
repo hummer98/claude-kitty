@@ -13,6 +13,10 @@
   - 切り替え: PreToolUse の hook（`claude-presence hook`、matcher `Agent|Task`）が呼び出しを `permissionDecision: "deny"` で断り、`permissionDecisionReason` で「離席中なので model を `away_model` にして同じ呼び出しを出し直してください（ほかの項目はそのまま）」と頼む。出し直し（`model` が `away_model`）は通し、そのとき `switches.jsonl` に残す（断った記録は `denials.jsonl`）。入力を書き換える `updatedInput` は使わない: auto mode では hook が入力を変えると判定が無効になって断られ、同じ返答のほかの呼び出し（Bash など）まで巻き込まれたため（実測）。deny なら巻き込まない見込み（実機の auto mode ではまだ確かめていない）。`keep` の語（レビュー・評価・調べものなど）を含むもの、`subagent_type` が `claude-code-guide`・`Explore`・`Plan`・`web-fetch`・`fork` のもの、`model` が `fable` のもの、記録が無いとき、例外のときは止めない。英字の `keep` の語は単語として探す（`guide` は `guideline` に当てない）。同じセッションの同じ prompt を 300 秒以内に断っていたら、元の model のままの出し直しも通す（Claude が従わなかったときに断りをくり返して作業を止めないため）。断りの記録が書けない・読めないときは断らない。
   - `claude-presence [--json] [--recent N]` で最後の入力からの分数・判定・設定・hook・直近の切り替え・断った数（うち切り替わった数）を見る。`claude-kitty doctor` に「モデルの切り替え」と「設定: model_policy」の行。
   - `tools/install.sh --hooks=model` で hook を入れる（`--all` には入らない。`--uninstall` で外せる）。
+- `claude-state watch` にディスクの使用率の見張りと設定 `disk_watch`: `interval_sec`（既定 60 秒）ごとに `paths`（既定 `["/tmp"]`）の容量と inode の使用率を `os.statvfs` で測り、`thresholds`（既定 70・85 %）を超えたら知らせる。2026-11-23 に /tmp（tmpfs）の inode が 100% になり、全部のセッションでコマンドが起動できなくなった（テストの一時フォルダの残り）ため、その前に人と統括に知らせる（[docs/config.md](docs/config.md#disk_watchclaude-state-watch-ディスクの使用率の見張り)）。
+  - 閾値ごとに 1 回だけ。閾値より 10 ポイント下がってからまた超えたら、もう 1 回。知らせた印は `$XDG_RUNTIME_DIR/claude-disk-watch/state.json` に置き、watch を起動し直しても繰り返さない。inode の数を持たないファイルシステム（btrfs など）は inode を見ない。無い path は飛ばす。
+  - 送り先は `notify_role` の役割のセッション（既定 `null` = デスクトップの通知だけ）。claude-relay 第 2 段の起こす部品（`lib/relay.py` の `WAKERS`、cross-session の socket）で 1 通送り、止まっているセッションにも届ける。送れなければデスクトップの通知（`notify-send` / `osascript`）。本文に、直下の項目を名前の頭（`tmp*`・`lua_*`・`pytest-*` など）でまとめた数の上位 3 つと、直下の項目の数。直下が少なければ、直下のフォルダごとの中の数の上位 2 つも（1 秒で数え終わらなければ省く・途中まで）。`claude-state watch --once` は測った値を出すだけで、知らせない。本文の頭の `[claude-kitty disk]` は claude-presence が人の入力と数えない。
+  - `claude-kitty doctor` に「ディスク: <path>」（使用率と、閾値を超えているか）と「設定: disk_watch」の行。
 
 ### 修正
 
@@ -21,6 +25,7 @@
 ### 上げるときに手で行うこと
 
 - 使うときだけ: 設定に `"model_policy": {"enabled": true}` を書き、`tools/install.sh --hooks=model`。
+- `systemctl --user restart claude-state-watch.service`（ディスクの見張りを始める）。統括に送るなら設定に `"disk_watch": {"notify_role": "<役割>"}` を書く（その役割が `relay.receivers` に入り、relay の hook が入っていること）。
 
 ## [0.7.3] - 2026-11-22
 

@@ -88,5 +88,12 @@
     "away_minutes": 20,
     "away_model": "haiku",
     "keep": ["review", "レビュー", "評価", "verify", "検証", "調べ", "guide"]
+  },
+  "disk_watch": {
+    "enabled": true,
+    "paths": ["/tmp"],
+    "thresholds": [70, 85],
+    "notify_role": null,
+    "interval_sec": 60
   }
 }

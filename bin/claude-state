@@ -9,7 +9,8 @@
   claude-state marks [--clear]   standby などのタブの題の「●」を付け直す（--clear は全部外す）
   claude-state subagents [SESSION_ID]  ステータス行用。「サブ: 動作 N ／ 終了済み M（最古 X日）」（どちらも 0 なら何も出さない）
   claude-state repaint [--to SOCKET]   記録から全ペインの背景を塗り直す（kitty が設定を読み直すと色が消えるため）
-  claude-state watch [--to SOCKET]... [--interval 1]   常駐。done のペインを見たら idle に戻す（systemd のユーザーサービスで動かす）
+  claude-state watch [--to SOCKET]... [--interval 1]   常駐。done のペインを見たら idle に戻す（systemd のユーザーサービスで動かす）。
+                                 ディスクの使用率も見て、閾値を超えたら知らせる（config.json の disk_watch。lib/diskwatch.py）
 
 目立たせるのは waiting だけ（背景を少し暖色に、ステータス行の名前をオレンジに）。working はごく少し青み、
 done（終わって、まだ見ていない）はごく薄い緑、idle は元の色（kitty.conf の background）。
@@ -236,8 +237,22 @@ def log_error(env, event, msg):
         pass
 
 
-def cmd_watch(env, to=None, interval=1.0, once=False, sleep=time.sleep, now=time.time, monotonic=time.monotonic):
+def make_disk_watch(env):
+    """ディスクの見張り（lib/diskwatch.py）。設定が壊れていれば見張りだけを止めて errors.log に残す（色の見張りは続ける）。"""
+    from config import load_disk_watch_config
+    from diskwatch import DiskWatch
+    try:
+        dc = load_disk_watch_config(env)
+    except ValueError as e:
+        log_error(env, "watch", f"disk: 設定が正しくないので見張らない: {e}")
+        return None
+    return DiskWatch(env, dc, log=lambda m: log_error(env, "watch", m)) if dc["enabled"] else None
+
+
+def cmd_watch(env, to=None, interval=1.0, once=False, sleep=time.sleep, now=time.time, monotonic=time.monotonic,
+              disk=None):
     """常駐: interval 秒ごとに全部の kitty の前面のペインを見て、done が done_dwell 秒続いたら idle にする。
+    あわせて disk_watch.interval_sec ごとにディスクの使用率を見る（lib/diskwatch.py。disk は差し替え用）。
 
     落ちない（例外は errors.log に残して続ける。それでも落ちたら systemd が起こし直す）。
     """
@@ -254,6 +269,11 @@ def cmd_watch(env, to=None, interval=1.0, once=False, sleep=time.sleep, now=time
         log_error(env, "watch", f"起動できない: {type(e).__name__}: {e}")
         raise
     configured = list(to or []) or c.get("watch_sockets")
+    if disk is None:
+        try:
+            disk = make_disk_watch(env)
+        except Exception as e:  # noqa: BLE001 — ディスクの見張りの失敗で色の見張りを止めない
+            log_error(env, "watch", f"disk: 起動できない: {type(e).__name__}: {e}")
     while True:
         t, m0 = now(), monotonic()
         try:
@@ -262,6 +282,18 @@ def cmd_watch(env, to=None, interval=1.0, once=False, sleep=time.sleep, now=time
                     print(f"{sock} window {wid}: {sid} → idle")
         except Exception as e:  # noqa: BLE001
             log_error(env, "watch", f"{type(e).__name__}: {e}")
+        try:
+            if disk and once:
+                # 確認用: 測った値だけを出す（知らせない・印を付けない。常駐の watch の印と知らせを横取りしないため）
+                for path, kind, _used, _total, pct, over in disk.preview():
+                    if kind is None:
+                        print(f"disk {path}: 無い（飛ばす）")
+                    else:
+                        print(f"disk {path} {kind}: {pct:.0f}%" + (f"（{over:g}% を超えている）" if over is not None else ""))
+            elif disk and disk.due(m0):
+                disk.check()
+        except Exception as e:  # noqa: BLE001
+            log_error(env, "watch", f"disk: {type(e).__name__}: {e}")
         if once:
             return 0
         sleep(min(interval, max(0.05, interval - (monotonic() - m0))))  # 待つ時間は単調な時計で（壁時計が戻っても止まらない）

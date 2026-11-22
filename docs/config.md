@@ -178,6 +178,30 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 - 記録: 断ったら `<置き場>/claude-presence/denials.jsonl` に、時刻・セッション・役割・元と新しい model・description・prompt の hash を残す。出し直しが `away_model` で通ったら `<置き場>/claude-presence/switches.jsonl` に、同じ項目と断った時刻（`denied_at`）を残す。切り替えの記録は、実際に軽い model で動いた呼び出しだけにするため、断ったときでなく出し直しが通ったときに書く（従わずに元の model で通ったもの、`prompt` を変えて出し直したものは載らない）。断った記録が書けない・読めないときは、2 度目を見分けられないので断らずに通す。2 度目の見分けは、件数でなく 300 秒の内の記録（回した `.1` も）で探す（ほかのセッションの断りが多くても見失わない）。
 - `claude-presence [--json] [--recent N]` で、最後に人が打ってからの分数・在席/離席・どのセッションか・設定・hook・直近の切り替え・断った数（うち出し直しで切り替わった数。`--json` では `denials`）を見る。`claude-kitty doctor` の「モデルの切り替え」の行が、有効か・hook が入っているかを出す。
 
+## disk_watch（claude-state watch: ディスクの使用率の見張り）
+
+常駐の `claude-state watch`（systemd の `claude-state-watch.service`）が、`interval_sec` ごとに各 path の `os.statvfs` で容量と inode の使用率を測り、閾値を超えたら知らせる。2026-11-23 に /tmp（tmpfs）の inode が 100% になり、全部のセッションでコマンドが起動できなくなった（テストの一時フォルダの残り）ため、その前に人と統括に知らせる。
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `enabled` | `true` | `false` で見張らない |
+| `paths` | `["/tmp"]` | 見る場所。`~` と `$VAR` / `${VAR}` を展開する（`"$XDG_RUNTIME_DIR"` など）。無い場所・無い変数を含むものは飛ばす |
+| `thresholds` | `[70, 85]` | 知らせる使用率（%。20〜100）。小さい順・重なり無しにそろえる |
+| `notify_role` | `null` | 知らせを送る役割のセッション（`"main"` など）。`null` ならデスクトップの通知だけ |
+| `interval_sec` | `60` | 測る間隔（秒。5〜86400）。watch を起動したときにも 1 回測る |
+
+- 知らせ方: 閾値ごとに 1 回だけ。閾値より 10 ポイント下に下がってから、また超えたら、もう 1 回（閾値のあたりで上下して何度も知らせないため）。1 回で 2 つの閾値を超えたら、上の閾値の 1 通にまとめる。容量と inode は別々に数える。inode の総数が 0 以下のファイルシステム（btrfs など、数を持たないもの）は inode を見ない。
+- 知らせた印は `$XDG_RUNTIME_DIR/claude-disk-watch/state.json`（無ければ `/tmp/claude-kitty-<uid>/…`）に置き、watch を起動し直しても同じ知らせを繰り返さない。送る前に書く。書けない（inode が尽きているなど）ときは、動いている間だけ覚えて errors.log に残す。
+- 送り先: `notify_role` のセッションに、claude-relay 第 2 段の起こす部品（`lib/relay.py` の `WAKERS`。今は Claude Code の cross-session の socket）で 1 通。止まっているセッションも新しいターンで受け取る。socket と token は、そのセッションの hook が `relay/wake/<役割>/` に書いた記録を使うので、**その役割が `relay.receivers` に入っていて、relay の hook（`tools/install.sh --hooks=relay`）が入っている必要がある**（[relay.md](relay.md)）。claude-relay の回数の上限・受領の控えは使わない（受信箱を通らないため）。
+- 送れない（記録が無い・セッションが終わった・socket の失敗）か `notify_role` が `null` なら、デスクトップの通知（Linux は `notify-send`、macOS は `osascript`）。それも出せなければ errors.log に残す（毎分くり返さない）。
+- 本文の例: `[claude-kitty disk] /tmp の inode が 72%（754,975 / 1,048,576）。70% を超えました。直下は 812,400 項目。多いもの（名前の頭でまとめた数）: tmp*（810,002）、lua_*（2,301）、claude-*（1）。（claude-kitty の見張りの知らせで、ユーザーが打ったものではない。…）`。手がかりは、その場所の直下の項目を名前の頭（数字・乱数の部分から先を `*` にした形。`tmp0`・`tmpp1rtt87k` → `tmp*`、`lua_ab12` → `lua_*`、`pytest-123` → `pytest-*`）でまとめた数の上位 3 つと、直下の項目の数。区切りの無い頭に乱数が続く名前（`mktemp -d /tmp/fooXXXXXX` の形）は、共通の頭（`foo*`）にまとめ直す。直下が 2,000 項目より少ないときは、残りの時間で直下のフォルダごとの中の数も数え、上位 2 つを「中が多いもの」として出す（1 つのフォルダの下に積もる形。`claude-<uid>/` の scratchpad・`pytest-of-<user>/` など。時間切れなら、数えたところまでを「以上」で出す）。直下の小さな一時フォルダが何十万も並ぶ形では、中は数えず名前の頭でまとめた数で指す（中を数えた上位は `tmp0（5）` のように原因を指さないため）。場所がリンクなら、たどった先を数える。直下を 1 秒で数え終わらなければ省く。頭の `[claude-kitty disk]` は claude-presence が人の入力と数えない印（`lib/presence.py` の `MACHINE_MARKS`）。
+- 知らない項目があれば設定の誤りとする（書き間違いで黙って既定のまま動かないため）。`"disk_watch": null` は書いていないのと同じ（既定で見張る）。
+- `claude-state watch --once` は測った値（と超えている閾値）を出すだけで、知らせず、印も付けない（常駐の watch の知らせを横取りしないため）。
+- watch は色の見張りと同じ流れで動くので、測る・数える・送る間は色の見張りが待つ。直下を数えるのは 1 秒まで、送るのは閾値を超えたときだけ（socket は 1 つにつき 3 秒、通知は 5 秒まで）。`os.statvfs` には時間の上限が無いので、応答しなくなりうるネットワークのマウントは `paths` に入れない。
+- 送れずデスクトップの通知も出せなかった知らせは送り直さない（印は付くので、次は 10 ポイント下がってから超えたとき）。
+- `claude-kitty doctor` の「ディスク: <path>」の行に、使用率と、閾値を超えているか（超えていれば注意）を出す。設定が壊れていれば「設定: disk_watch」が NG になり、watch は見張りだけを止めて（色の見張りは続ける）errors.log に残す。
+- 設定を変えたら `systemctl --user restart claude-state-watch.service`（watch は起動したときに設定を読む）。
+
 ## 設定ファイルの外のもの
 
 | 環境変数 | 意味 |
