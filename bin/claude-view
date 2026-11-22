@@ -175,12 +175,13 @@ def main(argv=None):
                 "swap": lambda: swap_roles(now, args.a, args.b)}[args.cmd]()
     except ValueError as e:
         die(str(e))
-    if args.cmd == "rows":
-        # pinned を先頭に移す前に、指定そのものの誤り（2 回出てくるなど）を断る
-        try:
-            validate(args.left, rows, smap.keys())
-        except ValueError as e:
-            die(str(e))
+    # pinned を先頭に移すと、指定そのものの誤り（rows・restore・pair で 2 回出てくるなど）が消えて黙って通るので、
+    # 移す前の形で調べておく。断るのは保護する窓の判定のあと（前面なら誤りでも終了コード 2 のまま）
+    try:
+        validate(args.left, rows, smap.keys())
+        spec_error = None
+    except ValueError as e:
+        spec_error = str(e)
     # 常時表示（view.pinned）は、どの操作のあとでも 1 段目の先頭へ戻す
     pins, notes = active_pins(conf["pinned"], args.left, smap.keys())
     for note in notes:
@@ -196,6 +197,8 @@ def main(argv=None):
 
     if not args.dry_run and not args.force and guarded_in_front(conf["guard"]):
         die("保護する窓（view.guard）が前面にあるので何もしない（--force で実行）", 2)
+    if spec_error:
+        die(spec_error)
     if moved:  # 何もしないとき（保護する窓が前面）には出さない
         print("常時表示（view.pinned）を 1 段目の先頭に置いた: " + "/".join(",".join(r) for r in rows))
 

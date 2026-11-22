@@ -719,6 +719,37 @@ json.dump({{"waiter_pid": pid, "wait_id": {SID_A!r}, "session_id": {SID_A!r}, "c
         self.assertEqual(tabs_of, {"role=c": "work"})
         self.assertNotIn("並べ直す", out)
 
+    def launch_restore(self, tabs):
+        """kitty が無いときの restore を通しで（偽の起動役が socket を作り、ls に開いた役割を載せる）。"""
+        cfg = json.loads((self.d / "config.json").read_text())
+        cfg["view"]["pinned"] = ["c"]
+        (self.d / "config.json").write_text(json.dumps(cfg))
+        roles = [r for t in tabs for r in t["roles"]]
+        roster = {"version": 1, "saved_at": 1.0, "left": "lead", "tabs": tabs,
+                  "sessions": {r: {"session_id": None, "cwd": "/" + r} for r in roles}}
+        (self.d / "data/roster.json").write_text(json.dumps(roster))
+        sock = self.d / "rt" / f"kitty-{os.getpid()}"
+        sock.unlink()
+        self.write_ls([win(i + 1, r, []) for i, r in enumerate(roles)])
+        launcher = self.d / "bin/launcher"
+        launcher.write_text(f"#!/bin/sh\ncp \"$1\" {self.d / 'opened.session'}\ntouch {sock}\n")
+        launcher.chmod(0o755)
+        self.env["CLAUDE_ROSTER_LAUNCHER"] = str(launcher)
+        out = self.roster("restore").stdout
+        return out, (self.d / "opened.session").read_text()
+
+    def test_restore_new_kitty_pinned_first(self):
+        out, text = self.launch_restore([{"title": "main", "roles": ["lead", "a"], "rows": [["a"]]},
+                                         {"title": "work", "roles": ["c"]}])
+        self.assertIn("並べ直す: claude-view rows 'c,a'", out)
+        self.assertNotIn("new_tab work", text)  # c は統括のタブに開き、元のタブは作らない
+
+    def test_restore_new_kitty_without_rows_tab_does_not_rearrange(self):
+        # 段組みのタブが名簿に無ければ、pinned だけの段組みで claude-view rows を走らせない
+        out, text = self.launch_restore([{"title": "main", "roles": ["lead"]}, {"title": "work", "roles": ["c"]}])
+        self.assertNotIn("並べ直す", out)
+        self.assertIn("new_tab work", text)
+
     def test_restore_without_kitty_writes_session_file(self):
         roster = {"version": 1, "saved_at": 1.0, "left": "lead",
                   "tabs": [{"title": "main", "roles": ["lead", "a"], "rows": [["a"]]}],

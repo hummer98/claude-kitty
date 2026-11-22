@@ -396,8 +396,10 @@ def cmd_restore(args, view, conf):
         print(f"起動した: {sock}")
         rows = R.filter_rows(main.get("rows") if main else [], set(launch))
         # 常時表示（view.pinned）は名簿の段組みに無くても前に出す（claude-view rows が 1 段目の先頭に置く）
-        rows = pin_rows(rows, [p for p in view["pinned"] if p in launch and p != left])
-        if left in launch and rows:
+        # 統括のタブ（段組み）が名簿に無ければ、セッションファイルも pinned を前に置いていないので並べ直さない
+        if main:
+            rows = pin_rows(rows, [p for p in view["pinned"] if p in launch and p != left])
+        if left in launch and main and rows:
             time.sleep(1.0)
             run_view(sock, left, rows, False)
         lock.close()

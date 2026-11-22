@@ -1208,6 +1208,52 @@ class ClaudeViewCli(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(brought[0], "bring dev-c")
 
+    def test_pinned_after_add_equalize_all(self):
+        r, brought = self.pinned_run("add", "dev-a", "--row", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(brought, ["bring dev-c", "bring dev-b", "bring dev-d", "bring dev-e", "bring dev-a"])
+        r, brought = self.pinned_run("equalize")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(brought[0], "bring dev-c")
+        self.assertIn("常時表示（view.pinned）を 1 段目の先頭に置いた: dev-c,dev-a,dev-d/dev-b,dev-e", r.stdout)
+        r, brought = self.pinned_run("all")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(brought[0], "bring dev-c")
+        self.assertEqual(sorted(brought), sorted(f"bring dev-{x}" for x in "abcde"))  # 全員が main に出る
+
+    def test_pinned_does_not_hide_duplicate_restore(self):
+        # pinned を先頭に移すと重なりが消えて見えるが、pinned が無いときと同じく断る
+        for pinned in ([], ["dev-c"]):
+            self.conf.write_text(json.dumps({"view": {"pinned": pinned, "restore": "dev-a,dev-c/dev-c"}}))
+            r = self.run_view("--dry-run", "restore")
+            self.assertEqual(r.returncode, 1, (pinned, r.stdout, r.stderr))
+            self.assertIn("2 回", r.stderr)
+
+    def guard_front(self, conf, *args):
+        """保護する窓が前面にある形（偽の qdbus と journalctl が、guard に当たるプロセスの pid を前面と答える）。"""
+        d = Path(self.tmp.name)
+        s = subprocess.Popen(["sleep", "33"])
+        try:
+            tok = d / "token"
+            (d / "qdbus").write_text(
+                f"#!/bin/sh\ncase \"$3\" in *loadScript) echo \"$5\" > {tok}; echo 1;; esac\n")
+            (d / "journalctl").write_text(f"#!/bin/sh\nt=$(cat {tok}); echo \"$t {s.pid}\"; echo \"$t END\"\n")
+            for n in ("qdbus", "journalctl"):
+                (d / n).chmod(0o755)
+            self.conf.write_text(json.dumps({"view": dict(conf, guard=["^sleep 33$"])}))
+            return self.run_view(*args, PATH=f"{d}:/usr/bin:/bin", CLAUDE_KITTY_QDBUS=str(d / "qdbus"))
+        finally:
+            s.kill(); s.wait()
+
+    def test_guard_in_front_keeps_exit_2_for_bad_spec(self):
+        # 誤った指定でも、保護する窓が前面なら終了コードは 2（claude-roster は 2 のときだけ「あとで」と案内する）
+        for conf in ({}, {"pinned": ["dev-c"]}):
+            r = self.guard_front(conf, "rows", "dev-a/dev-a")
+            self.assertEqual(r.returncode, 2, (conf, r.stderr))
+            self.assertIn("保護する窓", r.stderr)
+            self.assertNotIn("detach-window", self.calls.read_text())
+            self.assertNotIn("常時表示", r.stdout)  # 何もしないときは並べ替えの行を出さない
+
     def test_pinned_missing_or_left_warns_and_continues(self):
         r, brought = self.pinned_run("focus", "dev-a", pinned=("ghost", "main"))
         self.assertEqual(r.returncode, 0, r.stderr)

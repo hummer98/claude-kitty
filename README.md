@@ -94,7 +94,7 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
 
 - ペインは kitty の user var `role`（セッションファイルの `--var role=...`）で呼ぶ。
 - 左の列（`--left`、既定は設定の `view.left`、無ければ `main`）は固定。毎回いったん左以外を standby タブへ下げてから組み直し、最後に入力先を左へ戻す。
-- 設定の `view.pinned`（役割のリスト）は左の列と同じく常時表示。どの操作のあとも右側の 1 段目の先頭（統括のすぐ右上。複数なら設定の順）に置き、`focus`・`remove`・`restore`・`all` でも standby に下げない。`rows` で別の位置を指定しても先頭へ移して残りはそのまま並べ、並べ替えた結果を 1 行出す。`swap` で pinned を入れ替えようとすると断る（場所が固定なので）。kitty にいない pinned・`view.left` と同じ pinned は警告を 1 行出して置かずに続ける。`claude-roster restore` も統括のタブの 1 段目の先頭に開く。
+- 設定の `view.pinned`（役割のリスト）は左の列と同じく常時表示。どの操作のあとも右側の 1 段目の先頭（統括のすぐ右上。複数なら設定の順）に置き、`focus`・`remove`・`restore`・`all` でも standby に下げない。`rows` で別の位置を指定しても先頭へ移して残りはそのまま並べ（`pair A B` も A の左に入る）、並べ替えた結果を 1 行出す。`swap` で pinned を入れ替えようとすると断る（場所が固定なので）。kitty にいない pinned・`view.left` と同じ pinned は警告を 1 行出して置かずに続ける。`claude-roster restore` も統括のタブの 1 段目の先頭に開く。
 - どの操作も等分割にそろえる（段ごとに幅を等しく、左の列も 1 列分。pinned も 1 列に数える）。
 - `restore` は設定の `view.restore`（既定は右上 `dev-a`、右下 `dev-b`）。
 - 設定の `view.guard`（プロセスの正規表現）に当たる窓（全画面のアプリや発表中の画面など、キーやフォーカスを奪われたくない窓）が前面なら何もせず通知だけ（`--force` で実行）。close 系と send-text は使わない。
