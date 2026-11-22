@@ -407,7 +407,8 @@ class TopGroups(unittest.TestCase):
                  "lua_XyZq": "lua_*", "pytest-123": "pytest-*", "pytest-of-x-12": "pytest-of-x-*", "claude-1000": "claude-*",
                  "pressure-vessel-libs-kXaPFP": "pressure-vessel-libs-*", "abc123": "abc*", "12345": "*",
                  "systemd-private-3f2a-foo.service-AbC": "systemd-private-*", "v8-compile-cache-1000": "v8-compile-cache-*",
-                 "node-compile-cache": "node-compile-cache", ".X11-unix": ".X11-unix", "a1": "a1"}
+                 "node-compile-cache": "node-compile-cache", ".X11-unix": ".X11-unix", "a1": "a1",
+                 "_MEI12345": "_MEI*", "tmpfiles.d": "tmpfiles.d", "fooab3xk": "fooab*"}
         for name, want in cases.items():
             with self.subTest(name=name):
                 self.assertEqual(DW.name_group(name), want)
@@ -428,6 +429,64 @@ class TopGroups(unittest.TestCase):
             out = DW.top_groups(t)
         self.assertEqual(out["total"], 37)
         self.assertEqual(out["groups"], [("tmp*", 30), ("lua_*", 5), ("big-but-alone", 1)])
+        self.assertEqual(out["deep"][0], ("big-but-alone", 50))
+        self.assertNotIn("claude-1000", dict(out["deep"]))  # 中が空のものは出さない
+        self.assertFalse(out["partial"])
+
+    def test_deep_shape_points_at_the_folder(self):
+        """1 つのフォルダの下に積もる形（scratchpad の claude-<uid>/ など）: 中の数で指す。"""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "claude-1000"
+            for i in range(20):
+                d = root / f"proj{i}" / "tmp"
+                d.mkdir(parents=True)
+                for j in range(10):
+                    (d / f"f{j}").write_text("")
+            (Path(t) / "small").mkdir()
+            (Path(t) / "small" / "x").write_text("")
+            out = DW.top_groups(t)
+            self.assertEqual(out["groups"], [("claude-*", 1), ("small", 1)])
+            self.assertEqual(out["deep"], [("claude-1000", 20 * 12), ("small", 1)])
+            text = DW.message(t, "inodes", 1, 2, 72.0, 70, out)
+            self.assertIn("中が多いもの（下の全部の数）: claude-1000（240）、small（1）。", text)
+            # 時間切れ: 数えたところまでを「以上」で出す
+            calls = []
+
+            def clock():
+                calls.append(1)
+                return 0.0 if len(calls) < 6 else 99.0  # 直下は数え終わり、中を数える途中で時間切れ
+            out = DW.top_groups(t, budget=1.0, clock=clock, every=16)
+            self.assertTrue(out["partial"])
+            deep = dict(out["deep"])
+            self.assertTrue(0 < deep.get("claude-1000", 0) < 240, out)  # 途中まで（直下を読む順は決まらない）
+            self.assertIn("以上）", DW.message(t, "inodes", 1, 2, 72.0, 70, out))
+            self.assertIn("時間切れで途中まで", DW.message(t, "inodes", 1, 2, 72.0, 70, out))
+
+    def test_merge_loose_prefix_without_separator(self):
+        """mktemp -d /tmp/fooXXXXXX の形（区切りの無い頭 + 英数字の乱数）が、何千ものグループに割れない。"""
+        import random
+        import string
+        rnd = random.Random(1)
+        chars = string.ascii_letters + string.digits
+        counts = {}
+        names = ["foo" + "".join(rnd.choice(chars) for _ in range(6)) for _ in range(3000)]
+        names += ["steamhdBNOH", "node", "nodejs", "lua_ab12", "lua_cd34"]
+        for n in names:
+            k = DW.name_group(n)
+            counts[k] = counts.get(k, 0) + 1
+        self.assertGreater(len(counts), 1000)  # まとめ直す前は割れている
+        out = DW.merge_loose(counts)
+        self.assertEqual(out["foo*"], 3000)
+        self.assertEqual((out["steamhdBNOH*"], out["node"], out["nodejs"], out["lua_*"]), (1, 1, 1, 2))
+        self.assertEqual(len(out), 5)
+
+    def test_empty_folder_message(self):
+        with tempfile.TemporaryDirectory() as t:
+            out = DW.top_groups(t)
+            self.assertEqual(out, {"total": 0, "groups": [], "deep": [], "partial": False})
+            text = DW.message(t, "inodes", 1, 2, 72.0, 70, out)
+            self.assertNotIn("直下は", text)
+            self.assertNotIn("中が多いもの", text)
 
     def test_symlinked_path_counts_the_target(self):
         with tempfile.TemporaryDirectory() as t:
@@ -435,8 +494,21 @@ class TopGroups(unittest.TestCase):
             real.mkdir()
             for i in range(3):
                 (real / f"tmp{i}").mkdir()
+            (real / "tmp0" / "x").write_text("")
             (Path(t) / "link").symlink_to(real)
-            self.assertEqual(DW.top_groups(str(Path(t) / "link")), {"total": 3, "groups": [("tmp*", 3)]})
+            opened = []
+            orig = os.scandir
+
+            def scandir(p):
+                opened.append(str(p))
+                return orig(p)
+            DW.os.scandir = scandir
+            try:
+                out = DW.top_groups(str(Path(t) / "link"))
+            finally:
+                DW.os.scandir = orig
+            self.assertEqual(opened[0], os.path.realpath(real))  # リンクでなく、たどった先を開く
+            self.assertEqual((out["total"], out["groups"], out["deep"]), (3, [("tmp*", 3)], [("tmp0", 1)]))
 
     def test_over_budget_is_omitted(self):
         with tempfile.TemporaryDirectory() as t:

@@ -92,40 +92,138 @@ def name_group(name):
     """名前の頭（まとめる鍵）。数字・乱数の部分から先を * にする。
 
       tmp0・tmpp1rtt87k → tmp*、lua_ab12 → lua_*、pytest-of-x-12 → pytest-of-x-*、claude-1000 → claude-*、
-      pressure-vessel-libs-kXaPFP → pressure-vessel-libs-*、abc123 → abc*、node-compile-cache・.X11-unix → そのまま
-    """
-    if re.fullmatch(r"tmp[a-z0-9_]{8}", name) or (name.startswith("tmp") and len(name) > 3 and not _SEP.match(name[3])):
-        return "tmp*"  # Python の tempfile（tmp + 8 字の乱数。_ も入る）。区切りが無いので頭の 3 字で決める
+      pressure-vessel-libs-kXaPFP → pressure-vessel-libs-*、abc123 → abc*、_MEI12345 → _MEI*、
+      node-compile-cache・.X11-unix・tmpfiles.d → そのまま
+    区切りの無い「頭 + 乱数」（foo + 英数字）は、乱数の英字の分まで頭に入る（fooab*）。それは top_groups が
+    merge_loose でまとめ直す。"""
+    if re.fullmatch(r"tmp[a-z0-9_]{8}", name):
+        return "tmp*"  # Python の tempfile（tmp + 8 字の乱数。_ も入るので区切りでは分けられない）
     pos = 0
     for part in _SEP.split(name):
         if part and _random_part(part):
-            if pos:
+            if pos and any(c.isalnum() for c in name[:pos]):
                 return name[:pos] + "*"
             head = re.match(r"[A-Za-z]*", part).group(0)
-            return head + "*" if len(head) >= 2 else "*"  # 区切りの無い頭（abc123 → abc*）
+            lead = name[:pos]  # 頭の区切りだけ（_MEI12345 の _）は残す
+            return lead + head + "*" if len(head) >= 2 else lead + "*"
         pos += len(part) + 1
     return name
 
 
+_LOOSE = re.compile(r"[A-Za-z]{4,}\*?")  # 区切りの無い英字だけの鍵（乱数が英字だけだった名前もそのまま入る）
+
+
+def merge_loose(counts, clock=time.monotonic, end=None):
+    """区切りの無い「頭 + 乱数」の鍵（fooab*・fooXyz* …）を、頭の 3 字ごとに、ほかより多い続きの字がある間だけ
+    伸ばした共通の頭（foo*）にまとめ直す（mktemp -d /tmp/fooXXXXXX の形が何万ものグループに割れないように）。
+    1 つしかない鍵（steamhdBNOH*）は、伸ばし切って元のまま。end を過ぎたら、そこまでのまま返す。"""
+    buckets = {}
+    for k, c in counts.items():
+        if _LOOSE.fullmatch(k):
+            buckets.setdefault(k[:3], []).append((k.rstrip("*"), c, k))
+    out = dict(counts)
+    for i, (p3, members) in enumerate(buckets.items()):
+        if end is not None and i % 64 == 0 and clock() > end:
+            break
+        if len(members) < 2:
+            continue
+        prefix, cur = p3, members
+        weight = sum(c for _s, c, _k in members)
+        while len(prefix) < 16:
+            nxt = {}
+            for stem, c, _k in cur:
+                if len(stem) > len(prefix):
+                    nxt[stem[len(prefix)]] = nxt.get(stem[len(prefix)], 0) + c
+            if not nxt:
+                break
+            ch, c = max(nxt.items(), key=lambda x: x[1])
+            if c * 2 < weight:  # 続きの字がばらばら（乱数）: ここまでが頭
+                break
+            prefix += ch
+            cur = [m for m in cur if m[0].startswith(prefix)]
+        merged = [m for m in members if m[0].startswith(prefix)]
+        if len(merged) < 2:
+            continue
+        for _st, _cc, k in merged:
+            del out[k]
+        out[prefix + "*"] = out.get(prefix + "*", 0) + sum(cc for _s, cc, _k in merged)
+    return out
+
+
+DEEP_MAX_TOP = 2000  # 直下がこれより少ないときだけ、中を数える（何十万も並ぶ形では名前の頭でまとめた数で足りる）
+DEEP_N = 2
+
+
+def _count_inside(path, dev, tick):
+    """path の下の全部の数（リンクはたどらず、別のファイルシステムには入らない）。(数, 時間切れか)。"""
+    c, stack = 0, [path]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for x in it:
+                    if tick():
+                        return c, True
+                    c += 1
+                    try:
+                        if x.is_dir(follow_symlinks=False) and x.stat(follow_symlinks=False).st_dev == dev:
+                            stack.append(x.path)
+                    except OSError:
+                        pass
+        except OSError:
+            pass  # 読めないフォルダは数えない
+    return c, False
+
+
 def top_groups(path, budget=TOP_BUDGET, n=TOP_N, clock=time.monotonic, every=256):
-    """{"total": 直下の項目の数, "groups": [(名前の頭, 数)] の上位 n 個}。中には潜らない（直下を数えるだけなので速い）。
-    path がリンクならたどった先を数える。budget 秒を超えたら None（省く）。時計は every 個ごとに見る。"""
+    """手がかり {"total", "groups", "deep", "partial"}。
+
+    - groups: 直下の項目を名前の頭でまとめた数の上位 n 個 [(名前の頭, 数)]（平たく何十万も並ぶ形の手がかり）。
+    - deep: 直下が DEEP_MAX_TOP より少ないとき、直下のフォルダごとの中の数の上位 DEEP_N 個 [(名前, 数)]
+      （1 つのフォルダの下に積もる形の手がかり。claude-<uid>/ の scratchpad・pytest-of-<user>/ など）。残りの時間で数え、
+      時間切れなら partial が真（数は「以上」、まだ数えていないフォルダもある）。
+    path がリンクなら、たどった先を数える（中を数えるときの「別のファイルシステム」の基準を、リンクの置き場でなく
+    たどった先の装置にするため）。直下を数え終わらなければ None（省く）。時計は every 個ごとに見る。"""
     end = clock() + budget
-    counts, total = {}, 0
+    counts, total, dirs = {}, 0, []
+    real = os.path.realpath(path)
     try:
-        with os.scandir(os.path.realpath(path)) as it:
+        dev = os.stat(real).st_dev
+        with os.scandir(real) as it:
             for e in it:
                 total += 1
                 if total % every == 0 and clock() > end:
                     return None
                 k = name_group(e.name)
                 counts[k] = counts.get(k, 0) + 1
+                if total <= DEEP_MAX_TOP:
+                    try:
+                        if e.is_dir(follow_symlinks=False) and e.stat(follow_symlinks=False).st_dev == dev:
+                            dirs.append(e)
+                    except OSError:
+                        pass
     except OSError:
         return None
-    if clock() > end:
-        return None
+    counts = merge_loose(counts, clock, end)
     groups = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:n]
-    return {"total": total, "groups": groups}
+    deep, partial = [], False
+    if total <= DEEP_MAX_TOP and dirs:
+        seen = [0]
+
+        def tick():
+            seen[0] += 1
+            return seen[0] % every == 0 and clock() > end
+        sizes = []
+        for e in dirs:
+            if clock() > end:
+                partial = True
+                break
+            c, late = _count_inside(e.path, dev, tick)
+            sizes.append((e.name, c))
+            if late:
+                partial = True
+                break
+        deep = [x for x in sorted(sizes, key=lambda x: (-x[1], x[0]))[:DEEP_N] if x[1] > 0]
+    return {"total": total, "groups": groups, "deep": deep, "partial": partial}
 
 
 def _num(n):
@@ -143,9 +241,13 @@ def message(path, kind, used, total, pct, threshold, top):
     amount = f"{_num(used)} / {_num(total)}" if kind == "inodes" else f"{_size(used)} / {_size(total)}"
     what = "の inode が" if kind == "inodes" else "の容量が"
     text = f"{MARK} {path} {what} {pct:.0f}%（{amount}）。{threshold:g}% を超えました。"
-    if top:
+    if top and top.get("groups"):
         text += (f"直下は {_num(top['total'])} 項目。多いもの（名前の頭でまとめた数）: "
                  + "、".join(f"{name}（{_num(c)}）" for name, c in top["groups"]) + "。")
+    if top and top.get("deep"):
+        more = " 以上" if top.get("partial") else ""
+        text += ("中が多いもの（下の全部の数" + ("。時間切れで途中まで" if top.get("partial") else "") + "）: "
+                 + "、".join(f"{name}（{_num(c)}{more}）" for name, c in top["deep"]) + "。")
     text += "（claude-kitty の見張りの知らせで、ユーザーが打ったものではない。片付けは中身を確認してから）"
     return text
 
