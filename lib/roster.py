@@ -38,7 +38,7 @@ SID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 ROLE_RE = re.compile(r"^[^\s,/'\"]+$")
 STANDBY = "standby"
 # 署名（変わったかどうか）に入れる項目。status や pid は 5 分ごとに変わるので入れない（世代が無駄に回らないように）
-SIG_KEYS = ("session_id", "cwd", "model", "name", "kind", "absent_since", "sleeping")
+SIG_KEYS = ("session_id", "cwd", "model", "name", "kind", "absent_since", "sleeping", "config_dir")
 SLEEP_KEYS = ("sleeping", "slept_at", "sleep_place")
 SHELLS = {"bash", "zsh", "sh", "dash", "fish"}  # 閉じてよいペインの前面（claude が終わってシェルだけが残った）
 NEXT_MAX_AGE = 300  # 続きの指示のファイルの有効期限（秒）。止められなかったあと、後で /exit したときに勝手に再開しないように
@@ -203,11 +203,13 @@ def pane_session(win, sessions_by_pid, sessions_by_sid):
 
 
 def build_roster(osw_list, sessions, left, fraction, conf_models=None, settings_fn=None, transcript_fn=None,
-                 now=0.0, ignore=()):
+                 now=0.0, ignore=(), config_dir_fn=None):
     """kitten @ ls と ~/.claude/sessions/*.json（dict のリスト）から名簿を作る。
 
     fraction(tab, window_id) → (x, y, w, h)（geometry.tab_pane_fraction）。role の無いペイン・overlay・
     ignore の role・名前に区切り文字を含む role は入れない（復元できないか、claude-view で扱えないため）。
+    config_dir_fn(pid) → その claude の CLAUDE_CONFIG_DIR（既定の置き場なら None）。プロジェクトごとに
+    設定の置き場を分けている（direnv の .envrc など）とき、開き直すのに同じ置き場が要るので名簿に残す。
     """
     settings_fn = settings_fn or (lambda cwd: None)
     transcript_fn = transcript_fn or (lambda sid: None)
@@ -239,6 +241,11 @@ def build_roster(osw_list, sessions, left, fraction, conf_models=None, settings_
                     "window_id": w.get("id"), "tab": strip_mark(tab.get("title")),
                     "slot": (w.get("user_vars") or {}).get("slot"),
                 }
+                # 動いている claude の置き場。claude-wait が待っているだけのペインは、claude-wait の置き場（同じ環境で開く）
+                cpid = (ps["front_pid"] or ps["pid"]) if ps["state"] == "running" else ps["waiter_pid"] if ps["state"] == "waiting" else None
+                cdir = config_dir_fn(cpid) if config_dir_fn and cpid else None
+                if cdir:
+                    entries[role]["config_dir"] = cdir
                 roles.append(role)
             if not roles:
                 continue
@@ -296,9 +303,15 @@ def carry_over(new, old, now, keep_seconds, drop_absent=False):
         prev = old["sessions"].get(role)
         # ほかの役割がいま持っている ID は引き継がない（同じ ID を 2 人に持たせない）
         if prev and not e.get("session_id") and prev.get("session_id") and prev["session_id"] not in held:
-            for k in ("session_id", "model", "model_source", "name", "kind"):
+            for k in ("session_id", "model", "model_source", "name", "kind", "config_dir"):
                 e[k] = prev.get(k)
+            if not e.get("config_dir"):
+                e.pop("config_dir", None)
             e["carried"] = True
+        # 同じ会話で置き場が読めなかった（環境を読めない・ペインの claude が入れ替わる途中）ときは前の置き場を残す
+        elif (prev and e.get("session_id") and e["session_id"] == prev.get("session_id")
+              and not e.get("config_dir") and prev.get("config_dir")):
+            e["config_dir"] = prev["config_dir"]
     tabs = [dict(t, roles=list(t["roles"])) for t in new["tabs"]]
     # 寝ている役割はタブに載っていなくても拾う（手で直した名簿などで、タブから漏れても失わないように）
     listed = [(t_old.get("title"), role) for t_old in old.get("tabs", []) for role in t_old.get("roles", [])]
@@ -354,6 +367,11 @@ def signature(roster):
     return json.dumps({"left": roster.get("left"), "tabs": tabs, "sessions": sess}, sort_keys=True)
 
 
+def has_control(text):
+    """改行などの制御文字を含むか（kitty のセッションファイルは 1 行 1 命令なので、改行で行を足せてしまう）。"""
+    return any(ord(c) < 32 or ord(c) == 127 for c in text)
+
+
 def check_roster(roster):
     """読み込んだ名簿の形を確認する。おかしければ ValueError（壊れた名簿で別のセッションを開かないように）。"""
     if not isinstance(roster, dict) or roster.get("version") != VERSION:
@@ -372,6 +390,12 @@ def check_roster(roster):
             raise ValueError(f"{seen[sid]} と {role} が同じセッション ID {sid[:8]} を持っている")
         if sid:
             seen[sid] = role
+        cdir = e.get("config_dir")
+        if cdir is not None and not (isinstance(cdir, str) and cdir.startswith("/") and not has_control(cdir)):
+            raise ValueError(f"{role} の config_dir が絶対パスでない（か制御文字を含む）: {cdir!r}")
+        cwd = e.get("cwd")
+        if cwd is not None and not (isinstance(cwd, str) and not has_control(cwd)):
+            raise ValueError(f"{role} の cwd に制御文字がある: {cwd!r}")
     for t in roster["tabs"]:
         for role in t.get("roles", []):
             if role not in sess:
@@ -400,8 +424,32 @@ def pane_command(role, entry, wait_cmd):
         inner += ["--model", entry["model"]]
     if entry.get("name") and entry["name"] != role:
         inner.append("--rename")  # resume では -n が効かないので、claude-wait が /rename の案内を出す
+    # 設定の置き場（名簿の config_dir）と、claude の代わりに開くコマンド（設定の roster.claude）は環境で渡す
+    env = []
+    if entry.get("config_dir"):
+        env.append(f"CLAUDE_CONFIG_DIR={entry['config_dir']}")
+    if entry.get("claude"):
+        env.append(f"CLAUDE_WAIT_CLAUDE={entry['claude']}")
+    if env:
+        inner = ["env"] + env + inner
     # ログインシェルの PATH（~/.local/bin など）で claude を見つける。claude-wait が最後にシェルへ戻る
     return ["bash", "-lic", shlex.join(inner)]
+
+
+def claude_for(cwd, mapping, expand=os.path.expanduser):
+    """設定の roster.claude（フォルダ → コマンド）から、cwd に当たるもの。いちばん長く当たるフォルダを選ぶ。
+
+    コマンドの先頭の ~ は広げる（claude-wait は CLAUDE_WAIT_CLAUDE をそのまま 1 語として起動するため）。"""
+    if not cwd or not mapping:
+        return None
+    cwd = os.path.normpath(cwd)
+    best = None
+    for folder, cmd in mapping.items():
+        f = os.path.normpath(expand(folder))
+        if cwd == f or cwd.startswith(f.rstrip("/") + "/"):
+            if best is None or len(f) > len(best[0]):
+                best = (f, cmd)
+    return expand(best[1]) if best else None
 
 
 def _launch_line(role, entry, wait_cmd, extra=()):

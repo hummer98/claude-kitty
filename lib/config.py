@@ -151,11 +151,18 @@ def load_state_config(env, path=None):
             "left": env.get("CLAUDE_VIEW_LEFT") or left}
 
 
-DEFAULT_ROSTER = {"models": {}, "ignore": [], "generations": 5, "keep_absent_hours": 24}
+DEFAULT_ROSTER = {"models": {}, "ignore": [], "generations": 5, "keep_absent_hours": 24, "claude": {}}
+
+
+def _plain(v):
+    """空でない文字列で、制御文字を含まない。"""
+    return isinstance(v, str) and bool(v) and not any(ord(c) < 32 or ord(c) == 127 for c in v)
 
 
 def load_roster_config(env, path=None):
-    """claude-roster の設定 {"models", "ignore", "generations", "keep_absent_hours"} を返す（無ければ既定）。
+    """claude-roster の設定 {"models", "ignore", "generations", "keep_absent_hours", "claude"} を返す（無ければ既定）。
+
+    claude はフォルダ → claude の代わりに claude-wait が開くコマンド（CLAUDE_WAIT_CLAUDE。プロジェクトごとの包み）。
 
     壊れていれば ValueError（別のモデルで開き直さないよう、呼ぶ側は既定に戻さずに止める）。"""
     path = Path(path) if path else config_path(env)
@@ -173,13 +180,17 @@ def load_roster_config(env, path=None):
         raise ValueError(f"{path} の roster.models は 役割→モデル名")
     if not isinstance(r.get("ignore", []), list):
         raise ValueError(f"{path} の roster.ignore は役割のリスト")
+    c = r.get("claude", {})
+    if not isinstance(c, dict) or not all(_plain(k) and _plain(v) and not any(ch.isspace() for ch in v)
+                                          for k, v in c.items()):
+        raise ValueError(f"{path} の roster.claude は フォルダ→引数なしの実行ファイル（空白・制御文字は使えない）")
     g = r.get("generations", 5)
     h = r.get("keep_absent_hours", 24)
     if isinstance(g, bool) or not isinstance(g, int) or not 1 <= g <= 50:
         raise ValueError(f"{path} の roster.generations は 1〜50")
     if isinstance(h, bool) or not isinstance(h, (int, float)) or h < 0:
         raise ValueError(f"{path} の roster.keep_absent_hours は 0 以上の数")
-    out.update(models=r.get("models", {}), ignore=r.get("ignore", []), generations=g, keep_absent_hours=h)
+    out.update(models=r.get("models", {}), ignore=r.get("ignore", []), generations=g, keep_absent_hours=h, claude=c)
     return out
 
 
