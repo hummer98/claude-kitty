@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""人が起きているか（どれかの役割のセッションで、人が打った最後の発話からの分数）を 1 行で出す。読むだけ。
+
+  claude-active [--minutes N] [--json]
+
+  active 3分前 aom-master（07:13 JST）     終了コード 0（N 分以内。既定 20）
+  away 47分前 aom-probe（06:29 JST）       終了コード 1
+  unknown 人の発話が見つからない（…）      終了コード 2（見分けに自信が無い。起きているとはみなさない）
+
+見るのは生きているセッション（<設定の置き場>/sessions/*.json。claude-roster と同じ決まり）のうち、役割の分かるもの
+（claude-state の記録か名簿）。寝ている役割は見ない。会話の記録は session ID で projects の下の全フォルダから探し、
+末尾から読む。設定の置き場は $CLAUDE_CONFIG_DIR（無ければ ~/.claude）・~/.claude・名簿の config_dir。
+見分け方は lib/active.py、使いどころは docs/active.md。
+"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+
+def home(env):
+    return Path(env["HOME"]) if env.get("HOME") else Path.home()
+
+
+def roster_path(env):
+    if env.get("CLAUDE_ROSTER_DIR"):
+        return Path(env["CLAUDE_ROSTER_DIR"]) / "roster.json"
+    base = Path(env["XDG_DATA_HOME"]) if env.get("XDG_DATA_HOME") else home(env) / ".local/share"
+    return base / "claude-kitty" / "roster.json"
+
+
+def places(env, roster_dirs):
+    """(sessions の置き場の一覧, projects の置き場の一覧)。claude-roster と同じ環境変数を優先する。"""
+    homes = []
+    for d in [env.get("CLAUDE_CONFIG_DIR"), str(home(env) / ".claude"), *roster_dirs]:
+        if d and d not in homes:
+            homes.append(d)
+    sess = [Path(env["CLAUDE_SESSIONS_DIR"])] if env.get("CLAUDE_SESSIONS_DIR") else []
+    proj = [Path(env["CLAUDE_PROJECTS_DIR"])] if env.get("CLAUDE_PROJECTS_DIR") else []
+    if not sess and not proj:
+        sess = [Path(h) / "sessions" for h in homes]
+        proj = [Path(h) / "projects" for h in homes]
+    elif not sess:
+        sess = [Path(h) / "sessions" for h in homes]
+    elif not proj:
+        proj = [Path(h) / "projects" for h in homes]
+    return sess, proj
+
+
+def run(env, minutes, now=None):
+    import active as A
+    from kstate import load, state_dir, state_file
+    from state import valid_session_id
+    now = time.time() if now is None else now
+    try:
+        roster = json.loads(roster_path(env).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        roster = {}
+    by_roster, roster_dirs = A.roster_roles(roster)
+    sd = state_dir(env)
+
+    def role_of(sid):
+        if valid_session_id(sid):
+            r = (load(state_file(sd, sid)) or {}).get("role")
+            if isinstance(r, str) and r:
+                return r
+        return by_roster.get(sid)
+
+    sess, proj = places(env, roster_dirs)
+    res = A.find_last(A.live_sessions(sess), role_of, proj, now=now)
+    return A.judge(res, now, minutes)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--version"]:
+        from version import handle_version
+        handle_version(argv, "claude-active")
+        return 0
+    import argparse
+    ap = argparse.ArgumentParser(prog="claude-active", description="人が打った最後の発話からの分数（読むだけ）")
+    ap.add_argument("--minutes", type=float, default=20, help="起きているとみなす分数（既定 20）")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    if not (0 < a.minutes < 10 ** 6):  # NaN・inf・負は断る（inf ならいつも active になる）
+        ap.error("--minutes は 0 より大きい有限の分数")
+    try:
+        j = run(os.environ, a.minutes)
+    except Exception as e:  # noqa: BLE001 — 失敗は「分からない」（起きているとは答えない）
+        j = {"status": "unknown", "code": 2, "reason": f"調べられなかった（{type(e).__name__}: {e}）",
+             "seen": 0, "notes": [], "minutes": None}
+    if a.json:
+        print(json.dumps(j, ensure_ascii=False))
+    else:
+        from active import format_line
+        print(format_line(j))
+    return j["code"]
+
+
+if __name__ == "__main__":
+    sys.exit(main())
