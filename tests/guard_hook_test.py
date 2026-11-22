@@ -457,6 +457,97 @@ class Commands(Base):
                   "svcctl deploy --dry-run s1", "svcctl log --grep backup"):
             self.assertIsNone(self.bash(c), c)
 
+    def road_config(self, entry):
+        g = self.default_guards()
+        g["app-running"]["commands"].append({"program": "^gamectl(\\.py)?$", "value_options": ["--owner"], "block": [entry]})
+        self.write_config(g)
+        _, problems = gh.load_guard_config(self.env)
+        return problems
+
+    def test_but_if_any(self):
+        # 読むだけ（--inspect-node）か --dry-run なら通すが、--engine-check が付けば止める
+        problems = self.road_config({"sub": "road", "unless_any": ["--dry-run", "--inspect-node"],
+                                     "but_if_any": ["--engine-check"]})
+        self.assertEqual(problems, [])
+        for c in ("gamectl road --dry-run", "gamectl road --inspect-node 5", "gamectl.py --owner me road --dry-run",
+                  "gamectl road --inspect-node=5", "gamectl status --engine-check"):
+            self.assertIsNone(self.bash(c), c)
+        for c in ("gamectl road --dry-run --engine-check", "gamectl road --engine-check --dry-run",
+                  "gamectl road --from 1,2 --to 3,4", "gamectl road --inspect-node 5 --engine-check",
+                  "gamectl road --dry-run --engine-check=1", "gamectl road --engine-check=1 --inspect-node=5",
+                  "gamectl road --engine-check", "gamectl road"):
+            self.assertIsNotNone(self.bash(c), c)
+        # --engine-checker のような別のフラグは but_if_any に当てない
+        self.assertIsNone(self.bash("gamectl road --dry-run --engine-checker"))
+
+    def test_abbrev_flags_block(self):
+        # argparse の省略形（allow_abbrev）: 止める側の if_any / but_if_any は前方一致で当てる
+        self.road_config({"sub": "road", "unless_any": ["--dry-run", "--inspect-node"],
+                          "but_if_any": ["--engine-check"]})
+        for c in ("gamectl road --dry-run --engine", "gamectl road --dry-run --eng", "gamectl road --inspect-node 5 --e",
+                  "gamectl road --dry-run --eng=1", "gamectl road --e --dry-run",
+                  "gamectl road --dry",                     # unless_any は完全一致のまま（省略形では通さない）
+                  "gamectl road --inspect 5"):
+            self.assertIsNotNone(self.bash(c), c)
+        for c in ("gamectl road --dry-run", "gamectl road --dry-run -- --x",   # "--" だけは省略形とみない
+                  "gamectl road --dry-run --engine-checker", "gamectl road --dry-run -e"):
+            self.assertIsNone(self.bash(c), c)
+        # 既存の if_any も省略形で当てる（svcctl config --se 1 は argparse では --set）
+        for c in ("svcctl config --se 1", "svcctl config --s=1", "svcctl config --set"):
+            self.assertIsNotNone(self.bash(c), c)
+        for c in ("svcctl config --get x", "svcctl config --setx 1", "svcctl config --", "svcctl config -s 1"):
+            self.assertIsNone(self.bash(c), c)
+
+    def test_abbrev_not_in_allow_commands(self):
+        # allow_commands（通す側）の if_any は完全一致のまま: 省略形で例外が広がらない
+        g = self.default_guards()
+        g["app-running"]["allow_commands"] = [{"program": "^svcctl$", "block": [{"sub": "deploy", "if_any": ["--dry-run"]}]}]
+        self.write_config(g)
+        self.assertIsNone(self.bash("svcctl deploy --dry-run"))
+        self.assertIsNotNone(self.bash("svcctl deploy --d"))
+        self.assertIsNotNone(self.bash("svcctl deploy --dry"))
+        entry = gh._compile_entry({"program": "^svcctl$", "block": [{"sub": "deploy", "if_any": ["--dry-run"]}]}, "x", [])
+        self.assertTrue(gh.match_entry(entry, ["svcctl", "deploy", "--d"]))
+        self.assertIsNone(gh.match_entry(entry, ["svcctl", "deploy", "--d"], abbrev=False))
+
+    def test_but_if_any_with_if_any(self):
+        # if_any を満たさなければ but_if_any があっても通す（if_any が先）
+        self.road_config({"sub": "road", "if_any": ["--apply"], "unless_any": ["--dry-run"],
+                          "but_if_any": ["--engine-check"]})
+        self.assertIsNone(self.bash("gamectl road --engine-check"))
+        self.assertIsNone(self.bash("gamectl road --apply --dry-run"))
+        self.assertIsNotNone(self.bash("gamectl road --apply"))
+        self.assertIsNotNone(self.bash("gamectl road --apply --dry-run --engine-check"))
+
+    def test_but_if_any_config_problems(self):
+        for bad in ({"sub": "road", "unless_any": ["--dry-run"], "but_if_any": [3]},
+                    {"sub": "road", "unless_any": ["--dry-run"], "but_if_any": {"x": 1}},
+                    {"sub": "road", "unless_any": ["--dry-run"], "but_if_any": [""]}):
+            problems = self.road_config(bad)
+            self.assertTrue(any("app-running.commands[1].block[0]" in p and "but_if_any" in p for p in problems), bad)
+            self.assertIsNone(self.bash("gamectl road --from 1"), bad)     # 型の誤りは今と同じく項目ごと読まない
+        problems = self.road_config({"sub": "road", "but_if_any": ["--engine-check"]})
+        self.assertTrue(any("but_if_any は unless_any と一緒に" in p for p in problems), problems)
+        # 項目は止める側で残す
+        self.assertIsNotNone(self.bash("gamectl road --dry-run"))
+        self.assertIsNotNone(self.bash("gamectl road --engine-check"))
+        problems = self.road_config({"sub": "road", "unless_any": [], "but_if_any": ["--engine-check"]})
+        self.assertTrue(any("but_if_any は unless_any と一緒に" in p for p in problems), problems)
+        # 既存の if_any / unless_any の誤りも今と同じに出る
+        problems = self.road_config({"sub": "road", "unless_any": [1]})
+        self.assertTrue(any("block[0] の if_any / unless_any" in p for p in problems), problems)
+
+    def test_existing_entries_unchanged(self):
+        # but_if_any の無い項目は今までと同じ（unless_any があれば通す・if_any が無ければ通す）
+        self.assertIsNone(self.bash("svcctl reset --list --dry-run"))
+        self.assertIsNone(self.bash("svcctl reset --dry-run=1"))
+        self.assertIsNotNone(self.bash("svcctl reset --force"))
+        self.assertIsNone(self.bash("svcctl config --get x"))
+        self.assertIsNotNone(self.bash("svcctl config --set=1"))
+        self.assertIsNotNone(self.bash("svcctl deploy v1 --force"))         # 文字列の項目は無条件
+        _, problems = gh.load_guard_config(self.env)
+        self.assertEqual(problems, [])
+
     def test_env_prefix_allow(self):
         self.assertIsNone(self.bash("CLAUDE_GUARD_ALLOW=app-running svcctl.py deploy s1"))
         self.assertIsNone(self.bash("CLAUDE_GUARD_ALLOW=all svcctl.py deploy s1"))

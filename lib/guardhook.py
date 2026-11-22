@@ -213,13 +213,18 @@ def _compile_entry(e, where, problems, owner_ok=False):
         block = {}
         for i, b in enumerate(entries):
             if isinstance(b, str) and b:
-                block[b] = ((), ())
+                block[b] = ((), (), ())
             elif isinstance(b, dict) and isinstance(b.get("sub"), str) and b["sub"]:
                 if_any, unless_any = _strings(b.get("if_any", [])), _strings(b.get("unless_any", []))
-                if if_any is None or unless_any is None:
-                    problems.append(f"{where}.block[{i}] の if_any / unless_any は文字列のリスト")
+                but_if_any = _strings(b.get("but_if_any", []))
+                if if_any is None or unless_any is None or but_if_any is None:
+                    problems.append(f"{where}.block[{i}] の if_any / unless_any / but_if_any は文字列のリスト")
                     continue
-                block[b["sub"]] = (tuple(if_any), tuple(unless_any))
+                if but_if_any and not unless_any:
+                    # but_if_any は unless_any で通すものの例外。unless_any が無いと意味が無いので書き誤りとして知らせる。
+                    # 項目は捨てずに残す（止める側に倒す: but_if_any で止めたかったものを素通りさせない）
+                    problems.append(f"{where}.block[{i}] の but_if_any は unless_any と一緒に書く")
+                block[b["sub"]] = (tuple(if_any), tuple(unless_any), tuple(but_if_any))
             else:
                 problems.append(f"{where}.block[{i}] は文字列か {{\"sub\": ...}}")
         owner = _allow_owner(e["allow_owner"], f"{where}.allow_owner", problems) if "allow_owner" in e else None
@@ -904,8 +909,15 @@ def normalize(words):
     return [prog] + args
 
 
-def match_entry(entry, words):
-    """commands / allow_commands の 1 つが、単純なコマンド words に当たれば、その印（文字列）を返す。"""
+def has_flag_prefix(word):
+    """長いオプションの省略形になりうる語か（"--x" 以上。"--" だけは除く）。"""
+    return word.startswith("--") and len(word) > 2
+
+
+def match_entry(entry, words, abbrev=True):
+    """commands / allow_commands の 1 つが、単純なコマンド words に当たれば、その印（文字列）を返す。
+    abbrev は if_any / but_if_any を省略形にも当てるか。commands（止める側）は True、
+    allow_commands（通す側）は False（前方一致にすると例外として通すものが広がるため）。"""
     kind, spec = entry
     norm = normalize(words)
     prog = norm[0]
@@ -930,13 +942,24 @@ def match_entry(entry, words):
     if i >= len(args) or args[i] not in spec["block"]:
         return None
     sub, rest = args[i], args[i + 1:]
-    if_any, unless_any = spec["block"][sub]
+    if_any, unless_any, but_if_any = spec["block"][sub]
 
     def has(flag):
         return any(r == flag or r.startswith(flag + "=") for r in rest)
-    if if_any and not any(has(f) for f in if_any):
+
+    def has_abbrev(flag):
+        # 止める側（if_any / but_if_any）は省略形にも当てる: argparse は既定で --eng を --engine-check と読むため。
+        # 長さの下限は付けない（止める側に倒す）。"--" だけはオプションの終わりの印なので当てない
+        for r in rest:
+            key = r.split("=", 1)[0]
+            if abbrev and has_flag_prefix(key) and flag.startswith(key):
+                return True
+        return has(flag)
+    if if_any and not any(has_abbrev(f) for f in if_any):
         return None
-    if unless_any and any(has(f) for f in unless_any):
+    # unless_any で通すものでも、but_if_any のどれかがあれば止める（読むだけの形に危ないフラグを足した場合）。
+    # unless_any は完全一致のまま（省略形の --dry は通さない＝止める側）
+    if unless_any and any(has(f) for f in unless_any) and not any(has_abbrev(f) for f in but_if_any):
         return None
     return f"{prog} {sub}"
 
@@ -1214,7 +1237,7 @@ class Analyzer:
         """いまの self._cmds から、allow_commands に当たる形の理由を外したもの。
 
         allow_commands はコマンドの形の理由だけを消す（git push --dry-run > <保護したパス> は止める）。"""
-        if self._cmds and rest and any(match_entry(e, rest) for e in self.guard["allow_commands"]):
+        if self._cmds and rest and any(match_entry(e, rest, abbrev=False) for e in self.guard["allow_commands"]):
             return []
         return list(self._cmds)
 

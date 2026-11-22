@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-23
+
 ### 追加
 
 - `claude-roster sleep <役割>` と `wake <役割>`: 役目を終えた担当を「寝かせる」。サーヴァントが増え続けるので、使っていない実行レーンを減らし、あとで会話ごと戻すため（[docs/roster.md](docs/roster.md#sleep--wake)）。
@@ -13,6 +15,12 @@
   - 寝ている役割は、自動の保存でも手の保存でも、`keep_absent_hours` を過ぎても消さない。`restore` は開かない（`--include-sleeping` か名指しのときだけ）。`status`・`show` に「寝ている（いつから）」。
   - wake: `restore <役割>` と同じ決まりで claude-wait の形で開き直し、段組みは寝かせる前の位置に戻して並べ直し、印を外す。
   - claude-wait: 続きの指示が `"action": "exit"` なら、claude が終わったあとシェルに戻らずに終わる。前の版の claude-wait はこの指示を断ってシェルに戻るだけ（同じ会話を開き直さない）。
+- `claude-guard`: `commands` の `{"program"}` の `block` の項目に `but_if_any`。`unless_any` のフラグで通すものでも、`but_if_any` のどれかがあれば止める（`{"sub": "road", "unless_any": ["--dry-run", "--inspect-node"], "but_if_any": ["--engine-check"]}`）。読むだけの形でも、エンジンに評価させるフラグを足すとゲームが落ちる余地があるため。`if_any` / `unless_any` だけの項目の意味は変わらない。`commands` の `if_any` と `but_if_any` は argparse の省略形（`--eng`）にも当て（`allow_commands` では当てない）、通す側の `unless_any` は完全一致のまま。`unless_any` 無しの `but_if_any` は設定の誤りとして知らせる（[docs/guard-hook.md](docs/guard-hook.md)）。
+
+### 修正
+
+- `claude-guard`: 止める側のフラグ（`if_any`・`but_if_any`）を argparse の省略形にも当てる。tf3ctl などは既定で省略形を受け付けるので、`camera --se 1`（`--set`）や `road --dry-run --eng`（`--engine-check`）が通っていた。通す側の `unless_any` は完全一致のまま（`--dry` は止まる）。
+- テスト: macOS で `tests/run.py` を回すと、install_test が本物の `launchctl` を呼び、claude-kitty の常駐（state-watch など）を launchd から外していた。偽の launchctl を渡す（PR #4）。
 
 ## [0.7.4] - 2026-11-23
 
@@ -325,7 +333,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.4...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/hummer98/claude-kitty/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/hummer98/claude-kitty/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/hummer98/claude-kitty/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/hummer98/claude-kitty/compare/v0.7.1...v0.7.2
