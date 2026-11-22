@@ -19,6 +19,12 @@
   - `claude-kitty doctor` に「ディスク: <path>」（使用率と、閾値を超えているか）と「設定: disk_watch」の行。
 - 設定 `view.pinned`（既定 `[]`）: 統括（`view.left`）と同じく常時表示にする役割。`claude-view` のどの操作（`all`・`focus`・`pair`・`restore`・`add`・`remove`・`swap`・`equalize`・`rows`）のあとも右側の 1 段目の先頭（統括のすぐ右上。複数なら書いた順）に置き、standby に下げない。運用の担当を統括と同じく常に見えるところ・同じ場所に置くため。`rows` で別の位置を指定しても先頭へ移し、並べ替えた結果を 1 行出す。`swap` で pinned を入れ替えようとすると断る。`rows`・`restore`・`pair` の指定そのものの誤り（同じ役割を 2 回など）は、pinned を先頭へ移す前の形で断る（保護する窓が前面なら終了コード 2 のまま）。kitty にいない役割・`view.left` と同じ役割は警告を 1 行出して置かずに続ける。`claude-roster restore` のセッションファイルも統括のタブの 1 段目の先頭に開く（名簿で別のタブにいても二重に開かない）。kitty が動いているときに足したのが pinned だけなら、保存した段組みに戻さず `claude-view equalize` で前に出す（[docs/config.md](docs/config.md#viewclaude-viewclaude-showclaude-roster)）。
 
+- `claude-roster sleep <役割>` と `wake <役割>`: 役目を終えた担当を「寝かせる」。サーヴァントが増え続けるので、使っていない実行レーンを減らし、あとで会話ごと戻すため（[docs/roster.md](docs/roster.md#sleep--wake)）。
+  - sleep: idle を確かめ（restart と同じ。`--force` で省く）、claude-wait に「終わる」の続きの指示（`"action": "exit"`）を書いて claude に SIGTERM を送り、claude が終わってペインの前面にシェルしか残っていないのを確かめてから `kitten @ close-window` で閉じる。止まらなければ・ほかのプロセスが残っていれば閉じず、名簿も変えない。名簿のその役割に `sleeping`・`slept_at`・`sleep_place`（タブと段組みの位置）を書き、ID・cwd・model・name・slot は残して段組みから外す。統括（`view.left`）と常時表示（`view.pinned`）は断る。ペインが既に無い役割は印を付けるだけ。
+  - 寝ている役割は、自動の保存でも手の保存でも、`keep_absent_hours` を過ぎても消さない。`restore` は開かない（`--include-sleeping` か名指しのときだけ）。`status`・`show` に「寝ている（いつから）」。
+  - wake: `restore <役割>` と同じ決まりで claude-wait の形で開き直し、段組みは寝かせる前の位置に戻して並べ直し、印を外す。
+  - claude-wait: 続きの指示が `"action": "exit"` なら、claude が終わったあとシェルに戻らずに終わる。前の版の claude-wait はこの指示を断ってシェルに戻るだけ（同じ会話を開き直さない）。
+
 ### 修正
 
 - `claude-guard`: `git clone` の値をとるオプション（`--branch master`・`-b master`・`-bmaster`・`--branch=master`・`--depth 1` など）の値を元、元を行き先と読み、保護したフォルダから外へ写すだけの `git clone -q --branch master <保護> <外>` を止めていた。clone と init の値をとるオプション（略した `--bra` も）を飛ばして元と行き先を読む。`git init -b main <保護>` は `main` を行き先と読んで通していたので止める。`--separate-git-dir` と `--template` の値、`GIT_DIR` / `--git-dir` で指した場所が保護したフォルダなら止める。`git archive -o<保護>/a.tar`・`git format-patch --output-dir <保護>` のように値をくっつけた形・略した形の出力先も止める。`git worktree repair <保護>` と、cwd が保護したフォルダのときの `git worktree prune` / `lock` / `unlock` も止める（`list` は通す）。`GIT_WORK_TREE` / `--work-tree` と `GIT_DIR` / `--git-dir` は別々に見る。`-C` は cwd を変えるだけとみて、`git -C <保護> clone <元> <外>` は通す。

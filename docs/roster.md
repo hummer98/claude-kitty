@@ -9,6 +9,8 @@ claude-roster status               # 名簿といまの差（いない役割・I
 claude-roster restore              # 名簿の役割のうち、いないものを開いて並べ直す（kitty が無ければ kitty ごと）
 claude-roster restore dev-a        # その役割だけ開く
 claude-roster restart dev-a --model sonnet   # 1 人を、同じペインで開き直す（idle のときだけ）
+claude-roster sleep dev-a          # 1 人を寝かせる（claude を止めてペインを閉じ、名簿に残す。idle のときだけ）
+claude-roster wake dev-a           # 寝かせた役割を開き直し、同じ会話を resume する
 claude-roster show [--from FILE]   # 名簿の中身
 ```
 
@@ -40,6 +42,10 @@ claude-roster show [--from FILE]   # 名簿の中身
 - ペインはあるが claude がいない（/exit してシェルに戻った）役割は、前の ID・モデルを残す（`carried`）。
 - ペインごと無くなった役割は、自動の保存（`--auto`）では `absent_since` を付けて 24 時間（`roster.keep_absent_hours`）残す。
   誤ってペインを閉じても `claude-roster restore <役割>` で戻せる。手で `save` したときは、いまの kitty が正として消す。
+- 寝かせた役割（`sleeping`。[sleep](#sleep--wake)）は、自動の保存でも手の保存でも、`keep_absent_hours` を過ぎても消さない。
+  段組みには入れず、寝かせる前のタブ（統括のタブにいたなら standby）に載せる。その役割のペインが kitty に戻っていれば
+  （手で開いたなど）、いまの kitty が正として印は外れる。その ID をほかの役割がいま開いていれば、寝ている記録は残さない
+  （同じ ID を 2 人に持たせない。会話はそちらにある）。
 - kitty が無いとき・役割のあるペインが 1 つも無いとき・（自動の保存で）統括のペインが無いときは保存しない
   （落ちた直後のタイマーで名簿を失わない。統括と段組みを名簿から落とさない）。
 - 同じセッション ID を 2 人が持つ（claude-wait で別のペインへ移している途中など）ときは、claude が動いている役割を正とし、
@@ -74,6 +80,8 @@ systemctl --user daemon-reload && systemctl --user enable --now claude-roster-sa
 - ペインはあるが claude がいない（シェルに戻った）役割は開かない（ペインを作らないので）。そのペインで `claude-wait <役割> <ID>` を打つ。
 - kitty が落ちた直後は、claude の後片付けが終わらず「いま動いている」と見えることがある。数秒後にもう一度 `restore` する。
 - 保存の前からペインが無かった役割（`absent_since`）は、`--include-absent` か役割を名指ししたときだけ開く。
+- 寝かせた役割（`sleeping`）は、`--include-sleeping` か役割を名指ししたときだけ開く（`--include-absent` では開かない）。
+  名指しで開いたときは、寝ている印は次の保存で外れる（印をすぐ外し、段組みの元の位置へ戻すのは `wake`）。
 - 名前が役割と違うセッションには `--rename` を付ける（resume では `-n` が効かないので、claude-wait が `/rename <役割>` の案内を出す）。
 
 ## restart
@@ -97,6 +105,42 @@ systemctl --user daemon-reload && systemctl --user enable --now claude-roster-sa
 
 背景セッション（kind=bg）は、`--allow-bg` を付けたときだけ止める。前面ではなく JSON の pid（daemon の中の、そのセッションの host）を止める。同じ pid を他のセッションも
 持っていれば（daemon 本体かもしれない）止めない。host が止まっても前面が残っていれば、前面も止める（claude-wait が続きを開く）。
+
+## sleep / wake
+
+役目を終えた担当のセッションを止めてペインを閉じ（実行レーンを減らす）、あとで会話ごと戻す。
+
+`claude-roster sleep <役割>`:
+
+1. 統括（`view.left`）と常時表示（`view.pinned`）の役割は寝かせない（exit 3）。保護するプロセス（`view.guard`）が動いていれば止めない（exit 2）。
+2. そのペインの claude が idle であること（restart と同じ: `~/.claude/sessions` の `status` が `idle`、`claude-state get` が空・idle・done。
+   exit 3）。`--force` で idle の確認を省く。claude がいない（シェルや待っているだけの）ペインは断る。
+3. その claude を開いた claude-wait が続きの指示に対応していれば、`<ID>.next` に「終わる」の指示（`"action": "exit"`。
+   `session_id` は null）を書く。claude-wait は claude が終わったあと、シェルに戻らずに終わる（ペインが閉じる）。
+   前の版の claude-wait はこの指示を ID の形で断ってシェルに戻るだけで、同じ会話を開き直すことは無い。
+4. 止める直前にもう一度 idle と保護するプロセスを確かめ、claude に SIGTERM を送る（restart と同じ。send-text の /exit は使わない。
+   打ち込む先を取り違えないように）。背景セッション（kind=bg）は `--allow-bg` を付けたときだけ。
+5. `--timeout`（既定 30 秒）で止まらなければ、続きの指示を消し、ペインは閉じず名簿も変えない（exit 1）。
+6. 閉じる前に、そのセッションの claude がどこにもいないこと（`~/.claude/sessions`）と、ペインの前面にシェル（bash・zsh など。
+   restore が開く形の `bash -lic 'claude-wait …'` の親を含む）しか残っていないことを確かめる。claude-wait や別のコマンド（エディタなど）が
+   残っていれば閉じない（exit 1。名簿も変えない）。ペインが自分で閉じていなければ `kitten @ close-window --match id:<window>` で閉じる。
+   見るのは前面のプロセスだけなので、そのシェルの背景のジョブ（`npm run dev &` など）は閉じると止まる。素のシェルから claude を開いた役割は
+   先に確かめる。閉じたのにペインが残ったときは、名簿を変えない（残ったペインで次の保存が印を外すので）。
+7. 名簿のその役割に `sleeping: true`・`slept_at`（時刻）・`sleep_place`（寝かせる前のタブ、段組みの段・列・1 人だけの段だったか）を書く。
+   セッション ID（/clear のあとならいまの ID）・cwd・model・name・slot は残す。段組みからは外す。統括のタブにいたなら
+   `claude-view equalize` で並べ直す。
+
+ペインがもう無い役割（`absent_since`）は、止めるものが無いので名簿に印を付けるだけ（その ID がどこかで動いていれば断る）。
+統括のペインが kitty に無いときは寝かせない（自動の保存と同じく、統括と段組みを名簿から落とさないため。exit 3）。
+`--dry-run` は止めずに、何をするかだけを出す。寝かせている間はロックを持つ（自動の保存は 1 回休む）。
+
+`claude-roster wake <役割>`: 寝かせた役割を `restore <役割>` と同じ決まりで開く（claude-wait で同じ会話を resume。統括のタブの役割は
+standby に足して `claude-view rows` で前に出す、kitty が無ければ kitty ごと）。そのとき段組みは `sleep_place` の位置に戻す
+（段組みが変わっていれば、範囲に収めて入れる）。開けたら寝ている印を外す。その ID がどこかで動いていれば開かない（exit 1）。
+`--dry-run` は開かず、印も外さない。
+
+`claude-roster status` は「寝ている（2026-11-23 10:00 から）」、`show` も同じ印を出す。`claude-state` の色の見張りと
+`claude-kitty doctor` は名簿の役割を見ないので、寝ている役割を「いない」とは言わない。
 
 ## 設定
 
@@ -145,3 +189,4 @@ env -u DISPLAY XDG_RUNTIME_DIR=$S/rt WAYLAND_DISPLAY=wayland-0 KITTY_CONFIG_DIRE
   新しい ID が名簿に入る。古い ID は世代（`roster.json.1` …）にだけ残る。起動し直すときは `claude-roster restore` を使う。
 - 別のフォルダ（`--cwd`）で resume したとき、Claude Code がその ID の会話記録を見つけられるかは、版によって違う見込み。
 - 統括のセッションが別の場所で動いていて開かなかったときは、並べ直さない（`claude-view` は統括のいる kitty を前提にする）。
+- sleep の close-window と、claude-wait が終わってペインが自分で閉じる流れは、偽の kitten でだけ確かめている（本物の kitty ではまだ）。

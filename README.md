@@ -56,7 +56,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | `bin/claude-session-stats` | 会話の記録から、言い直し・英語の返答・返答の長さなどを期間ごとに数えて Markdown に書く（[docs/session-stats.md](docs/session-stats.md)） | なし |
 | `bin/claude-relay` | 互いに承認した端末の Claude Code セッションの間で、LAN の中の ssh でメッセージを渡す（受け取りは統括だけ。[下の節](#claude-relay端末をまたぐ連絡)、[docs/relay.md](docs/relay.md)） | 受け取る側の sshd（macOS はリモートログイン） |
 | `bin/claude-presence` | 最後に人が打ってからの時間で在席・離席を見せ、離席中は実装のサブエージェントの model を軽いもの（既定 haiku）に変える（設定 `model_policy`。既定は無効。[下の節](#claude-presence離席中のモデル)） | なし |
-| `bin/claude-roster` | kitty の中のセッションの名簿を保ち、kitty を起動し直したあとに元の配置・フォルダ・モデル・会話へ戻す（[docs/roster.md](docs/roster.md)） | プロセスの情報（`lib/proc.py`）、保護する窓の確認だけ KWin |
+| `bin/claude-roster` | kitty の中のセッションの名簿を保ち、kitty を起動し直したあとに元の配置・フォルダ・モデル・会話へ戻す。役目を終えた担当は `sleep` で止めてペインを閉じ、名簿に残しておいて `wake` で会話ごと戻す（[docs/roster.md](docs/roster.md)） | プロセスの情報（`lib/proc.py`）、保護する窓の確認だけ KWin |
 
 テスト: `python3 tests/run.py`（これ 1 つで全部。標準ライブラリだけで、kitty や Chrome は使わない。GitHub Actions も同じものを回す）
 

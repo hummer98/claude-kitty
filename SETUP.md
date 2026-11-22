@@ -192,7 +192,7 @@ printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 
 ## 6. 守るべき決まり
 
-- **close と send-text を使わない。** `kitten @ close-window` などのペインやタブを閉じる操作と、`kitten @ send-text` は、中で動いている Claude Code の作業や入力を壊す。`claude-view` も使わない（テストで確認している）。並べ替えは `detach-window`・`focus-window`・`layout_action` だけで行う。
+- **close と send-text を使わない。** `kitten @ close-window` などのペインやタブを閉じる操作と、`kitten @ send-text` は、中で動いている Claude Code の作業や入力を壊す。`claude-view` も使わない（テストで確認している）。並べ替えは `detach-window`・`focus-window`・`layout_action` だけで行う。例外は `claude-roster sleep` の `close-window` だけで、そのペインの claude（と claude-wait）が終わり、前面にシェルしか残っていないのを確かめてから閉じる。
 - **同じセッション ID を 2 つのプロセスで同時に開かない。** 会話記録が壊れうる。別の場所から移すときは必ず `claude-wait` を通す（相手が確実に終わってから resume する。同じ ID の `claude-wait` 同士も flock で 1 つだけにする）。
 - **配置（並べ替え）は 1 つのセッションだけが行う。** 統括（`view.left`）だけが `claude-view` を呼ぶ。担当が自分で動かしてよいのは、自分のペインの中の `claude-browser --mode self` くらいにとどめる。同時に 2 か所から並べ替えると形が崩れる（`claude-view` は flock で 1 つずつにするが、意図がぶつかるのは防げない）。
 - kitty を Claude Code の Bash ツールから直接起動しない。`CLAUDE_*` を引き継いで、中の claude が子セッション扱いになり会話記録を残さない。`claude-kitty` がそれらを消してから起動する。

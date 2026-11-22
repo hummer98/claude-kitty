@@ -23,6 +23,7 @@
 （開く ID は指示の中のもの。/clear で ID が変わっていても、いまの会話に戻る。ファイルの名前は引数の ID のまま）。
 そのために、claude を開いている間は $XDG_RUNTIME_DIR/claude-wait/<ID>.waiter に自分の pid を書いておく
 （claude-roster はこれを見て、止めても続きを開ける claude-wait かを確認する）。
+claude-roster sleep の指示（"action": "exit"）なら、claude が終わったあとシェルに戻らずに終わる（ペインが閉じる）。
 """
 import fcntl
 import json
@@ -150,7 +151,8 @@ def write_json(path, data):
 
 
 def take_next(path, wait_id):
-    """続きの指示を読んで消す（1 回だけ使う）。この claude-wait 宛てで新しいものだけ {"session_id", "cwd", "model"}。"""
+    """続きの指示を読んで消す（1 回だけ使う）。この claude-wait 宛てで新しいものだけ {"session_id", "cwd", "model"}
+    か {"action": "exit"}。"""
     try:
         text = path.read_text()
     except OSError:
@@ -225,6 +227,16 @@ def main():
         subprocess.run([CLAUDE, "--resume", sid] + (["--model", model] if model else []) + (["-n", name] if rename else []),
                        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
         follow = take_next(nxt, wait_id)
+        if follow and follow.get("action") == "exit":
+            # claude-roster sleep: シェルに戻らずに終わる（ペインごと閉じる。会話は claude-roster wake で戻す）
+            try:
+                waiter.unlink()
+            except OSError:
+                pass
+            lock.close()
+            print(f"[{name}] 寝かせました。起こすには: claude-roster wake {name}", flush=True)
+            sys.stderr.flush()
+            sys.exit(0)
         if not follow:
             break
         sid = follow["session_id"]

@@ -11,11 +11,14 @@
 
 rows は統括（left）のいるタブだけ。左の列を除いた右側を、段（上から）× 横（左から）で表す（claude-view rows の形）。
 state は running（claude が動いている）/ waiting（claude-wait が待っている）/ shell（claude がいない）。
+寝かせた役割（claude-roster sleep）は sleeping: true・slept_at・sleep_place（寝かせる前のタブと段組みの位置）を持ち、
+state は sleeping。ペインは無いが、どの保存でも消さず、restore では開かない（wake・名指し・--include-sleeping のときだけ）。
 """
 import json
 import os
 import re
 import shlex
+import time
 
 from view import current_rows, left_percent, overlay_ids, pin_rows
 
@@ -35,7 +38,9 @@ SID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 ROLE_RE = re.compile(r"^[^\s,/'\"]+$")
 STANDBY = "standby"
 # 署名（変わったかどうか）に入れる項目。status や pid は 5 分ごとに変わるので入れない（世代が無駄に回らないように）
-SIG_KEYS = ("session_id", "cwd", "model", "name", "kind", "absent_since")
+SIG_KEYS = ("session_id", "cwd", "model", "name", "kind", "absent_since", "sleeping")
+SLEEP_KEYS = ("sleeping", "slept_at", "sleep_place")
+SHELLS = {"bash", "zsh", "sh", "dash", "fish"}  # 閉じてよいペインの前面（claude が終わってシェルだけが残った）
 NEXT_MAX_AGE = 300  # 続きの指示のファイルの有効期限（秒）。止められなかったあと、後で /exit したときに勝手に再開しないように
 
 
@@ -279,6 +284,8 @@ def carry_over(new, old, now, keep_seconds, drop_absent=False):
       （次に開くとき、同じ会話に戻れるように）。
     - ペインごと無くなった role は absent_since を付けて残す（誤ってペインを閉じたときに戻せるように）。
       keep_seconds を過ぎたもの、drop_absent（手で save したとき = いまが正）のときは残さない。
+    - 寝かせた role（sleeping）は、keep_seconds も drop_absent も見ずに残す（あとで wake で会話ごと戻すため）。
+      ただし、その ID をいまほかの役割が開いていれば残さない（同じ ID を 2 人に持たせない。会話はそちらにある）。
     """
     if not old or not isinstance(old.get("sessions"), dict):
         return new
@@ -293,29 +300,42 @@ def carry_over(new, old, now, keep_seconds, drop_absent=False):
                 e[k] = prev.get(k)
             e["carried"] = True
     tabs = [dict(t, roles=list(t["roles"])) for t in new["tabs"]]
-    if not drop_absent:
-        for t_old in old.get("tabs", []):
-            for role in t_old.get("roles", []):
-                prev = old["sessions"].get(role)
-                if role in sess or not prev or role == new.get("left") or prev.get("session_id") in held:
-                    continue
-                since = prev.get("absent_since") or now
-                if now - since > keep_seconds:
-                    continue
-                sess[role] = dict(prev, absent_since=since, state="absent", window_id=None, pid=None)
-                if prev.get("session_id"):
-                    held.add(prev["session_id"])
-                # 前と同じ題のタブに置く（無ければ standby）。段組みには入れない（いまの配置を崩さない）
-                dest = next((t for t in tabs if t["title"] == t_old.get("title") and "rows" not in t), None)
-                if dest is None:
-                    dest = next((t for t in tabs if t["title"] == STANDBY), None)
-                if dest is None:
-                    dest = {"title": STANDBY, "roles": []}
-                    tabs.append(dest)
-                dest["roles"].append(role)
+    # 寝ている役割はタブに載っていなくても拾う（手で直した名簿などで、タブから漏れても失わないように）
+    listed = [(t_old.get("title"), role) for t_old in old.get("tabs", []) for role in t_old.get("roles", [])]
+    seen = {r for _, r in listed}
+    listed += [(STANDBY, r) for r, e in old["sessions"].items() if r not in seen and (e or {}).get("sleeping")]
+    for title, role in listed:
+        prev = old["sessions"].get(role)
+        if role in sess or not prev or role == new.get("left") or prev.get("session_id") in held:
+            continue
+        if prev.get("sleeping"):
+            sess[role] = dict(prev, state="sleeping", window_id=None, pid=None)
+            sess[role].pop("absent_since", None)
+        else:
+            if drop_absent:
+                continue
+            since = prev.get("absent_since") or now
+            if now - since > keep_seconds:
+                continue
+            sess[role] = dict(prev, absent_since=since, state="absent", window_id=None, pid=None)
+        if prev.get("session_id"):
+            held.add(prev["session_id"])
+        # 前と同じ題のタブに置く（無ければ standby）。段組みには入れない（いまの配置を崩さない）
+        _side_tab(tabs, title)["roles"].append(role)
     out["sessions"], out["tabs"] = sess, tabs
     dedupe_ids(sess)
     return out
+
+
+def _side_tab(tabs, title):
+    """段組みの無い、題が title のタブ（無ければ standby。それも無ければ作る）。"""
+    dest = next((t for t in tabs if t["title"] == title and "rows" not in t), None)
+    if dest is None:
+        dest = next((t for t in tabs if t["title"] == STANDBY), None)
+    if dest is None:
+        dest = {"title": STANDBY, "roles": []}
+        tabs.append(dest)
+    return dest
 
 
 def signature(roster):
@@ -415,11 +435,11 @@ def main_tab_lines(left, rows, sessions, wait_cmd, pinned=()):
     return out
 
 
-def plan_restore(roster, present_roles, busy, only=None, include_absent=False):
+def plan_restore(roster, present_roles, busy, only=None, include_absent=False, include_sleeping=False):
     """復元で開く role と、開かない理由を決める。
 
     present_roles: いまの kitty にいる role。busy: {session_id: 理由}（どこかで動いている・待っている）。
-    only: 指定があれば、その role だけ（absent でも開く）。
+    only: 指定があれば、その role だけ（absent でも、寝ていても開く）。
     返り値 (launch: [role], skipped: [(role, 理由)])。
     """
     sess = roster["sessions"]
@@ -433,6 +453,9 @@ def plan_restore(roster, present_roles, busy, only=None, include_absent=False):
     for role in order:
         e = sess[role]
         if role in present_roles:
+            continue
+        if e.get("sleeping") and not include_sleeping and not only:
+            skipped.append((role, "寝かせてある（claude-roster wake か、--include-sleeping か、役割を名指しで開く）"))
             continue
         if e.get("absent_since") and not include_absent and not only:
             skipped.append((role, "保存の前からペインが無かった（--include-absent か、役割を名指しで開く）"))
@@ -572,6 +595,7 @@ def read_next(text, waiter_pid, wait_id, now, max_age=NEXT_MAX_AGE):
     """続きの指示のファイルの中身を確認して {"session_id", "cwd", "model"} を返す。使えなければ None。
 
     別の claude-wait 宛て・別の claude-wait の ID 宛て・古いもの（止められずに残ったもの）・ID の形が違うものは使わない。
+    claude-roster sleep の「終わる」の指示（exit_payload）なら {"action": "exit"}。
     """
     try:
         d = json.loads(text)
@@ -579,17 +603,159 @@ def read_next(text, waiter_pid, wait_id, now, max_age=NEXT_MAX_AGE):
         return None
     if not isinstance(d, dict) or d.get("waiter_pid") != waiter_pid or d.get("wait_id") != wait_id:
         return None
-    if not valid_sid(d.get("session_id")):
-        return None
     at = d.get("at")
     if not isinstance(at, (int, float)) or not (now - max_age <= at <= now + 5):
         return None
+    if d.get("action") == "exit":
+        return {"action": "exit"}
+    if d.get("action") is not None or not valid_sid(d.get("session_id")):
+        return None  # 知らない指示は使わない（勝手に開き直さない）
     cwd, model = d.get("cwd"), d.get("model")
     if cwd is not None and not (isinstance(cwd, str) and cwd):
         return None
     if model is not None and not (isinstance(model, str) and model):
         return None
     return {"session_id": d["session_id"], "cwd": cwd, "model": model}
+
+
+# ---- sleep / wake ----------------------------------------------------------
+
+def sleep_refusal(role, left, pinned, entry, pane, session_json, state_word, force=False):
+    """寝かせてよいか。だめなら理由（文字列）、よければ None。
+
+    entry: その時点の名簿の項目（いまの kitty から作ったもの。ペインが無ければ前の名簿の項目）。
+    pane: pane_session() の結果（ペインが無ければ None）。force: idle の確認を省く。
+    ペインが無い役割（absent）は、止めるものが無いので名簿に印を付けるだけ（ID があれば）。
+    """
+    if role == left:
+        return f"{role} は統括（view.left）なので寝かせない"
+    if role in (pinned or ()):
+        return f"{role} は常時表示（view.pinned）なので寝かせない（設定から外してから）"
+    if not entry:
+        return f"{role} は名簿にもいまの kitty にもいない"
+    if entry.get("sleeping") and pane is None:
+        return f"{role} はもう寝ている"
+    if pane is None:
+        if not entry.get("session_id"):
+            return f"{role} のペインが無く、名簿にセッション ID も無い（戻す会話が無い）"
+        return None
+    if pane["state"] != "running" or not pane.get("session_id"):
+        return (f"{role} のペインで claude が動いていない（{pane['state']}）。"
+                "閉じてよいペインなら閉じてから sleep する（名簿の ID に印を付ける）")
+    if not session_json:
+        return f"{role} のセッションの記録（~/.claude/sessions）が見つからない"
+    if force:
+        return None
+    status = session_json.get("status")
+    if status != "idle":
+        return f"{role} は idle でない（status={status}。--force で確認を省く）"
+    if state_word and state_word not in ("idle", "done"):
+        return f"{role} は idle でない（claude-state={state_word}。--force で確認を省く）"
+    return None
+
+
+def exit_payload(waiter_pid, wait_id, now):
+    """claude-wait に「claude が終わったら、シェルに戻らずに終わる」を伝える続きの指示。
+
+    session_id は入れない（null）。この印を知らない前の版の claude-wait の read_next は ID の形で断るので、
+    そちらはシェルに戻るだけで、同じ会話を開き直すことは無い（シェルのペインは claude-roster が閉じる）。
+    """
+    return {"waiter_pid": waiter_pid, "wait_id": wait_id, "session_id": None, "action": "exit", "at": now,
+            "by": "claude-roster sleep"}
+
+
+def pane_closable(win):
+    """閉じてよいペインか: 前面のプロセスが無いか、シェルだけ（claude も claude-wait も残っていない）。"""
+    for p in (win or {}).get("foreground_processes") or []:
+        argv = p.get("cmdline") or []
+        if parse_argv(argv):
+            return False
+        name = os.path.basename(argv[0]).lstrip("-") if argv else ""
+        if name not in SHELLS:
+            return False
+        # bash -c '…' のように、シェルが別のコマンドを動かしている途中なら閉じない（ログインシェルと対話だけ）。
+        # ただし restore が開く形（bash -lic 'claude-wait …'）の親は、claude-wait が終わったあとにだけ残るので閉じてよい
+        flags = [a for a in argv[1:] if a.startswith("-") and not a.startswith("--") and "c" in a]
+        if flags:
+            cmd = argv[argv.index(flags[0]) + 1] if argv.index(flags[0]) + 1 < len(argv) else ""
+            try:
+                first = shlex.split(cmd)[:1]
+            except ValueError:
+                return False
+            if not first or os.path.basename(first[0]) != "claude-wait":
+                return False
+    return True
+
+
+def _remove_role(rows, role):
+    return [r2 for r2 in ([x for x in r if x != role] for r in rows or []) if r2]
+
+
+def mark_sleeping(roster, role, entry, now):
+    """名簿の role を寝かせた形にして返す（名簿は書き換える）。
+
+    entry: 寝かせる直前の項目（ID・フォルダ・モデル・名前・slot を残す）。段組みとタブの位置は sleep_place に残し、
+    段組みからは外して、段組みの無いタブ（統括のタブにいたなら standby）へ移す。
+    """
+    sess, tabs = roster["sessions"], roster["tabs"]
+    place = {"tab": None}
+    for t in tabs:
+        if role in t.get("roles", []):
+            place["tab"] = t.get("title")
+            for i, row in enumerate(t.get("rows") or []):
+                if role in row:
+                    place.update(row=i, col=row.index(role), alone=len(row) == 1)
+            if "rows" in t:
+                t["rows"] = _remove_role(t["rows"], role)
+            t["roles"] = [r for r in t["roles"] if r != role]
+    roster["tabs"] = [t for t in tabs if t.get("roles") or "rows" in t]
+    e = dict(entry or sess.get(role) or {})
+    e.pop("absent_since", None)
+    e.update(sleeping=True, slept_at=now, sleep_place=place, state="sleeping", window_id=None, pid=None, status=None)
+    sess[role] = e
+    _side_tab(roster["tabs"], place["tab"])["roles"].append(role)
+    return roster
+
+
+def put_back(rows, role, place):
+    """寝かせる前の段組みの位置（sleep_place）に role を戻した rows（新しいリスト）。"""
+    rows = _remove_role(rows, role)
+    i = (place or {}).get("row")
+    if not isinstance(i, int) or i < 0:
+        return rows
+    j = place.get("col") if isinstance(place.get("col"), int) else 0
+    if place.get("alone") or i >= len(rows):
+        rows.insert(min(i, len(rows)), [role])  # 1 人だけの段だった（寝かせたときに段ごと消えた）
+    else:
+        rows[i].insert(max(0, min(j, len(rows[i]))), role)
+    return rows
+
+
+def mark_awake(roster, role):
+    """寝ている印を外し、寝かせる前に統括のタブの段組みにいたなら、そこへ戻した名簿を返す（名簿は書き換える）。"""
+    e = roster["sessions"].get(role)
+    if e is None:
+        return roster
+    place = e.get("sleep_place") or {}
+    for k in SLEEP_KEYS:
+        e.pop(k, None)
+    if e.get("state") == "sleeping":
+        e["state"] = "absent"  # 開いたばかり。次の保存で、いまの状態に置き換わる
+    main = next((t for t in roster["tabs"] if "rows" in t), None)
+    if main is not None and isinstance(place.get("row"), int):
+        for t in roster["tabs"]:
+            t["roles"] = [r for r in t["roles"] if r != role]
+        main["roles"].append(role)
+        main["rows"] = put_back(main["rows"], role, place)
+        roster["tabs"] = [t for t in roster["tabs"] if t.get("roles") or "rows" in t]
+    return roster
+
+
+def sleep_label(e):
+    """「寝ている（2026-11-23 10:00 から）」。"""
+    at = e.get("slept_at")
+    when = time.strftime("%F %H:%M", time.localtime(at)) if isinstance(at, (int, float)) else "いつからか不明"
+    return f"寝ている（{when} から）"
 
 
 # ---- status ----------------------------------------------------------------
@@ -601,6 +767,12 @@ def diff_lines(saved, now_roster):
     for role, e in saved["sessions"].items():
         c = cur.get(role)
         sid = e.get("session_id")
+        if e.get("sleeping"):
+            if c is None:
+                out.append(f"{role}: {sleep_label(e)}。claude-roster wake {role} で起こす")
+            else:
+                out.append(f"{role}: 寝ている印があるが、ペインがある（次の save で印が外れる）")
+            continue
         if e.get("absent_since"):
             out.append(f"{role}: 保存の前からペインが無い（名簿に残しているだけ）")
             continue
