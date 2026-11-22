@@ -61,6 +61,18 @@ def legacy(t, text="人かもしれない"):
     return {"type": "user", "timestamp": ts(t), "message": {"role": "user", "content": text}}
 
 
+def enqueue(t, text, op="enqueue"):
+    return {"type": "queue-operation", "operation": op, "timestamp": ts(t), "sessionId": SID1, "content": text}
+
+
+def plain(t, text, turn=None):
+    """origin の無い行（! コマンド・スラッシュコマンドの行の形）。"""
+    d = {"type": "user", "timestamp": ts(t), "parentUuid": "p", "message": {"role": "user", "content": text}}
+    if turn:
+        d["turnOrigin"] = turn
+    return d
+
+
 def assistant(t):
     return {"type": "assistant", "timestamp": ts(t), "message": {"role": "assistant", "content": [{"type": "text", "text": "はい"}]}}
 
@@ -97,7 +109,43 @@ class Lines(unittest.TestCase):
                       turnPosition={"promptIndex": 1, "turnIndex": 1})
         self.assertIs(A.is_human_line(launch), False)
         self.assertIs(A.is_human_line(dict(launch, parentUuid="p", turnPosition={"promptIndex": 2})), True)
-        self.assertIs(A.is_human_line(dict(launch, parentUuid="p")), True)  # 前のある会話の 1 番目（resume など）は人
+        # 前のある会話の 1 番目は人とみなす。`claude --resume <ID> "指示"` の引数の指示もこの形（promptIndex は 1 に
+        # 戻るが parentUuid がある）で人と数えてしまうが、いまの道具は resume に指示を付けない（docs/active.md の限界）
+        self.assertIs(A.is_human_line(dict(launch, parentUuid="p")), True)
+        # 新しい会話の最初でも、親がスラッシュコマンド（local_command の system の行）なら人が打ったもの。
+        # Claude Code の形が変わって数えなくなったら、ここで気づく
+        after_slash = dict(human(NOW, "続けて"), parentUuid="uuid-of-local-command",
+                           turnPosition={"promptIndex": 1, "turnIndex": 1})
+        self.assertIs(A.is_human_line(after_slash), True)
+
+    def test_command_lines(self):
+        # 人の ! コマンドの結果（turnOrigin が human）は数える
+        self.assertIs(A.is_human_line(plain(NOW, "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>", "human")), True)
+        # origin も turnOrigin も無い ! の入力・スラッシュコマンドの行は「古い形式」にせず黙って飛ばす
+        for text in ("<bash-input>ls</bash-input>", "<command-name>/clear</command-name>",
+                     "<local-command-stdout>Added allow rule</local-command-stdout>"):
+            self.assertIs(A.is_human_line(plain(NOW, text)), False, text)
+        best, legacy = A.scan_lines([json.dumps(plain(NOW, "<bash-input>ls</bash-input>")),
+                                     json.dumps(plain(NOW, "<command-name>/clear</command-name>"))])
+        self.assertEqual((best, legacy), (None, False))
+
+    def test_queued_uses_enqueue_time(self):
+        # 実例: 04:45:28Z に enqueue、05:01:12Z に queued として会話に入った（15.7 分の遅れ）
+        q = human(NOW, "/,pde;", source="queued")
+        lines = [json.dumps(x) for x in (enqueue(NOW - 944, "/,pde;"), enqueue(NOW - 10, "<task-notification>x"), q)]
+        self.assertEqual(A.scan_lines(lines), (NOW - 944, False))
+        # 同じ本文が 2 度待たされたら、先に入れたものから
+        lines = [json.dumps(x) for x in (enqueue(NOW - 900, "a"), enqueue(NOW - 600, "a"),
+                                         human(NOW - 300, "a", "queued"), human(NOW, "a", "queued"))]
+        self.assertEqual(A.scan_lines(lines)[0], NOW - 600)
+        # enqueue が見つからない（読んだ範囲より前・取り除かれた）なら数えない（away 側）
+        self.assertEqual(A.scan_lines([json.dumps(q)]), (None, False))
+        lines = [json.dumps(x) for x in (enqueue(NOW - 900, "b"), enqueue(NOW - 800, "b", "remove"),
+                                         human(NOW, "b", "queued"))]
+        self.assertEqual(A.scan_lines(lines), (None, False))
+        # 待たせた発話より前の、ふつうに打った発話はそのまま
+        lines = [json.dumps(x) for x in (human(NOW - 1200, "x"), q)]
+        self.assertEqual(A.scan_lines(lines)[0], NOW - 1200)
 
     def test_legacy_is_none(self):
         self.assertIsNone(A.is_human_line(legacy(NOW)))
@@ -224,6 +272,12 @@ class Judge(Fixture):
         self.session(SID2, None, lines=[human(NOW)])
         j = self.judge()
         self.assertEqual((j["status"], j["seen"]), ("unknown", 0))
+
+    def test_queued_in_file(self):
+        self.session(SID1, "aom-master", lines=[enqueue(NOW - 25 * 60, "見て"), assistant(NOW - 60),
+                                                human(NOW - 30, "見て", "queued")])
+        j = self.judge()
+        self.assertEqual((j["status"], int(j["minutes"])), ("away", 25))
 
     def test_future_line_ignored(self):
         # 時計のずれ・壊れた timestamp の先の行で active が続かないように

@@ -30,6 +30,11 @@ DEFAULT_MINUTES = 20
 SPANS = (2 * 1024 * 1024, 16 * 1024 * 1024)
 # いまよりこれ以上先の時刻の行は使わない（時計のずれ・壊れた timestamp で、その時刻まで active が続かないように）
 FUTURE_SLACK = 120
+# origin も turnOrigin も無いが、古い形式ではなく Claude Code が今も書く機械の行（! コマンドの入力・スラッシュコマンドの
+# 名前と出力）。「古い形式」に数えると unknown の理由が誤解を招くので、黙って飛ばす。<bash-stdout> は turnOrigin が human で
+# 人の ! コマンドの結果なので数える
+SILENT_PREFIXES = ("<bash-input", "<bash-stderr", "<command-name", "<command-message", "<command-args",
+                   "<local-command-stdout", "<local-command-stderr", "<local-command-caveat")
 
 
 def is_human_line(d):
@@ -49,7 +54,7 @@ def is_human_line(d):
     kind = origin.get("kind") if isinstance(origin, dict) else None
     turn = d.get("turnOrigin")
     if kind is None and turn is None:
-        return None
+        return False if content.lstrip().startswith(SILENT_PREFIXES) else None
     if kind not in (None, "human") or turn not in (None, "human"):
         return False  # 片方でも人でないと書いてあれば人でない
     body = content.lstrip()
@@ -72,30 +77,56 @@ def parse_ts(s):
 
 
 def scan_lines(lines, now=None):
-    """行（bytes か str）の並びから (最後の人の発話の時刻, 古い形式の行があったか)。now より FUTURE_SLACK 秒以上先の行は使わない。"""
+    """行（bytes か str）の並びから (最後の人の発話の時刻, 古い形式の行があったか)。now より FUTURE_SLACK 秒以上先の行は使わない。
+
+    promptSource が queued の行（作業中に打って待たせた発話）の timestamp は会話に入った時刻で、人が打った時刻ではない
+    （実例で 15.7 分遅れ）。その前の同じ本文の queue-operation の enqueue の時刻を使い、見つからなければ数えない（away 側）。"""
     best, legacy = None, False
     limit = None if now is None else now + FUTURE_SLACK
+    queue = []  # [(本文, enqueue の時刻)]。待ち行列は先に入れたものから出る
     for line in lines:
         if isinstance(line, bytes):
-            # 速さのため: 人の行には必ず "user" が入る。デコードと JSON の読みは候補だけ
-            if b'"user"' not in line:
+            # 速さのため: 人の行には必ず "user"、待ち行列の行には "queue-operation" が入る。デコードと JSON の読みは候補だけ
+            if b'"user"' not in line and b'"queue-operation"' not in line:
                 continue
             line = line.decode("utf-8", errors="replace")
-        elif '"user"' not in line:
+        elif '"user"' not in line and '"queue-operation"' not in line:
             continue
         try:
             d = json.loads(line)
         except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "queue-operation":
+            text = d.get("content")
+            if not isinstance(text, str):
+                continue
+            if d.get("operation") == "enqueue":
+                queue.append((text.strip(), parse_ts(d.get("timestamp"))))
+            elif d.get("operation") == "remove":  # 出さずに取り除いた（Esc など）
+                _take(queue, text)
             continue
         h = is_human_line(d)
         if h is None:
             legacy = True
             continue
         if h:
-            t = parse_ts(d.get("timestamp"))
+            if d.get("promptSource") == "queued":
+                t = _take(queue, d["message"]["content"])
+            else:
+                t = parse_ts(d.get("timestamp"))
             if t is not None and (limit is None or t <= limit) and (best is None or t > best):
                 best = t
     return best, legacy
+
+
+def _take(queue, text):
+    """待ち行列から同じ本文の一番古いものを取り出し、その enqueue の時刻を返す（無ければ None）。"""
+    text = text.strip()
+    for i, (q, t) in enumerate(queue):
+        if q == text:
+            del queue[i]
+            return t
+    return None
 
 
 def last_human(path, spans=SPANS, not_before=None, now=None):

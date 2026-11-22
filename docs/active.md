@@ -38,11 +38,15 @@ $ claude-active --minutes 30 --json
 - 自動の要約（`isCompactSummary`・`isVisibleInTranscriptOnly`）。`turnOrigin` は要約を起こしたターンのものを引き継ぎ、`human` になりうる。
 - 会話の最初の発話（`parentUuid` が無く `turnPosition.promptIndex` が 1）。統括が `claude "指示"` の引数で担当を起こすと、`human`・`typed` と記録される【計測】。人が新しい会話の最初に打ったものも落ちる（away 寄りになるだけ）。
 
+作業中に打って待たせた発話（`promptSource: "queued"`）は、行の時刻が会話に入った時刻で人が打った時刻ではない（実例で 15.7 分遅れ）。その前にある同じ本文の `queue-operation` の `enqueue` の時刻を使い、見つからなければ（読んだ範囲より前・取り除かれた）数えない。
+`origin` も `turnOrigin` も無い `<bash-input>`・`<command-name>`・`<local-command-stdout>` などの行は、古い形式に数えずに飛ばす。人の `!` コマンドの結果の `<bash-stdout>`（`turnOrigin: "human"`）は数える。
+
 いまより 2 分以上先の時刻の行は使わない（時計のずれ・壊れた timestamp で active が続かないように）。
 
 ## 限界
 
 - ほかのプロセスが kitty の `send-text` で担当の入力欄に打った文は、人の入力と見分けられない（claude-kitty の道具は send-text を使わない）。
+- `claude --resume <ID> "指示"` の引数で渡した指示は、人と数える（`promptIndex` は 1 に戻るが `parentUuid` があり、resume のあとに人が打ったものと見分けられない）。claude-kitty の道具は resume に指示を付けない。
 - 分は切り捨てて出す（20.9 分は「20分前」。判定は小数のまま比べる）。
 
 claude-presence（hook が書く last.json）とは別に、記録そのものを読む。hook が入っていない・落ちたときにも使えるようにするため。
