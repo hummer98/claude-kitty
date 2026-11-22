@@ -195,11 +195,14 @@ def append_log(env, name, entry):
             os.replace(p, p.with_name(p.name + ".1"))
     except FileNotFoundError:
         pass
-    fd = os.open(str(p), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
-    with os.fdopen(fd, "r+b") as f:
+    try:
+        fd, readable = os.open(str(p), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600), True
+    except PermissionError:  # 書けるが読めない: 末尾を確かめずに書く（書けるのに書かない、にしない）
+        fd, readable = os.open(str(p), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), False
+    with os.fdopen(fd, "r+b" if readable else "ab") as f:
         # 前の書き込みが改行の前で切れていたら、この記録がその行につながって読めなくならないよう区切る
         head = b""
-        if f.seek(0, os.SEEK_END) > 0:
+        if readable and f.seek(0, os.SEEK_END) > 0:
             f.seek(-1, os.SEEK_END)
             if f.read(1) != b"\n":
                 head = b"\n"
@@ -320,8 +323,9 @@ def run_hook(text, env, now=None, policy_loader=None):
     if d is None:
         try:
             note_retry(env, payload, policy, now)
-        except Exception as e:  # noqa: BLE001 — 記録が書けなくても呼び出しは通す
-            log_error(env, "hook", f"{SWITCHES} に書けない: {type(e).__name__}: {e}")
+        except Exception as e:  # noqa: BLE001 — 記録が読めない・書けなくても呼び出しは通す
+            log_error(env, "hook", f"出し直しを {SWITCHES} に残せない（{DENIALS} が読めないか、{SWITCHES} に書けない）: "
+                                   f"{type(e).__name__}: {e}")
         return None
     sid = payload.get("session_id")
     try:

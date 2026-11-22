@@ -272,9 +272,24 @@ class HookRun(unittest.TestCase):
         self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
         self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 5))
         self.assertEqual(len(self.denials()), 1)
+        self.assertEqual(log.read_text().count("\n"), 2)  # 切れた行の後の区切り + 記録の 1 行
+        sw = self.d / "claude-presence" / P.SWITCHES
+        sw.write_text('{"i": 0}\n{"cut')
         P.append_switch(self.env, {"i": 1})
         P.append_switch(self.env, {"i": 2})
-        self.assertEqual(log.read_text().count("\n"), 2)  # 切れた行 + 記録の 1 行
+        self.assertEqual([r.get("i") for r in P.recent_switches(self.env, 10)], [0, 1, 2])
+
+    def test_write_only_log_is_still_appended(self):
+        # 書けるが読めないファイルにも書く（末尾の確かめは省く）
+        if os.geteuid() == 0:
+            self.skipTest("root は読める")
+        P.append_switch(self.env, {"i": 1})
+        sw = self.d / "claude-presence" / P.SWITCHES
+        sw.chmod(0o200)
+        try:
+            P.append_switch(self.env, {"i": 2})
+        finally:
+            sw.chmod(0o600)
         self.assertEqual([r.get("i") for r in P.recent_switches(self.env, 10)], [1, 2])
 
     def test_denial_found_among_many_other_sessions(self):
