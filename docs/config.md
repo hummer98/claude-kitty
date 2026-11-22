@@ -194,9 +194,10 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 - 知らせた印は `$XDG_RUNTIME_DIR/claude-disk-watch/state.json`（無ければ `/tmp/claude-kitty-<uid>/…`）に置き、watch を起動し直しても同じ知らせを繰り返さない。送る前に書く。書けない（inode が尽きているなど）ときは、動いている間だけ覚えて errors.log に残す。
 - 送り先: `notify_role` のセッションに、claude-relay 第 2 段の起こす部品（`lib/relay.py` の `WAKERS`。今は Claude Code の cross-session の socket）で 1 通。止まっているセッションも新しいターンで受け取る。socket と token は、そのセッションの hook が `relay/wake/<役割>/` に書いた記録を使うので、**その役割が `relay.receivers` に入っていて、relay の hook（`tools/install.sh --hooks=relay`）が入っている必要がある**（[relay.md](relay.md)）。claude-relay の回数の上限・受領の控えは使わない（受信箱を通らないため）。
 - 送れない（記録が無い・セッションが終わった・socket の失敗）か `notify_role` が `null` なら、デスクトップの通知（Linux は `notify-send`、macOS は `osascript`）。それも出せなければ errors.log に残す（毎分くり返さない）。
-- 本文の例: `[claude-kitty disk] /tmp の inode が 72%（754,975 / 1,048,576）。70% を超えました。大きいもの（直下の inode 数）: cc-tmp（700,123）、…。（claude-kitty の見張りの知らせで、ユーザーが打ったものではない。…）`。大きいものは、その場所の直下の項目ごとの inode 数（下の全部。リンクはたどらず、別のファイルシステムには入らない）の上位 3 つ。1 秒で数え終わらなければ省く。頭の `[claude-kitty disk]` は claude-presence が人の入力と数えない印（`lib/presence.py` の `MACHINE_MARKS`）。
-- 知らない項目があれば設定の誤りとする（書き間違いで黙って既定のまま動かないため）。
-- watch は色の見張りと同じ流れで動くので、測る・数える・送る間は色の見張りが待つ。大きいものを数えるのは 1 秒まで、送るのは閾値を超えたときだけ（socket は 1 つにつき 3 秒、通知は 5 秒まで）。`os.statvfs` には時間の上限が無いので、応答しなくなりうるネットワークのマウントは `paths` に入れない。
+- 本文の例: `[claude-kitty disk] /tmp の inode が 72%（754,975 / 1,048,576）。70% を超えました。直下は 812,400 項目。多いもの（名前の頭でまとめた数）: tmp*（810,002）、lua_*（2,301）、claude-*（1）。（claude-kitty の見張りの知らせで、ユーザーが打ったものではない。…）`。手がかりは、その場所の直下の項目を名前の頭（数字・乱数の部分から先を `*` にした形。`tmp0`・`tmpp1rtt87k` → `tmp*`、`lua_ab12` → `lua_*`、`pytest-123` → `pytest-*`）でまとめた数の上位 3 つと、直下の項目の数。中には潜らない（事故の形では、直下の小さな一時フォルダが何十万も並び、中を数えた上位は `tmp0（5）` のように原因を指さないため）。場所がリンクなら、たどった先を数える。1 秒で数え終わらなければ省く。頭の `[claude-kitty disk]` は claude-presence が人の入力と数えない印（`lib/presence.py` の `MACHINE_MARKS`）。
+- 知らない項目があれば設定の誤りとする（書き間違いで黙って既定のまま動かないため）。`"disk_watch": null` は書いていないのと同じ（既定で見張る）。
+- `claude-state watch --once` は測った値（と超えている閾値）を出すだけで、知らせず、印も付けない（常駐の watch の知らせを横取りしないため）。
+- watch は色の見張りと同じ流れで動くので、測る・数える・送る間は色の見張りが待つ。直下を数えるのは 1 秒まで、送るのは閾値を超えたときだけ（socket は 1 つにつき 3 秒、通知は 5 秒まで）。`os.statvfs` には時間の上限が無いので、応答しなくなりうるネットワークのマウントは `paths` に入れない。
 - 送れずデスクトップの通知も出せなかった知らせは送り直さない（印は付くので、次は 10 ポイント下がってから超えたとき）。
 - `claude-kitty doctor` の「ディスク: <path>」の行に、使用率と、閾値を超えているか（超えていれば注意）を出す。設定が壊れていれば「設定: disk_watch」が NG になり、watch は見張りだけを止めて（色の見張りは続ける）errors.log に残す。
 - 設定を変えたら `systemctl --user restart claude-state-watch.service`（watch は起動したときに設定を読む）。

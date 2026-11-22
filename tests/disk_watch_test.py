@@ -79,7 +79,7 @@ class Base(unittest.TestCase):
     def watch(self, fs, **kw):
         c = conf(paths=[self.p], notify_role="aom-master", **kw)
         return DW.DiskWatch({"HOME": str(self.t)}, c, statvfs=fs, send=self.send, notify=self.notify,
-                            top=lambda p: [("a", 5), ("b", 3)], log=self.logs.append, state_file=self.state)
+                            top=lambda p: {"total": 900, "groups": [("tmp*", 850), ("lua_*", 40)]}, log=self.logs.append, state_file=self.state)
 
 
 class OncePerThreshold(Base):
@@ -101,7 +101,7 @@ class OncePerThreshold(Base):
         self.assertEqual(role, "aom-master")
         self.assertTrue(text.startswith(f"[claude-kitty disk] {self.p} の inode が 72%（754,975 / 1,048,576）。70% を超えました。"),
                         text)
-        self.assertIn("大きいもの（直下の inode 数）: a（5）、b（3）。", text)
+        self.assertIn("直下は 900 項目。多いもの（名前の頭でまとめた数）: tmp*（850）、lua_*（40）。", text)
         self.assertEqual(self.notified, [])
 
     def test_jump_over_two_thresholds_sends_one_with_the_higher(self):
@@ -116,15 +116,15 @@ class OncePerThreshold(Base):
         fs = FakeFs(**{self.p: vfs(bytes_pct=71, inode_pct=71)})
         w = self.watch(fs)
         counted = []
-        w.top = lambda p: counted.append(p) or [("a", 1)]
+        w.top = lambda p: counted.append(p) or {"total": 1, "groups": [("a", 1)]}
         out = w.check()
         self.assertEqual(sorted(k for _p, k, _t, _v in out), ["bytes", "inodes"])
-        self.assertEqual(counted, [self.p])  # 大きいものは path ごとに 1 回だけ数える
+        self.assertEqual(counted, [self.p])  # 直下は path ごとに 1 回だけ数える
         self.assertTrue(all("a（1）" in text for _r, text in self.sent))
 
     def test_top_omitted_when_none(self):
         text = DW.message("/tmp", "inodes", 10, 100, 72.0, 70, None)
-        self.assertNotIn("大きいもの", text)
+        self.assertNotIn("多いもの", text)
         self.assertIn("ユーザーが打ったものではない", text)
 
 
@@ -337,7 +337,7 @@ class WakeParts(unittest.TestCase):
                     buf += d
                 got.append(buf)
                 c.close()
-            th = threading.Thread(target=serve)
+            th = threading.Thread(target=serve, daemon=True)  # 届かなくてもテストの終わりで待たない
             th.start()
             try:
                 rec = {"role": "main", "session_id": "s1", "socket": sock_path, "token": "tok",
@@ -345,7 +345,7 @@ class WakeParts(unittest.TestCase):
                 d = relay.wake_dir(env, "main")
                 d.mkdir(parents=True)
                 (d / "s1.json").write_text(json.dumps(rec))
-                text = DW.message("/tmp", "inodes", 754975, 1048576, 72.0, 70, [("x", 9)])
+                text = DW.message("/tmp", "inodes", 754975, 1048576, 72.0, 70, {"total": 9, "groups": [("tmp*", 9)]})
                 self.assertEqual(DW.wake_send(env, "main", text), (True, "socket"))
                 th.join(5)
             finally:
@@ -401,49 +401,44 @@ class Interval(Base):
         self.assertFalse(w.due(1000.0))
 
 
-class TopEntries(unittest.TestCase):
-    def test_counts_and_order(self):
+class TopGroups(unittest.TestCase):
+    def test_name_group(self):
+        cases = {"tmp0": "tmp*", "tmpp1rtt87k": "tmp*", "tmp_k2abx9q": "tmp*", "tmp": "tmp", "tmp.Ab12": "tmp.*", "lua_ab12": "lua_*",
+                 "lua_XyZq": "lua_*", "pytest-123": "pytest-*", "pytest-of-x-12": "pytest-of-x-*", "claude-1000": "claude-*",
+                 "pressure-vessel-libs-kXaPFP": "pressure-vessel-libs-*", "abc123": "abc*", "12345": "*",
+                 "systemd-private-3f2a-foo.service-AbC": "systemd-private-*", "v8-compile-cache-1000": "v8-compile-cache-*",
+                 "node-compile-cache": "node-compile-cache", ".X11-unix": ".X11-unix", "a1": "a1"}
+        for name, want in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(DW.name_group(name), want)
+
+    def test_accident_shape_points_at_the_cause(self):
+        """事故の形: 直下に小さな一時フォルダがたくさん。名前の頭でまとめた数で原因を指す（中には潜らない）。"""
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
-            (root / "big").mkdir()
+            for i in range(30):
+                d = root / tempfile.mkdtemp(dir=t).rsplit("/", 1)[1]  # 本物の tempfile の名前（tmp + 乱数）
+                (d / "x").write_text("")
             for i in range(5):
-                (root / "big" / f"f{i}").write_text("")
-            (root / "big" / "sub").mkdir()
-            (root / "big" / "sub" / "g").write_text("")
-            (root / "mid").mkdir()
-            (root / "mid" / "a").write_text("")
-            (root / "one").write_text("")
-            (root / "zz").mkdir()
-            (root / "link").symlink_to(root / "big")  # たどらない
-            out = DW.top_entries(t)
-            self.assertEqual(out, [("big", 8), ("mid", 2), ("link", 1)])
+                (root / f"lua_{i}ab{i}").mkdir()
+            (root / "big-but-alone").mkdir()
+            for i in range(50):
+                (root / "big-but-alone" / f"f{i}").write_text("")
+            (root / "claude-1000").mkdir()
+            out = DW.top_groups(t)
+        self.assertEqual(out["total"], 37)
+        self.assertEqual(out["groups"], [("tmp*", 30), ("lua_*", 5), ("big-but-alone", 1)])
+
+    def test_symlinked_path_counts_the_target(self):
+        with tempfile.TemporaryDirectory() as t:
+            real = Path(t) / "real"
+            real.mkdir()
+            for i in range(3):
+                (real / f"tmp{i}").mkdir()
+            (Path(t) / "link").symlink_to(real)
+            self.assertEqual(DW.top_groups(str(Path(t) / "link")), {"total": 3, "groups": [("tmp*", 3)]})
 
     def test_over_budget_is_omitted(self):
-        with tempfile.TemporaryDirectory() as t:
-            for i in range(3):
-                (Path(t) / f"d{i}").mkdir()
-                (Path(t) / f"d{i}" / "x").write_text("")
-            ticks = iter(range(0, 1000))
-            self.assertIsNone(DW.top_entries(t, budget=1.0, clock=lambda: float(next(ticks)), every=1))
-            self.assertIsNone(DW.top_entries(t + "/none"))
-
-    def test_budget_applies_inside_one_big_folder(self):
-        """直下が 1 つでも、その中が大きければ途中で止める（事故のときの形: 1 つのフォルダに何十万も）。"""
-        with tempfile.TemporaryDirectory() as t:
-            big = Path(t) / "big"
-            big.mkdir()
-            for i in range(2000):
-                (big / f"f{i}").write_text("")
-            calls = []
-
-            def clock():
-                calls.append(1)
-                return float(len(calls))  # 見るたびに 1 秒進む
-            self.assertIsNone(DW.top_entries(t, budget=3.0, clock=clock, every=256))
-            self.assertLessEqual(len(calls), 5)  # 3 秒を超えたところで止まった（2000 個を全部は読まない）
-            self.assertEqual(DW.top_entries(t), [("big", 2001)])
-
-    def test_budget_applies_to_many_top_level_entries(self):
         with tempfile.TemporaryDirectory() as t:
             for i in range(1000):
                 (Path(t) / f"f{i}").write_text("")
@@ -451,9 +446,11 @@ class TopEntries(unittest.TestCase):
 
             def clock():
                 calls.append(1)
-                return float(len(calls))
-            self.assertIsNone(DW.top_entries(t, budget=2.0, clock=clock, every=256))
-            self.assertLessEqual(len(calls), 4)
+                return float(len(calls))  # 見るたびに 1 秒進む
+            self.assertIsNone(DW.top_groups(t, budget=2.0, clock=clock, every=256))
+            self.assertLessEqual(len(calls), 4)  # 上限を超えたところで止まった（1000 個を全部は読まない）
+            self.assertIsNone(DW.top_groups(t + "/none"))
+            self.assertEqual(DW.top_groups(t)["total"], 1000)
 
 
 class Config(unittest.TestCase):
@@ -470,6 +467,8 @@ class Config(unittest.TestCase):
 
     def test_defaults(self):
         self.assertEqual(load_disk_watch_config({}, self.path), DEFAULT_DISK_WATCH)  # ファイルが無い
+        self.path.write_text('{"disk_watch": null}')  # null は書いていないのと同じ
+        self.assertEqual(load_disk_watch_config({}, self.path), DEFAULT_DISK_WATCH)
         self.path.write_text("{}")
         self.assertEqual(load_disk_watch_config({}, self.path)["paths"], ["/tmp"])
         self.assertIsNone(load_disk_watch_config({}, self.path)["notify_role"])
@@ -515,42 +514,69 @@ def load_claude_state():
 
 
 class WatchCli(unittest.TestCase):
-    def test_watch_runs_disk_check(self):
+    def env(self, t, cfg=None):
+        return {"XDG_RUNTIME_DIR": t, "CLAUDE_KITTY_CONFIG": str(cfg or Path(t) / "none.json"), "XDG_CONFIG_HOME": t,
+                "HOME": t}
+
+    def test_loop_runs_disk_check(self):
         with tempfile.TemporaryDirectory() as t:
-            env = {"XDG_RUNTIME_DIR": t, "CLAUDE_KITTY_CONFIG": str(Path(t) / "none.json"), "XDG_CONFIG_HOME": t}
             cs = load_claude_state()
             calls = []
 
             class Disk:
                 def due(self, mono):
-                    calls.append(mono)
                     return True
 
                 def check(self):
-                    return [("/tmp", "inodes", 70, "socket")]
+                    calls.append("check")
+                    raise RuntimeError("boom")  # 落ちても色の見張りは続く
+
+                def preview(self):
+                    raise AssertionError("常駐では preview を使わない")
+
+            class Stop(Exception):
+                pass
+            sleeps = []
+
+            def sleep(sec):
+                sleeps.append(sec)
+                if len(sleeps) >= 2:
+                    raise Stop
+            with self.assertRaises(Stop):
+                cs.cmd_watch(self.env(t), ["unix:" + t + "/none"], sleep=sleep, disk=Disk())
+            self.assertEqual(calls, ["check", "check"])
+            self.assertIn("disk: RuntimeError: boom", (Path(t) / "claude-state" / "errors.log").read_text())
+
+    def test_once_only_measures(self):
+        """--once は測った値だけ。知らせない・印を付けない（常駐の watch の知らせを横取りしない）。"""
+        with tempfile.TemporaryDirectory() as t:
+            watched = Path(t) / "w"
+            watched.mkdir()
+            cfg = Path(t) / "config.json"
+            cfg.write_text(json.dumps({"disk_watch": {"paths": [str(watched), str(Path(t) / "none")],
+                                                      "notify_role": "aom-master"}}))
+            cs = load_claude_state()
+            import diskwatch
+            sent = []
+            dw = diskwatch.DiskWatch(self.env(t, cfg), load_disk_watch_config({}, cfg),
+                                     statvfs=lambda p: vfs(bytes_pct=20, inode_pct=90),
+                                     send=lambda r, x: sent.append(x) or (True, "socket"),
+                                     notify=lambda x: sent.append(x) or True, top=lambda p: None)
             out = io.StringIO()
             old = sys.stdout
             sys.stdout = out
             try:
-                self.assertEqual(cs.cmd_watch(env, ["unix:" + t + "/none"], once=True, disk=Disk()), 0)
+                self.assertEqual(cs.cmd_watch(self.env(t, cfg), ["unix:" + t + "/none"], once=True, disk=dw), 0)
             finally:
                 sys.stdout = old
-            self.assertEqual(len(calls), 1)
-            self.assertIn("disk /tmp inodes: 70% を超えた → socket", out.getvalue())
-
-    def test_disk_failure_does_not_stop_watch(self):
-        with tempfile.TemporaryDirectory() as t:
-            env = {"XDG_RUNTIME_DIR": t, "CLAUDE_KITTY_CONFIG": str(Path(t) / "none.json"), "XDG_CONFIG_HOME": t}
-            cs = load_claude_state()
-
-            class Disk:
-                def due(self, mono):
-                    return True
-
-                def check(self):
-                    raise RuntimeError("boom")
-            self.assertEqual(cs.cmd_watch(env, ["unix:" + t + "/none"], once=True, disk=Disk()), 0)
-            self.assertIn("disk: RuntimeError: boom", (Path(t) / "claude-state" / "errors.log").read_text())
+            self.assertEqual(sent, [])
+            self.assertFalse(dw.state_file.exists())
+            self.assertEqual(dw.fired, {})
+            text = out.getvalue()
+            self.assertIn(f"disk {watched} bytes: 20%\n", text)
+            self.assertIn(f"disk {watched} inodes: 90%（85% を超えている）", text)
+            self.assertIn(f"disk {t}/none: 無い（飛ばす）", text)
+            self.assertEqual(len(dw.check()), 1)  # 常駐の側では、まだ知らせていないので知らせる
 
     def test_broken_config_disables_only_disk(self):
         with tempfile.TemporaryDirectory() as t:
@@ -564,7 +590,11 @@ class WatchCli(unittest.TestCase):
             self.assertIsNone(cs.make_disk_watch(env))
             cfg.write_text('{"disk_watch": {"paths": ["/nonexistent-x"]}}')
             self.assertIsNotNone(cs.make_disk_watch(env))
-            self.assertEqual(cs.cmd_watch(env, ["unix:" + t + "/none"], once=True), 0)  # 無い path だけ: 何もしない
+            import contextlib
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cs.cmd_watch(env, ["unix:" + t + "/none"], once=True), 0)  # 無い path だけ: 何もしない
+            self.assertEqual(out.getvalue(), "disk /nonexistent-x: 無い（飛ばす）\n")
 
 
 class Doctor(unittest.TestCase):

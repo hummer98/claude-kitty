@@ -283,10 +283,15 @@ def cmd_watch(env, to=None, interval=1.0, once=False, sleep=time.sleep, now=time
         except Exception as e:  # noqa: BLE001
             log_error(env, "watch", f"{type(e).__name__}: {e}")
         try:
-            if disk and disk.due(m0):
-                for path, kind, th, via in disk.check():
-                    if once:
-                        print(f"disk {path} {kind}: {th:g}% を超えた → {via}")
+            if disk and once:
+                # 確認用: 測った値だけを出す（知らせない・印を付けない。常駐の watch の印と知らせを横取りしないため）
+                for path, kind, _used, _total, pct, over in disk.preview():
+                    if kind is None:
+                        print(f"disk {path}: 無い（飛ばす）")
+                    else:
+                        print(f"disk {path} {kind}: {pct:.0f}%" + (f"（{over:g}% を超えている）" if over is not None else ""))
+            elif disk and disk.due(m0):
+                disk.check()
         except Exception as e:  # noqa: BLE001
             log_error(env, "watch", f"disk: {type(e).__name__}: {e}")
         if once:

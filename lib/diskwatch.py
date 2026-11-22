@@ -10,7 +10,9 @@
   起動し直しても同じ知らせを繰り返さない（書けなくても、動いている間は覚えている）。
 - 送り先: notify_role があれば、その役割のセッションに lib/relay.py の WAKERS（cross-session の socket）で 1 通。
   送れない・notify_role が無いときはデスクトップの通知（Linux は notify-send、macOS は osascript）。
-- 大きいもの: path の直下の項目ごとの inode 数の上位 3 つ。TOP_BUDGET 秒で数え終わらなければ省く（見張りを重くしない）。
+- 手がかり: path の直下の項目を名前の頭（数字・乱数の部分を除いた形。tmp*・lua_*・pytest-* など）でまとめた数の
+  上位 3 つと、直下の項目の数。事故の形（直下に小さな一時フォルダがたくさん並ぶ）では、中を数えた上位は
+  tmp0（5）のような小さな数になって原因を指せないので、中には潜らない。TOP_BUDGET 秒で数え終わらなければ省く。
 
 statvfs・時計・送り先・通知は差し替えられる（テストでは偽物）。
 """
@@ -25,7 +27,7 @@ from pathlib import Path
 from rundir import runtime_dir
 
 HYSTERESIS = 10      # 閾値よりこれだけ（ポイント）下がったら、次に超えたときにまた知らせる
-TOP_BUDGET = 1.0     # 大きいものを数える時間の上限（秒）
+TOP_BUDGET = 1.0     # 直下を数える時間の上限（秒）
 TOP_N = 3
 MARK = "[claude-kitty disk]"  # lib/presence.py の MACHINE_MARKS に入れてある（人の入力と数えない）
 KIND_LABEL = {"bytes": "容量", "inodes": "inode"}
@@ -76,52 +78,54 @@ def measure(path, statvfs=os.statvfs):
     return out
 
 
-def top_entries(path, budget=TOP_BUDGET, n=TOP_N, clock=time.monotonic, every=256):
-    """path の直下の項目ごとの inode 数（その項目を含む、下の全部）の上位 n 個 [(名前, 数)]。
-    リンクはたどらず、別のファイルシステムには入らない。budget 秒を超えたら None（省く）。
+_SEP = re.compile(r"[-_.]")
+_MIXED = re.compile(r"[a-z][A-Z]|[A-Z]{2}[a-z]")  # 大文字・小文字の混ざり（kXaPFP など）
 
-    時計は項目を every 個読むごとに見る（直下に一時フォルダが何十万もあるときでも、1 つの大きなフォルダの中でも
-    上限が効き、watch の 1 秒ごとの色の見張りを長く止めない）。直下の一覧もまとめて取らず、読みながら数える。"""
+
+def _random_part(part):
+    """区切りの間の部分が、数字・乱数か（v8・X11 のような短い名前の一部は除く）。"""
+    return (part.isdigit() or (len(part) >= 4 and any(c.isdigit() for c in part))
+            or (len(part) >= 3 and bool(_MIXED.search(part))))
+
+
+def name_group(name):
+    """名前の頭（まとめる鍵）。数字・乱数の部分から先を * にする。
+
+      tmp0・tmpp1rtt87k → tmp*、lua_ab12 → lua_*、pytest-of-x-12 → pytest-of-x-*、claude-1000 → claude-*、
+      pressure-vessel-libs-kXaPFP → pressure-vessel-libs-*、abc123 → abc*、node-compile-cache・.X11-unix → そのまま
+    """
+    if re.fullmatch(r"tmp[a-z0-9_]{8}", name) or (name.startswith("tmp") and len(name) > 3 and not _SEP.match(name[3])):
+        return "tmp*"  # Python の tempfile（tmp + 8 字の乱数。_ も入る）。区切りが無いので頭の 3 字で決める
+    pos = 0
+    for part in _SEP.split(name):
+        if part and _random_part(part):
+            if pos:
+                return name[:pos] + "*"
+            head = re.match(r"[A-Za-z]*", part).group(0)
+            return head + "*" if len(head) >= 2 else "*"  # 区切りの無い頭（abc123 → abc*）
+        pos += len(part) + 1
+    return name
+
+
+def top_groups(path, budget=TOP_BUDGET, n=TOP_N, clock=time.monotonic, every=256):
+    """{"total": 直下の項目の数, "groups": [(名前の頭, 数)] の上位 n 個}。中には潜らない（直下を数えるだけなので速い）。
+    path がリンクならたどった先を数える。budget 秒を超えたら None（省く）。時計は every 個ごとに見る。"""
     end = clock() + budget
-    seen = [0]
-
-    def late():
-        seen[0] += 1
-        return seen[0] % every == 0 and clock() > end
-
-    def is_dir_here(x, dev):
-        try:
-            return x.is_dir(follow_symlinks=False) and x.stat(follow_symlinks=False).st_dev == dev
-        except OSError:
-            return False
-
-    counts = []
+    counts, total = {}, 0
     try:
-        dev = os.lstat(path).st_dev
-        with os.scandir(path) as top:
-            for e in top:
-                if late():
+        with os.scandir(os.path.realpath(path)) as it:
+            for e in it:
+                total += 1
+                if total % every == 0 and clock() > end:
                     return None
-                c = 1
-                stack = [e.path] if is_dir_here(e, dev) else []
-                while stack:
-                    try:
-                        with os.scandir(stack.pop()) as it:
-                            for x in it:
-                                if late():
-                                    return None
-                                c += 1
-                                if is_dir_here(x, dev):
-                                    stack.append(x.path)
-                    except OSError:
-                        pass  # 読めないフォルダは、そのフォルダの 1 つだけ数える
-                counts.append((e.name, c))
+                k = name_group(e.name)
+                counts[k] = counts.get(k, 0) + 1
     except OSError:
         return None
     if clock() > end:
         return None
-    counts.sort(key=lambda x: (-x[1], x[0]))
-    return counts[:n]
+    groups = sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:n]
+    return {"total": total, "groups": groups}
 
 
 def _num(n):
@@ -140,7 +144,8 @@ def message(path, kind, used, total, pct, threshold, top):
     what = "の inode が" if kind == "inodes" else "の容量が"
     text = f"{MARK} {path} {what} {pct:.0f}%（{amount}）。{threshold:g}% を超えました。"
     if top:
-        text += "大きいもの（直下の inode 数）: " + "、".join(f"{name}（{_num(c)}）" for name, c in top) + "。"
+        text += (f"直下は {_num(top['total'])} 項目。多いもの（名前の頭でまとめた数）: "
+                 + "、".join(f"{name}（{_num(c)}）" for name, c in top["groups"]) + "。")
     text += "（claude-kitty の見張りの知らせで、ユーザーが打ったものではない。片付けは中身を確認してから）"
     return text
 
@@ -181,7 +186,7 @@ def wake_send(env, role, text, wakers=None):
 class DiskWatch:
     """1 回の check で、全部の path を測って、新しく超えた閾値を知らせる。"""
 
-    def __init__(self, env, conf, statvfs=os.statvfs, send=None, notify=None, top=top_entries, log=None,
+    def __init__(self, env, conf, statvfs=os.statvfs, send=None, notify=None, top=top_groups, log=None,
                  state_file=None):
         self.env, self.conf = env, conf
         self.statvfs, self.top = statvfs, top
@@ -259,6 +264,10 @@ class DiskWatch:
             text = message(path, kind, used, total, pct, t, top)
             out.append((path, kind, t, self._deliver(text)))
         return out
+
+    def preview(self):
+        """測った値だけ（知らせない・印を付けない。--once の確認用）。status_rows と同じ形。"""
+        return status_rows(self.env, self.conf, self.statvfs)
 
     def _deliver(self, text):
         role = self.conf["notify_role"]

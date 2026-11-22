@@ -680,7 +680,7 @@ def check_model_policy(ctx, rep):
 # ---- ディスクの見張り（claude-state watch の disk_watch） --------------------------------------------
 
 def check_disk(ctx, rep):
-    """各 path の容量と inode の使用率と、閾値を超えているか（statvfs を読むだけ。大きいものは数えない）。"""
+    """各 path の容量と inode の使用率と、閾値を超えているか（statvfs を読むだけ。直下は数えない）。"""
     from config import load_disk_watch_config
     from diskwatch import KIND_LABEL, status_rows
     try:

@@ -15,7 +15,7 @@
   - `tools/install.sh --hooks=model` で hook を入れる（`--all` には入らない。`--uninstall` で外せる）。
 - `claude-state watch` にディスクの使用率の見張りと設定 `disk_watch`: `interval_sec`（既定 60 秒）ごとに `paths`（既定 `["/tmp"]`）の容量と inode の使用率を `os.statvfs` で測り、`thresholds`（既定 70・85 %）を超えたら知らせる。2026-11-23 に /tmp（tmpfs）の inode が 100% になり、全部のセッションでコマンドが起動できなくなった（テストの一時フォルダの残り）ため、その前に人と統括に知らせる（[docs/config.md](docs/config.md#disk_watchclaude-state-watch-ディスクの使用率の見張り)）。
   - 閾値ごとに 1 回だけ。閾値より 10 ポイント下がってからまた超えたら、もう 1 回。知らせた印は `$XDG_RUNTIME_DIR/claude-disk-watch/state.json` に置き、watch を起動し直しても繰り返さない。inode の数を持たないファイルシステム（btrfs など）は inode を見ない。無い path は飛ばす。
-  - 送り先は `notify_role` の役割のセッション（既定 `null` = デスクトップの通知だけ）。claude-relay 第 2 段の起こす部品（`lib/relay.py` の `WAKERS`、cross-session の socket）で 1 通送り、止まっているセッションにも届ける。送れなければデスクトップの通知（`notify-send` / `osascript`）。本文に直下の項目ごとの inode 数の上位 3 つ（1 秒で数え終わらなければ省く）。本文の頭の `[claude-kitty disk]` は claude-presence が人の入力と数えない。
+  - 送り先は `notify_role` の役割のセッション（既定 `null` = デスクトップの通知だけ）。claude-relay 第 2 段の起こす部品（`lib/relay.py` の `WAKERS`、cross-session の socket）で 1 通送り、止まっているセッションにも届ける。送れなければデスクトップの通知（`notify-send` / `osascript`）。本文に、直下の項目を名前の頭（`tmp*`・`lua_*`・`pytest-*` など）でまとめた数の上位 3 つと、直下の項目の数（1 秒で数え終わらなければ省く）。`claude-state watch --once` は測った値を出すだけで、知らせない。本文の頭の `[claude-kitty disk]` は claude-presence が人の入力と数えない。
   - `claude-kitty doctor` に「ディスク: <path>」（使用率と、閾値を超えているか）と「設定: disk_watch」の行。
 
 ### 修正

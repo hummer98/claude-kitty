@@ -345,6 +345,8 @@ def load_disk_watch_config(env, path=None):
     except (OSError, ValueError) as e:
         raise ValueError(f"設定ファイルを読めない: {path}: {e}")
     d = data.get("disk_watch", {}) if isinstance(data, dict) else {}
+    if d is None:
+        d = {}  # "disk_watch": null は書いていないのと同じ（既定で見張る）
     if not isinstance(d, dict):
         raise ValueError(f"{path} の disk_watch がオブジェクトでない")
     unknown = sorted(set(d) - set(DEFAULT_DISK_WATCH))
