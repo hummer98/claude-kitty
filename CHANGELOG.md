@@ -13,6 +13,8 @@
   - `restore` は `config_dir` のある役割を `env CLAUDE_CONFIG_DIR=… claude-wait …` で開く（同じ置き場でないと resume で会話が見つからない）。
   - 設定 `roster.claude`（既定 `{}`）: フォルダ → 開くときに claude の代わりに使うコマンド（`CLAUDE_WAIT_CLAUDE`）。プロジェクトごとの包み（権限のモード・環境の守り）で開き直すため。
   - 見る置き場は kitty のペインの claude と名簿に記録したものだけ（マシンの全部の claude から集めると、macOS では `~/Documents` の下などの保護されたフォルダを読んで止まった）。
+  - 「既定の置き場」は Claude Code の既定（`~/.claude`）と比べる（direnv の効いたシェルから手で save しても落とさない）。claude-wait が待っているだけのペインは claude-wait の環境から読み、/exit したペインや読めなかったときは前の名簿の `config_dir` を引き継ぐ（世代も回す）。
+  - 名簿の `config_dir`・`cwd` に制御文字があれば読まない（セッションファイルに行を足せないように）。`roster.claude` の値は引数なしの実行ファイル（空白・制御文字は断る）。
 
 ## [0.7.6] - 2026-11-23
 

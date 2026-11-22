@@ -97,7 +97,9 @@ def config_dir_of(pid):
     if not d:
         return None
     try:
-        return None if Path(d).resolve() == CLAUDE_HOME.resolve() else d
+        # 比べる相手は Claude Code の既定の置き場（~/.claude）。claude-roster 自身の CLAUDE_CONFIG_DIR と比べると、
+        # direnv が効いたシェルから手で save したとき、そのプロジェクトの役割の config_dir が落ちる
+        return None if Path(d).resolve() == (Path.home() / ".claude").resolve() else d
     except OSError:
         return d
 
@@ -124,7 +126,7 @@ def note_pane_config_dirs(data):
             for w in tab.get("windows", []):
                 for p in w.get("foreground_processes") or []:
                     info = R.parse_argv(p.get("cmdline"))
-                    if info and info["tool"] == "claude":
+                    if info and info["tool"] in ("claude", "claude-wait"):
                         note_config_dirs([config_dir_of(p.get("pid"))])
 
 
@@ -551,6 +553,7 @@ def cmd_restart(args, view, conf):
     if guard_running(view["guard"]):
         die("保護するプロセス（view.guard。全画面のアプリなど）が動いているので止めない", 2)
     sock, data = find_kitty(args.to, view["left"], (rost or {}).get("sessions", {}).keys())
+    note_pane_config_dirs(data)  # まだ名簿に無いプロジェクトのペインでも、その置き場のセッションを読めるように
     if sock is None:
         die("対象の kitty が無い（claude-roster restore）")
     sessions = live_sessions()
@@ -644,6 +647,7 @@ def cmd_sleep(args, view, conf):
     lock = roster_lock()  # 寝かせ終わるまで自動の保存に半端な名簿を書かせない
     old = load_roster()
     sock, data = find_kitty(args.to, left, (old or {}).get("sessions", {}).keys())
+    note_pane_config_dirs(data)
     win = find_pane(data, role) if data else None
     now = time.time()
     sessions = live_sessions()

@@ -154,6 +154,11 @@ def load_state_config(env, path=None):
 DEFAULT_ROSTER = {"models": {}, "ignore": [], "generations": 5, "keep_absent_hours": 24, "claude": {}}
 
 
+def _plain(v):
+    """空でない文字列で、制御文字を含まない。"""
+    return isinstance(v, str) and bool(v) and not any(ord(c) < 32 or ord(c) == 127 for c in v)
+
+
 def load_roster_config(env, path=None):
     """claude-roster の設定 {"models", "ignore", "generations", "keep_absent_hours", "claude"} を返す（無ければ既定）。
 
@@ -176,8 +181,9 @@ def load_roster_config(env, path=None):
     if not isinstance(r.get("ignore", []), list):
         raise ValueError(f"{path} の roster.ignore は役割のリスト")
     c = r.get("claude", {})
-    if not isinstance(c, dict) or not all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in c.items()):
-        raise ValueError(f"{path} の roster.claude は フォルダ→コマンド")
+    if not isinstance(c, dict) or not all(_plain(k) and _plain(v) and not any(ch.isspace() for ch in v)
+                                          for k, v in c.items()):
+        raise ValueError(f"{path} の roster.claude は フォルダ→引数なしの実行ファイル（空白・制御文字は使えない）")
     g = r.get("generations", 5)
     h = r.get("keep_absent_hours", 24)
     if isinstance(g, bool) or not isinstance(g, int) or not 1 <= g <= 50:

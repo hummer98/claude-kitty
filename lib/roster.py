@@ -38,7 +38,7 @@ SID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 ROLE_RE = re.compile(r"^[^\s,/'\"]+$")
 STANDBY = "standby"
 # 署名（変わったかどうか）に入れる項目。status や pid は 5 分ごとに変わるので入れない（世代が無駄に回らないように）
-SIG_KEYS = ("session_id", "cwd", "model", "name", "kind", "absent_since", "sleeping")
+SIG_KEYS = ("session_id", "cwd", "model", "name", "kind", "absent_since", "sleeping", "config_dir")
 SLEEP_KEYS = ("sleeping", "slept_at", "sleep_place")
 SHELLS = {"bash", "zsh", "sh", "dash", "fish"}  # 閉じてよいペインの前面（claude が終わってシェルだけが残った）
 NEXT_MAX_AGE = 300  # 続きの指示のファイルの有効期限（秒）。止められなかったあと、後で /exit したときに勝手に再開しないように
@@ -241,7 +241,9 @@ def build_roster(osw_list, sessions, left, fraction, conf_models=None, settings_
                     "window_id": w.get("id"), "tab": strip_mark(tab.get("title")),
                     "slot": (w.get("user_vars") or {}).get("slot"),
                 }
-                cdir = config_dir_fn(ps["front_pid"] or ps["pid"]) if config_dir_fn and ps["state"] == "running" else None
+                # 動いている claude の置き場。claude-wait が待っているだけのペインは、claude-wait の置き場（同じ環境で開く）
+                cpid = (ps["front_pid"] or ps["pid"]) if ps["state"] == "running" else ps["waiter_pid"] if ps["state"] == "waiting" else None
+                cdir = config_dir_fn(cpid) if config_dir_fn and cpid else None
                 if cdir:
                     entries[role]["config_dir"] = cdir
                 roles.append(role)
@@ -301,9 +303,15 @@ def carry_over(new, old, now, keep_seconds, drop_absent=False):
         prev = old["sessions"].get(role)
         # ほかの役割がいま持っている ID は引き継がない（同じ ID を 2 人に持たせない）
         if prev and not e.get("session_id") and prev.get("session_id") and prev["session_id"] not in held:
-            for k in ("session_id", "model", "model_source", "name", "kind"):
+            for k in ("session_id", "model", "model_source", "name", "kind", "config_dir"):
                 e[k] = prev.get(k)
+            if not e.get("config_dir"):
+                e.pop("config_dir", None)
             e["carried"] = True
+        # 同じ会話で置き場が読めなかった（環境を読めない・ペインの claude が入れ替わる途中）ときは前の置き場を残す
+        elif (prev and e.get("session_id") and e["session_id"] == prev.get("session_id")
+              and not e.get("config_dir") and prev.get("config_dir")):
+            e["config_dir"] = prev["config_dir"]
     tabs = [dict(t, roles=list(t["roles"])) for t in new["tabs"]]
     # 寝ている役割はタブに載っていなくても拾う（手で直した名簿などで、タブから漏れても失わないように）
     listed = [(t_old.get("title"), role) for t_old in old.get("tabs", []) for role in t_old.get("roles", [])]
@@ -359,6 +367,11 @@ def signature(roster):
     return json.dumps({"left": roster.get("left"), "tabs": tabs, "sessions": sess}, sort_keys=True)
 
 
+def has_control(text):
+    """改行などの制御文字を含むか（kitty のセッションファイルは 1 行 1 命令なので、改行で行を足せてしまう）。"""
+    return any(ord(c) < 32 or ord(c) == 127 for c in text)
+
+
 def check_roster(roster):
     """読み込んだ名簿の形を確認する。おかしければ ValueError（壊れた名簿で別のセッションを開かないように）。"""
     if not isinstance(roster, dict) or roster.get("version") != VERSION:
@@ -378,8 +391,11 @@ def check_roster(roster):
         if sid:
             seen[sid] = role
         cdir = e.get("config_dir")
-        if cdir is not None and not (isinstance(cdir, str) and cdir.startswith("/")):
-            raise ValueError(f"{role} の config_dir が絶対パスでない: {cdir!r}")
+        if cdir is not None and not (isinstance(cdir, str) and cdir.startswith("/") and not has_control(cdir)):
+            raise ValueError(f"{role} の config_dir が絶対パスでない（か制御文字を含む）: {cdir!r}")
+        cwd = e.get("cwd")
+        if cwd is not None and not (isinstance(cwd, str) and not has_control(cwd)):
+            raise ValueError(f"{role} の cwd に制御文字がある: {cwd!r}")
     for t in roster["tabs"]:
         for role in t.get("roles", []):
             if role not in sess:

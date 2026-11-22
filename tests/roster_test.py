@@ -240,6 +240,96 @@ class ConfigDir(unittest.TestCase):
         with self.assertRaises(ValueError):
             R.check_roster(json.loads(json.dumps(r)))
 
+    def test_check_rejects_control_chars(self):
+        # kitty のセッションファイルは 1 行 1 命令なので、改行で行を足せないように
+        for key, val in (("config_dir", "/p/.config\nlaunch evil"), ("cwd", "/p\nlaunch evil")):
+            r = built()
+            r["sessions"]["a"][key] = val
+            with self.assertRaises(ValueError, msg=key):
+                R.check_roster(json.loads(json.dumps(r)))
+
+    def test_waiting_pane_reads_config_dir_of_claude_wait(self):
+        osw = [{"tabs": [{"title": "t", "windows": [
+            win(3, "z", [proc(101, "python3", "/u/claude-wait", "z", SID_C)])]}]}]
+        r = R.build_roster(osw, [], "lead", tab_pane_fraction, config_dir_fn={101: "/p/blog/.config"}.get)
+        self.assertEqual(r["sessions"]["z"]["config_dir"], "/p/blog/.config")
+
+    def test_carry_over_keeps_config_dir(self):
+        old = built()
+        old["sessions"]["a"]["config_dir"] = "/p/blog/.config"
+        old["sessions"]["c"]["config_dir"] = "/p/dear/.config"
+        new = built()
+        new["sessions"]["a"].update(session_id=None, state="shell")  # /exit してシェルに戻った
+        new["sessions"]["c"].pop("config_dir", None)                # 同じ会話だが置き場が読めなかった
+        got = R.carry_over(new, old, 200.0, 3600)["sessions"]
+        self.assertEqual((got["a"]["session_id"], got["a"]["config_dir"]), (old["sessions"]["a"]["session_id"], "/p/blog/.config"))
+        self.assertEqual(got["c"]["config_dir"], "/p/dear/.config")
+        self.assertIn("config_dir", R.SIG_KEYS)  # 置き場が変われば世代を回す
+
+
+class RosterClaudeConfig(unittest.TestCase):
+    def test_bad_shapes_rejected(self):
+        from config import load_roster_config
+        with tempfile.TemporaryDirectory() as t:
+            path = Path(t) / "config.json"
+            good = {"/p/blog": "~/bin/claude-bypass"}
+            path.write_text(json.dumps({"roster": {"claude": good}}))
+            self.assertEqual(load_roster_config({}, path)["claude"], good)
+            for bad in ({"/p": "~/bin/wrap --flag"}, {"/p": ""}, {"/p": "/bin/x\nlaunch"}, {"/p\n": "/bin/x"},
+                        {"/p": 1}, ["/p"]):
+                path.write_text(json.dumps({"roster": {"claude": bad}}))
+                with self.assertRaises(ValueError, msg=bad):
+                    load_roster_config({}, path)
+
+
+class ConfigDirBin(unittest.TestCase):
+    """bin/claude-roster の置き場の読み方（config_dir_of・ほかの置き場の sessions と会話の記録）。"""
+
+    def setUp(self):
+        import importlib.machinery as m
+        import importlib.util as u
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        (self.d / "home/.claude").mkdir(parents=True)
+        self.proj = self.d / "proj/.config"
+        (self.proj / "sessions").mkdir(parents=True)
+        (self.proj / "projects/-proj").mkdir(parents=True)
+        env = {"HOME": str(self.d / "home"), "CLAUDE_CONFIG_DIR": str(self.proj),  # 自分は direnv の効いたシェルから
+               "CLAUDE_SESSIONS_DIR": str(self.d / "none/sessions"), "CLAUDE_PROJECTS_DIR": str(self.d / "none/projects"),
+               "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        self.patch = mock.patch.dict(os.environ, env, clear=True)
+        self.patch.start()
+        loader = m.SourceFileLoader("claude_roster_bin", str(ROOT / "bin/claude-roster"))
+        self.b = u.module_from_spec(u.spec_from_loader("claude_roster_bin", loader))
+        loader.exec_module(self.b)
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def test_config_dir_of_compares_with_default_home(self):
+        envs = {1: {"CLAUDE_CONFIG_DIR": str(self.proj)}, 2: {"CLAUDE_CONFIG_DIR": str(self.d / "home/.claude")}, 3: {}}
+        self.b.proc.environ = envs.get
+        # claude-roster 自身の CLAUDE_CONFIG_DIR と同じでも、既定（~/.claude）でなければ記録する
+        self.assertEqual(self.b.config_dir_of(1), str(self.proj))
+        self.assertIsNone(self.b.config_dir_of(2))
+        self.assertIsNone(self.b.config_dir_of(3))
+        self.assertIsNone(self.b.config_dir_of(None))
+
+    def test_reads_sessions_and_transcript_of_noted_dir(self):
+        pid = os.getpid()
+        st = self.b.start_time(pid)
+        (self.proj / "sessions" / f"{pid}.json").write_text(json.dumps(
+            {"pid": pid, "sessionId": SID_A, "procStart": st if isinstance(st, str) else None, "status": "idle"}))
+        (self.proj / "projects/-proj" / f"{SID_A}.jsonl").write_text(json.dumps(
+            {"type": "assistant", "message": {"model": "claude-opus-5-5", "role": "assistant", "content": []}}) + "\n")
+        self.assertEqual(self.b.live_sessions(), [])  # 覚えていない置き場は読まない
+        self.assertIsNone(self.b.transcript_model(SID_A))
+        self.b.note_config_dirs([str(self.proj)])
+        self.assertEqual([s["sessionId"] for s in self.b.live_sessions()], [SID_A])
+        self.assertEqual(self.b.transcript_model(SID_A), "claude-opus-5-5")
+
 
 class SessionFile(unittest.TestCase):
     def roster(self):

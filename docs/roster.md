@@ -57,9 +57,9 @@ claude-roster show [--from FILE]   # 名簿の中身
 
 プロジェクトごとに `CLAUDE_CONFIG_DIR` で設定の置き場を分けている（direnv の `.envrc` など）と、セッションの記録と会話の記録はその置き場にある。
 
-- `save` は、ペインの claude が起動したときの `CLAUDE_CONFIG_DIR` を読み、既定の置き場でなければ名簿の役割に `config_dir` として残す（セッションの記録とモデルもその置き場から読む）。
+- `save` は、ペインの claude が起動したときの `CLAUDE_CONFIG_DIR` を読み、Claude Code の既定の置き場（`~/.claude`）でなければ名簿の役割に `config_dir` として残す（セッションの記録とモデルもその置き場から読む）。claude-wait が待っているだけのペインは claude-wait の環境から読む。/exit してシェルに戻ったペインや、置き場が読めなかったときは、前の名簿の `config_dir` を引き継ぐ。
 - `restore` は、`config_dir` のある役割を `env CLAUDE_CONFIG_DIR=<置き場> claude-wait …` で開く（同じ置き場で resume しないと会話が見つからない）。
-- 開くときに claude の代わりに使うコマンド（権限のモードや環境の守りを決めた包み）は、設定の `roster.claude`（フォルダ → コマンド）で決める。当たれば `CLAUDE_WAIT_CLAUDE=<コマンド>` を付ける（[config.md](config.md#roster)）。
+- 開くときに claude の代わりに使う、引数なしの実行ファイル（権限のモードや環境の守りを決めた包み）は、設定の `roster.claude`（フォルダ → コマンド）で決める。当たれば `CLAUDE_WAIT_CLAUDE=<コマンド>` を付ける（[config.md](config.md#roster)）。
 - 見る置き場は、kitty のペインにいる claude の置き場と名簿に記録した置き場だけ。マシンの全部の claude からは集めない（関係の無い置き場まで読むと、macOS では保護されたフォルダで止まる）。
 
 ## 自動の保存
