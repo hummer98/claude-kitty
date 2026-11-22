@@ -1180,11 +1180,10 @@ json.dump(roster.exit_payload(pid, {SID_A!r}, time.time()), open({str(self.d / '
         self.roster("wake", "a", ok=(1,))  # もう寝ていない
 
     def test_sleep_with_previous_claude_wait_closes_its_shell(self):
-        # 前の版（main の 2f030ba）の claude-wait: 「終わる」の指示を断ってシェルに戻る。開き直さず、残ったシェルを閉じる
-        old = self.d / "old"
-        old.mkdir()
-        subprocess.run(f"git -C {shlex.quote(str(ROOT))} archive 2f030ba bin/claude-wait lib | tar -x -C {shlex.quote(str(old))}",
-                       shell=True, check=True)
+        # 前の版（v0.7.4）の claude-wait: 「終わる」の指示を断ってシェルに戻る。開き直さず、残ったシェルを閉じる。
+        # git の履歴でなく写しから動かす（CI の checkout は履歴を 1 つしか取らない）。lib も写しのもの（前の版の read_next）
+        old = ROOT / "tests/fixtures/claude-wait-0.7.4"
+        self.assertIn("v0.7.4", (old / "bin/claude-wait").read_text().splitlines()[1])
         shell = self.d / "oldbin/bash"  # 戻る先のシェル（本物の bash。HOME を仮のものにして、入力を開いたままにする）
         shell.parent.mkdir()
         shell.symlink_to(shutil.which("bash"))
