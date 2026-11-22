@@ -333,7 +333,7 @@ def load_disk_watch_config(env, path=None):
 
       {"disk_watch": {"paths": ["/tmp", "$XDG_RUNTIME_DIR", "~/.cache/cc-tmp"], "notify_role": "main"}}
 
-    paths の ~ と $VAR は使うときに展開する（無い path は飛ばす）。thresholds は 1〜100 の数で、小さい順・重なり無しに
+    paths の ~ と $VAR は使うときに展開する（無い path は飛ばす）。thresholds は 20〜100 の数で、小さい順・重なり無しに
     そろえる。壊れていれば ValueError（watch は見張りだけを止めて errors.log に残す）。"""
     import re
     path = Path(path) if path else config_path(env)
@@ -347,6 +347,9 @@ def load_disk_watch_config(env, path=None):
     d = data.get("disk_watch", {}) if isinstance(data, dict) else {}
     if not isinstance(d, dict):
         raise ValueError(f"{path} の disk_watch がオブジェクトでない")
+    unknown = sorted(set(d) - set(DEFAULT_DISK_WATCH))
+    if unknown:  # "threshold" などの書き間違いで、黙って既定のまま動かない
+        raise ValueError(f"{path} の disk_watch に知らない項目: {', '.join(unknown)}")
     e = d.get("enabled", True)
     if not isinstance(e, bool):
         raise ValueError(f"{path} の disk_watch.enabled は true / false: {e!r}")
@@ -355,8 +358,9 @@ def load_disk_watch_config(env, path=None):
         raise ValueError(f"{path} の disk_watch.paths は空でない文字列のリスト（[\"/tmp\"] など）: {ps!r}")
     ts = d.get("thresholds", DEFAULT_DISK_WATCH["thresholds"])
     if not (isinstance(ts, list) and ts
-            and all(isinstance(x, (int, float)) and not isinstance(x, bool) and 1 <= x <= 100 for x in ts)):
-        raise ValueError(f"{path} の disk_watch.thresholds は 1〜100 の数のリスト（[70, 85] など）: {ts!r}")
+            and all(isinstance(x, (int, float)) and not isinstance(x, bool) and 20 <= x <= 100 for x in ts)):
+        # 20 より下は、10 ポイント下がるのを待つ戻りの幅に対して小さすぎる（10 以下は二度と知らせなくなる）
+        raise ValueError(f"{path} の disk_watch.thresholds は 20〜100 の数のリスト（[70, 85] など）: {ts!r}")
     role = d.get("notify_role")
     if role is not None and not (isinstance(role, str) and re.match(RELAY_NAME, role)):
         raise ValueError(f"{path} の disk_watch.notify_role は役割名（英数字と . _ -、64 字まで）か null: {role!r}")

@@ -76,41 +76,50 @@ def measure(path, statvfs=os.statvfs):
     return out
 
 
-def top_entries(path, budget=TOP_BUDGET, n=TOP_N, clock=time.monotonic):
+def top_entries(path, budget=TOP_BUDGET, n=TOP_N, clock=time.monotonic, every=256):
     """path の直下の項目ごとの inode 数（その項目を含む、下の全部）の上位 n 個 [(名前, 数)]。
-    リンクはたどらず、別のファイルシステムには入らない。budget 秒を超えたら None（省く）。"""
+    リンクはたどらず、別のファイルシステムには入らない。budget 秒を超えたら None（省く）。
+
+    時計は項目を every 個読むごとに見る（直下に一時フォルダが何十万もあるときでも、1 つの大きなフォルダの中でも
+    上限が効き、watch の 1 秒ごとの色の見張りを長く止めない）。直下の一覧もまとめて取らず、読みながら数える。"""
     end = clock() + budget
+    seen = [0]
+
+    def late():
+        seen[0] += 1
+        return seen[0] % every == 0 and clock() > end
+
+    def is_dir_here(x, dev):
+        try:
+            return x.is_dir(follow_symlinks=False) and x.stat(follow_symlinks=False).st_dev == dev
+        except OSError:
+            return False
+
+    counts = []
     try:
         dev = os.lstat(path).st_dev
-        with os.scandir(path) as it:
-            top = list(it)
-    except OSError:
-        return None
-    counts = []
-    for e in top:
-        c = 1
-        try:
-            if e.is_dir(follow_symlinks=False) and e.stat(follow_symlinks=False).st_dev == dev:
-                stack = [e.path]
+        with os.scandir(path) as top:
+            for e in top:
+                if late():
+                    return None
+                c = 1
+                stack = [e.path] if is_dir_here(e, dev) else []
                 while stack:
-                    if clock() > end:
-                        return None
                     try:
                         with os.scandir(stack.pop()) as it:
                             for x in it:
+                                if late():
+                                    return None
                                 c += 1
-                                try:
-                                    if x.is_dir(follow_symlinks=False) and x.stat(follow_symlinks=False).st_dev == dev:
-                                        stack.append(x.path)
-                                except OSError:
-                                    pass
+                                if is_dir_here(x, dev):
+                                    stack.append(x.path)
                     except OSError:
                         pass  # 読めないフォルダは、そのフォルダの 1 つだけ数える
-        except OSError:
-            pass
-        counts.append((e.name, c))
-        if clock() > end:
-            return None
+                counts.append((e.name, c))
+    except OSError:
+        return None
+    if clock() > end:
+        return None
     counts.sort(key=lambda x: (-x[1], x[0]))
     return counts[:n]
 
@@ -239,12 +248,14 @@ class DiskWatch:
                     sent.append((path, kind, max(new), m[kind]))
         if changed:
             self._save()  # 送る前に書く（送っている途中で落ちても、起動し直して同じ知らせを繰り返さない）
-        out = []
+        out, tops = [], {}
         for path, kind, t, (used, total, pct) in sent:
-            try:
-                top = self.top(path)
-            except Exception:  # noqa: BLE001
-                top = None
+            if path not in tops:  # 容量と inode が同時に超えても、数えるのは path ごとに 1 回
+                try:
+                    tops[path] = self.top(path)
+                except Exception:  # noqa: BLE001
+                    tops[path] = None
+            top = tops[path]
             text = message(path, kind, used, total, pct, t, top)
             out.append((path, kind, t, self._deliver(text)))
         return out

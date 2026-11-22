@@ -114,8 +114,13 @@ class OncePerThreshold(Base):
 
     def test_bytes_and_inodes_are_separate(self):
         fs = FakeFs(**{self.p: vfs(bytes_pct=71, inode_pct=71)})
-        out = self.watch(fs).check()
+        w = self.watch(fs)
+        counted = []
+        w.top = lambda p: counted.append(p) or [("a", 1)]
+        out = w.check()
         self.assertEqual(sorted(k for _p, k, _t, _v in out), ["bytes", "inodes"])
+        self.assertEqual(counted, [self.p])  # 大きいものは path ごとに 1 回だけ数える
+        self.assertTrue(all("a（1）" in text for _r, text in self.sent))
 
     def test_top_omitted_when_none(self):
         text = DW.message("/tmp", "inodes", 10, 100, 72.0, 70, None)
@@ -349,6 +354,36 @@ class WakeParts(unittest.TestCase):
             self.assertEqual(lines[0], {"type": "auth", "token": "tok"})
             self.assertEqual(lines[1]["message"]["content"], text)
 
+    def test_default_send_uses_relay_wakers(self):
+        """DiskWatch の既定の送り先が relay.WAKERS を通る（env と役割と本文が部品に渡る）。"""
+        import relay
+        got = []
+
+        class W:
+            name = "fake"
+
+            def available(self, env, role):
+                return True
+
+            def wake(self, env, role, text):
+                got.append((env.get("HOME"), role, text))
+                return True
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t) / "w"
+            d.mkdir()
+            c = conf(paths=[str(d)], notify_role="aom-master")
+            w = DW.DiskWatch({"HOME": t, "XDG_RUNTIME_DIR": t}, c, statvfs=lambda p: vfs(inode_pct=72),
+                             notify=lambda text: self.fail("通知に落ちた"), top=lambda p: None)
+            old = relay.WAKERS
+            relay.WAKERS = [W()]
+            try:
+                self.assertEqual(w.check(), [(str(d), "inodes", 70, "fake")])
+            finally:
+                relay.WAKERS = old
+            self.assertEqual(got[0][:2], (t, "aom-master"))
+            self.assertTrue(got[0][2].startswith("[claude-kitty disk]"))
+            self.assertTrue((Path(t) / "claude-disk-watch" / "state.json").exists())
+
     def test_message_is_not_counted_as_human(self):
         from presence import is_human
         text = DW.message("/tmp", "inodes", 1, 2, 72.0, 70, None)
@@ -389,8 +424,36 @@ class TopEntries(unittest.TestCase):
                 (Path(t) / f"d{i}").mkdir()
                 (Path(t) / f"d{i}" / "x").write_text("")
             ticks = iter(range(0, 1000))
-            self.assertIsNone(DW.top_entries(t, budget=1.0, clock=lambda: float(next(ticks))))
+            self.assertIsNone(DW.top_entries(t, budget=1.0, clock=lambda: float(next(ticks)), every=1))
             self.assertIsNone(DW.top_entries(t + "/none"))
+
+    def test_budget_applies_inside_one_big_folder(self):
+        """直下が 1 つでも、その中が大きければ途中で止める（事故のときの形: 1 つのフォルダに何十万も）。"""
+        with tempfile.TemporaryDirectory() as t:
+            big = Path(t) / "big"
+            big.mkdir()
+            for i in range(2000):
+                (big / f"f{i}").write_text("")
+            calls = []
+
+            def clock():
+                calls.append(1)
+                return float(len(calls))  # 見るたびに 1 秒進む
+            self.assertIsNone(DW.top_entries(t, budget=3.0, clock=clock, every=256))
+            self.assertLessEqual(len(calls), 5)  # 3 秒を超えたところで止まった（2000 個を全部は読まない）
+            self.assertEqual(DW.top_entries(t), [("big", 2001)])
+
+    def test_budget_applies_to_many_top_level_entries(self):
+        with tempfile.TemporaryDirectory() as t:
+            for i in range(1000):
+                (Path(t) / f"f{i}").write_text("")
+            calls = []
+
+            def clock():
+                calls.append(1)
+                return float(len(calls))
+            self.assertIsNone(DW.top_entries(t, budget=2.0, clock=clock, every=256))
+            self.assertLessEqual(len(calls), 4)
 
 
 class Config(unittest.TestCase):
@@ -424,7 +487,8 @@ class Config(unittest.TestCase):
                {"thresholds": [0]}, {"thresholds": [101]}, {"thresholds": ["70"]}, {"thresholds": [True]},
                {"thresholds": 70}, {"notify_role": ""}, {"notify_role": "-x"}, {"notify_role": "a b"},
                {"notify_role": 3}, {"interval_sec": 0}, {"interval_sec": 1}, {"interval_sec": True},
-               {"interval_sec": "60"}]
+               {"interval_sec": "60"}, {"thresholds": [10]}, {"thresholds": [19.5]}, {"threshold": [70]},
+               {"path": ["/tmp"]}]
         for b in bad:
             with self.subTest(b=b):
                 with self.assertRaises(ValueError):
