@@ -50,7 +50,7 @@ def hook_installed(env):
 
 def status(env, recent=5, now=None):
     from config import load_model_policy
-    from presence import idle_minutes, is_away, load_last, presence_dir, recent_switches
+    from presence import denial_counts, idle_minutes, is_away, load_last, presence_dir, recent_switches
     now = time.time() if now is None else now
     last = load_last(env)
     try:
@@ -62,7 +62,7 @@ def status(env, recent=5, now=None):
     return {"last": last, "idle_minutes": None if m is None else round(m, 1),
             "away": is_away(last, now, policy) if last else None,
             "policy": policy, "policy_error": error, "hook": hook_installed(env),
-            "recent": recent_switches(env, recent), "dir": str(presence_dir(env))}
+            "recent": recent_switches(env, recent), "denials": denial_counts(env), "dir": str(presence_dir(env))}
 
 
 def fmt_time(t):
@@ -96,6 +96,9 @@ def format_status(s):
             out.append(f"  {r.get('at', '?')}  {who}  {r.get('from') or '（指定なし）'} → {r.get('to')}  {r.get('description') or ''}".rstrip())
     else:
         out.append("直近の切り替え: 無い")
+    dc = s["denials"]
+    if dc["denied"]:
+        out.append(f"断った呼び出し: {dc['denied']} 件、うち出し直しで切り替わった {dc['switched']} 件（記録にある分）")
     return "\n".join(out)
 
 

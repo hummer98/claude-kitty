@@ -152,8 +152,11 @@ def _recent_match(records, sid, key, now):
 
 
 def recent_denial(env, sid, prompt, now):
-    """同じセッションの同じ prompt を RETRY_SECONDS 以内に断ったなら、その記録（出し直しの呼び出し）。"""
-    return _recent_match(read_log(env, DENIALS, 50), sid, prompt_key(prompt), now)
+    """同じセッションの同じ prompt を RETRY_SECONDS 以内に断ったなら、その記録（出し直しの呼び出し）。
+
+    件数でなく時間で絞る（ほかのセッションの断りが多くても見失わない）。記録があるのに読めなければ OSError を出す
+    （呼ぶ側は断らずに通す。読めないまま断ると、2 度目を見分けられず断り続けるため）。"""
+    return _recent_match(read_log(env, DENIALS, None, since=now - RETRY_SECONDS, strict=True), sid, prompt_key(prompt), now)
 
 
 def decide(payload, policy, last, now):
@@ -192,32 +195,59 @@ def append_log(env, name, entry):
             os.replace(p, p.with_name(p.name + ".1"))
     except FileNotFoundError:
         pass
-    fd = os.open(str(p), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    fd = os.open(str(p), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+b") as f:
+        # 前の書き込みが改行の前で切れていたら、この記録がその行につながって読めなくならないよう区切る
+        head = b""
+        if f.seek(0, os.SEEK_END) > 0:
+            f.seek(-1, os.SEEK_END)
+            if f.read(1) != b"\n":
+                head = b"\n"
+        f.write(head + (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
 def append_switch(env, entry):
     append_log(env, SWITCHES, entry)
 
 
-def read_log(env, name, n):
+def read_log(env, name, n, since=None, strict=False):
+    """記録（古い順。回した .1 も含む）の最後の n 件（None なら全部）。since があれば t がそれ以後のものだけ。
+    strict なら、無いのでなく読めないファイルで OSError を出す。"""
     p = presence_dir(env) / name
     out = []
     for name in (p.name + ".1", p.name):
         try:
             # 書きかけで切れた行が 1 つあっても、ほかの行は読む（断りの記録を見失うと断りがくり返される）
             lines = (p.parent / name).read_text(encoding="utf-8", errors="replace").splitlines()
+        except FileNotFoundError:
+            continue
         except OSError:
+            if strict:
+                raise
             continue
         for line in lines:
             try:
                 j = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(j, dict):
-                out.append(j)
+            if not isinstance(j, dict):
+                continue
+            if since is not None:
+                t = j.get("t")
+                if isinstance(t, bool) or not isinstance(t, (int, float)) or t < since:
+                    continue
+            out.append(j)
+    if n is None:
+        return out
     return out[-n:] if n > 0 else []
+
+
+def denial_counts(env):
+    """記録にある断りの数と、そのうち away_model での出し直しが通った（切り替わった）数。"""
+    denials = read_log(env, DENIALS, None)
+    done = {(r.get("session_id"), r.get("prompt_key"), r.get("denied_at")) for r in read_log(env, SWITCHES, None)}
+    switched = sum(1 for d in denials if (d.get("session_id"), d.get("prompt_key"), d.get("at")) in done)
+    return {"denied": len(denials), "switched": switched}
 
 
 def recent_switches(env, n=5):
@@ -261,8 +291,7 @@ def note_retry(env, payload, policy, now):
     if d is None:
         return
     key = prompt_key(ti["prompt"])
-    later = [r for r in recent_switches(env, 50) if isinstance(r.get("t"), (int, float)) and r["t"] >= d["t"]]
-    if _recent_match(later, sid, key, now):
+    if _recent_match(read_log(env, SWITCHES, None, since=d["t"]), sid, key, now):
         return  # この断りの出し直しは記録済み（同じものを 2 度出し直した）
     append_switch(env, _entry(env, payload, now, sid, **{k: d.get(k) for k in ("from", "description", "idle_minutes")},
                               to=ti["model"], prompt_key=key, denied_at=d.get("at")))
@@ -295,8 +324,12 @@ def run_hook(text, env, now=None, policy_loader=None):
             log_error(env, "hook", f"{SWITCHES} に書けない: {type(e).__name__}: {e}")
         return None
     sid = payload.get("session_id")
-    if recent_denial(env, sid, payload["tool_input"]["prompt"], now):
-        return None  # 断ったのに元の model のまま出し直した: もう断らない
+    try:
+        if recent_denial(env, sid, payload["tool_input"]["prompt"], now):
+            return None  # 断ったのに元の model のまま出し直した: もう断らない
+    except OSError as e:
+        log_error(env, "hook", f"{DENIALS} が読めないので断らない: {type(e).__name__}: {e}")
+        return None
     try:
         append_log(env, DENIALS, _entry(env, payload, now, sid, **{k: d[k] for k in ("from", "to", "description")},
                                         idle_minutes=round(d["idle_minutes"], 1),

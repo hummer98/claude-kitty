@@ -175,8 +175,8 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 - 止めるのは離席中の実装の呼び出しだけ。変えないもの（呼び出しどおりに通す）: 在席中、記録が無い（一度も人が打っていない）、`keep` の語を含む、`subagent_type` が `claude-code-guide`・`Explore`・`Plan`・`web-fetch`・`fork`、`model` が `fable` か既に `away_model`、設定が壊れている、hook の途中で何かが失敗した。
 - 切り替えの仕方: 入力は書き換えない。PreToolUse の `hookSpecificOutput.permissionDecision: "deny"` で呼び出しを断り、`permissionDecisionReason` で「離席中なので model を `away_model` にして同じ呼び出しを出し直してください（ほかの項目はそのまま）」と頼む。Claude が `model: "haiku"` で出し直したものは、既に `away_model` なので通る。`updatedInput` で書き換えないのは、auto mode では hook が入力を変えると判定が「a hook changed this call's input after auto mode reviewed it」で無効になって断られ、同じ返答のほかの呼び出し（Bash など）まで「another call in this response was changed after auto mode reviewed it」で断られたため（実測）。deny は判定なので入力の書き換えにはならず、ほかの呼び出しを巻き込まない見込み（実機の auto mode ではまだ確かめていない）。
 - 2 度は断らない: 同じセッションの同じ `prompt` を 300 秒以内に断っていたら、元の model のまま（または model を外して）出し直したものも通す（Claude が従わなかったとき・人が model を指定したときに、断りをくり返して作業を止めないため）。断りの文ではこのことを知らせない（毎回そう出し直されると切り替わらないため）。
-- 記録: 断ったら `<置き場>/claude-presence/denials.jsonl` に、時刻・セッション・役割・元と新しい model・description・prompt の hash を残す。出し直しが `away_model` で通ったら `<置き場>/claude-presence/switches.jsonl` に、同じ項目と断った時刻（`denied_at`）を残す。切り替えの記録は、実際に軽い model で動いた呼び出しだけにするため、断ったときでなく出し直しが通ったときに書く（従わずに元の model で通ったもの、`prompt` を変えて出し直したものは載らない）。断った記録が書けないときは、2 度目を見分けられないので断らずに通す。
-- `claude-presence [--json] [--recent N]` で、最後に人が打ってからの分数・在席/離席・どのセッションか・設定・hook・直近の切り替えを見る。`claude-kitty doctor` の「モデルの切り替え」の行が、有効か・hook が入っているかを出す。
+- 記録: 断ったら `<置き場>/claude-presence/denials.jsonl` に、時刻・セッション・役割・元と新しい model・description・prompt の hash を残す。出し直しが `away_model` で通ったら `<置き場>/claude-presence/switches.jsonl` に、同じ項目と断った時刻（`denied_at`）を残す。切り替えの記録は、実際に軽い model で動いた呼び出しだけにするため、断ったときでなく出し直しが通ったときに書く（従わずに元の model で通ったもの、`prompt` を変えて出し直したものは載らない）。断った記録が書けない・読めないときは、2 度目を見分けられないので断らずに通す。2 度目の見分けは、件数でなく 300 秒の内の記録（回した `.1` も）で探す（ほかのセッションの断りが多くても見失わない）。
+- `claude-presence [--json] [--recent N]` で、最後に人が打ってからの分数・在席/離席・どのセッションか・設定・hook・直近の切り替え・断った数（うち出し直しで切り替わった数。`--json` では `denials`）を見る。`claude-kitty doctor` の「モデルの切り替え」の行が、有効か・hook が入っているかを出す。
 
 ## 設定ファイルの外のもの
 

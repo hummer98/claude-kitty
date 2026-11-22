@@ -248,6 +248,70 @@ class HookRun(unittest.TestCase):
         log.write_bytes(b'{"half": "\xe3\x81\n' + log.read_bytes())
         self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 10))
 
+    def test_unreadable_denial_log_lets_the_call_through(self):
+        # 書けるが読めない（chmod 200）とき、断りを見分けられないまま断り続けない
+        if os.geteuid() == 0:
+            self.skipTest("root は読める")
+        self.away()
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        log = self.d / "claude-presence" / P.DENIALS
+        log.chmod(0o200)
+        try:
+            for i in range(3):
+                self.assertIsNone(P.run_hook(json.dumps(agent(model="opus", prompt=f"別 {i}")), self.env, now=NOW + i), i)
+        finally:
+            log.chmod(0o600)
+        self.assertIn("読めないので断らない", (self.d / "claude-presence" / "errors.log").read_text())
+
+    def test_unterminated_last_line_does_not_swallow_next_record(self):
+        # 前の書き込みが改行の前で切れていても、次の断りの記録は別の行になり、出し直しを 1 回余分に断らない
+        self.away()
+        log = self.d / "claude-presence" / P.DENIALS
+        log.parent.mkdir(exist_ok=True)
+        log.write_text('{"cut": ')
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 5))
+        self.assertEqual(len(self.denials()), 1)
+        P.append_switch(self.env, {"i": 1})
+        P.append_switch(self.env, {"i": 2})
+        self.assertEqual(log.read_text().count("\n"), 2)  # 切れた行 + 記録の 1 行
+        self.assertEqual([r.get("i") for r in P.recent_switches(self.env, 10)], [1, 2])
+
+    def test_denial_found_among_many_other_sessions(self):
+        # ほかのセッションの断りが 50 件より多くても、時間の内の自分の断りを見失わない
+        self.away()
+        self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+        for i in range(80):
+            other = dict(agent(model="opus", prompt=f"p{i}"), session_id=f"o{i}")
+            self.assertIsNotNone(P.run_hook(json.dumps(other), self.env, now=NOW + 1))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 2))
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 3))
+        self.assertEqual(len(P.recent_switches(self.env)), 1)
+
+    def test_denial_found_after_rotation(self):
+        self.away()
+        old = P.LOG_MAX
+        P.LOG_MAX = 300
+        try:
+            self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
+            for i in range(3):  # 回して、自分の断りを denials.jsonl.1 に送る
+                other = dict(agent(model="opus", prompt=f"p{i}"), session_id=f"o{i}")
+                self.assertIsNotNone(P.run_hook(json.dumps(other), self.env, now=NOW + 1))
+        finally:
+            P.LOG_MAX = old
+        d = self.d / "claude-presence"
+        self.assertIn('"session_id": "s1"', (d / (P.DENIALS + ".1")).read_text())
+        self.assertNotIn('"session_id": "s1"', (d / P.DENIALS).read_text())
+        self.assertIsNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW + 2))
+
+    def test_denial_counts(self):
+        self.away()
+        self.assertEqual(P.denial_counts(self.env), {"denied": 0, "switched": 0})
+        P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW)
+        P.run_hook(json.dumps(agent(model="opus", prompt="別")), self.env, now=NOW + 1)
+        P.run_hook(json.dumps(agent(model="haiku")), self.env, now=NOW + 2)  # 1 件目だけ従った
+        self.assertEqual(P.denial_counts(self.env), {"denied": 2, "switched": 1})
+
     def test_unwritable_switch_log_lets_the_retry_through(self):
         self.away()
         self.assertIsNotNone(P.run_hook(json.dumps(agent(model="opus")), self.env, now=NOW))
@@ -486,6 +550,13 @@ class PresenceCli(unittest.TestCase):
         text = self.run_()
         for want in ("判定: 離席", "役割 main", "有効", "haiku", "dev-a  opus → haiku  Implement"):
             self.assertIn(want, text)
+        self.assertNotIn("断った呼び出し", text)  # 断りが無ければ出さない
+        self.assertEqual(s["denials"], {"denied": 0, "switched": 0})
+        P.append_log(self.env, P.DENIALS, {"at": "x", "t": 1, "session_id": "s1", "prompt_key": "k"})
+        P.append_log(self.env, P.DENIALS, {"at": "y", "t": 2, "session_id": "s1", "prompt_key": "k2"})
+        P.append_switch(self.env, {"at": "z", "t": 3, "session_id": "s1", "prompt_key": "k", "denied_at": "x", "to": "haiku"})
+        self.assertIn("断った呼び出し: 2 件、うち出し直しで切り替わった 1 件", self.run_())
+        self.assertEqual(json.loads(self.run_("--json"))["denials"], {"denied": 2, "switched": 1})
         self.cfg.write_text('{"model_policy": {"away_minutes": -1}}')
         s = json.loads(self.run_("--json"))
         self.assertIn("away_minutes", s["policy_error"])
