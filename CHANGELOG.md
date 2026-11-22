@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-23
+
 ### 追加
 
 - `claude-presence`（新しいコマンド）と設定 `model_policy`（既定は無効）: 人がいるかを最後に人が打ってからの時間で決め、離席中（既定 20 分）は実装のサブエージェント（Agent ツール）の `model` を軽いもの（既定 `haiku`）に変える。離席中の作業はトークンの少ない方で、人がいるときは呼び出しどおり（速さ優先）にするため（[docs/config.md](docs/config.md#model_policyclaude-presence-離席中のサブエージェントのモデル)）。
@@ -18,6 +20,10 @@
   - 送り先は `notify_role` の役割のセッション（既定 `null` = デスクトップの通知だけ）。claude-relay 第 2 段の起こす部品（`lib/relay.py` の `WAKERS`、cross-session の socket）で 1 通送り、止まっているセッションにも届ける。送れなければデスクトップの通知（`notify-send` / `osascript`）。本文に、直下の項目を名前の頭（`tmp*`・`lua_*`・`pytest-*` など）でまとめた数の上位 3 つと、直下の項目の数。直下が少なければ、直下のフォルダごとの中の数の上位 2 つも（1 秒で数え終わらなければ省く・途中まで）。`claude-state watch --once` は測った値を出すだけで、知らせない。本文の頭の `[claude-kitty disk]` は claude-presence が人の入力と数えない。
   - `claude-kitty doctor` に「ディスク: <path>」（使用率と、閾値を超えているか）と「設定: disk_watch」の行。
 - 設定 `view.pinned`（既定 `[]`）: 統括（`view.left`）と同じく常時表示にする役割。`claude-view` のどの操作（`all`・`focus`・`pair`・`restore`・`add`・`remove`・`swap`・`equalize`・`rows`）のあとも右側の 1 段目の先頭（統括のすぐ右上。複数なら書いた順）に置き、standby に下げない。運用の担当を統括と同じく常に見えるところ・同じ場所に置くため。`rows` で別の位置を指定しても先頭へ移し、並べ替えた結果を 1 行出す。`swap` で pinned を入れ替えようとすると断る。`rows`・`restore`・`pair` の指定そのものの誤り（同じ役割を 2 回など）は、pinned を先頭へ移す前の形で断る（保護する窓が前面なら終了コード 2 のまま）。kitty にいない役割・`view.left` と同じ役割は警告を 1 行出して置かずに続ける。`claude-roster restore` のセッションファイルも統括のタブの 1 段目の先頭に開く（名簿で別のタブにいても二重に開かない）。kitty が動いているときに足したのが pinned だけなら、保存した段組みに戻さず `claude-view equalize` で前に出す（[docs/config.md](docs/config.md#viewclaude-viewclaude-showclaude-roster)）。
+
+### 変更
+
+- PRACTICES.md と docs/relay.md: ユーザーの指示があれば、担当どうし（別の端末の担当とも）統括を経由せずに直接やりとりしてよい、と書いた。relay では担当の役割を `relay.receivers` に足せば `<端末>/<役割>` 宛てで直接届く（ユーザーの原文「「統括を経由する」ルールは緩和して、指示があれば直接サーヴァント間会話するのは許容します」）。
 
 ### 修正
 
@@ -311,7 +317,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/hummer98/claude-kitty/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/hummer98/claude-kitty/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/hummer98/claude-kitty/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/hummer98/claude-kitty/compare/v0.7.0...v0.7.1
