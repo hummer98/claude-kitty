@@ -1268,7 +1268,9 @@ json.dump(roster.exit_payload(pid, {SID_A!r}, time.time()), open({str(self.d / '
         out = self.roster("sleep", "a", "--allow-bg").stdout
         self.assertIn("寝かせた: a", out)
         for pid in (host, front):
-            self.assertFalse(Path(f"/proc/{pid}").exists(), pid)
+            # init の無いコンテナ（CI の python:3.9-slim）では、止めたプロセスがゾンビで /proc に残る
+            stat = Path(f"/proc/{pid}/stat")
+            self.assertTrue(not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] in ("Z", "X"), pid)
         self.assertTrue(Path(f"/proc/{sh}").exists())  # シェルは close-window に任せる
         self.assertEqual(len([c for c in self.kcalls() if c[:1] == ["close-window"]]), 1)
 
