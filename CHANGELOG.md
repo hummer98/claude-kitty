@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-23
+
 ### 修正
 
 - init の無いコンテナ（CI の Python 3.9 の job など）で、止めたプロセスがゾンビのまま残ると「まだ動いている」と見ていた。`claude-roster sleep` が 30 秒待って止めたことにならなかった。Linux ではゾンビ（`/proc/<pid>/stat` の状態が Z・X）を終わったものとして扱う（`lib/proc.py` の `alive`・`start_time`）。
@@ -341,7 +343,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.6...HEAD
+[0.7.6]: https://github.com/hummer98/claude-kitty/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/hummer98/claude-kitty/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/hummer98/claude-kitty/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/hummer98/claude-kitty/compare/v0.7.2...v0.7.3
