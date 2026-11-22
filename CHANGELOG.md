@@ -15,6 +15,8 @@
   - 見る置き場は kitty のペインの claude と名簿に記録したものだけ（マシンの全部の claude から集めると、macOS では `~/Documents` の下などの保護されたフォルダを読んで止まった）。
   - 「既定の置き場」は Claude Code の既定（`~/.claude`）と比べる（direnv の効いたシェルから手で save しても落とさない）。claude-wait が待っているだけのペインは claude-wait の環境から読み、/exit したペインや読めなかったときは前の名簿の `config_dir` を引き継ぐ（世代も回す）。
   - 名簿の `config_dir`・`cwd` に制御文字があれば読まない（セッションファイルに行を足せないように）。`roster.claude` の値は引数なしの実行ファイル（空白・制御文字は断る）。
+  - 相対パスの `CLAUDE_CONFIG_DIR`（direnv の `export CLAUDE_CONFIG_DIR=.config` など）は、そのプロセスの cwd から絶対パスにして残す。制御文字の入った値は記録しない。`save` は書く前に名簿を確かめ、読めない名簿は書かない（前の名簿のまま）。
+  - claude-roster 自身を direnv の効いたシェルから動かしても、既定の置き場（`~/.claude`）のセッションと会話の記録も読む。
 
 ## [0.7.6] - 2026-11-23
 

@@ -317,6 +317,22 @@ class ConfigDirBin(unittest.TestCase):
         self.assertIsNone(self.b.config_dir_of(3))
         self.assertIsNone(self.b.config_dir_of(None))
 
+    def test_relative_and_bad_config_dir(self):
+        # direnv の export CLAUDE_CONFIG_DIR=.config（相対パス）: そのプロセスの cwd から広げて、名簿として読める形で残す
+        envs = {12: {"CLAUDE_CONFIG_DIR": ".config"}, 13: {"CLAUDE_CONFIG_DIR": "/p/x\nlaunch evil"},
+                14: {"CLAUDE_CONFIG_DIR": ".config"}}
+        self.b.proc.environ = envs.get
+        osw = [{"tabs": [{"title": "t", "windows": [
+            win(1, "x", [proc(12, "claude", "--resume", SID_A, cwd="/p/blog")]),
+            win(2, "y", [proc(13, "claude", "--resume", SID_B, cwd="/p/dear")])]}]}]
+        self.b.note_pane_config_dirs(osw)
+        r = R.build_roster(osw, [], "lead", tab_pane_fraction, config_dir_fn=self.b.config_dir_of)
+        self.assertEqual(r["sessions"]["x"]["config_dir"], "/p/blog/.config")
+        self.assertNotIn("config_dir", r["sessions"]["y"])  # 制御文字の入った値は記録しない
+        self.assertIn("/p/blog/.config", self.b.config_dirs())
+        R.check_roster(json.loads(json.dumps(r)))           # 名簿として読める（次の保存で退けられない）
+        self.assertIsNone(self.b.config_dir_of(14))         # cwd が分からない相対パスは記録しない
+
     def test_reads_sessions_and_transcript_of_noted_dir(self):
         pid = os.getpid()
         st = self.b.start_time(pid)

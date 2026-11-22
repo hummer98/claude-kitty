@@ -88,14 +88,21 @@ def cmdline(pid):
 
 
 _CONFIG_DIRS = []
+_PANE_CWD = {}  # kitten @ ls で見たプロセスの cwd（相対パスの CLAUDE_CONFIG_DIR を広げるため）
 
 
 def config_dir_of(pid):
     """その claude が起動したときの CLAUDE_CONFIG_DIR（既定の置き場・読めないときは None）。"""
     env = proc.environ(pid) if pid else None
     d = (env or {}).get("CLAUDE_CONFIG_DIR")
-    if not d:
-        return None
+    if not d or R.has_control(d):
+        return None  # 制御文字の入った値は記録しない（名簿が読めなくなる）
+    if not d.startswith("/"):
+        # direnv の export CLAUDE_CONFIG_DIR=.config など。そのプロセスの cwd から広げる（分からなければ記録しない）
+        base = _PANE_CWD.get(pid)
+        if not base or not base.startswith("/") or R.has_control(base):
+            return None
+        d = os.path.normpath(os.path.join(base, d))
     try:
         # 比べる相手は Claude Code の既定の置き場（~/.claude）。claude-roster 自身の CLAUDE_CONFIG_DIR と比べると、
         # direnv が効いたシェルから手で save したとき、そのプロジェクトの役割の config_dir が落ちる
@@ -110,7 +117,16 @@ def config_dirs():
     direnv の .envrc でプロジェクトごとに置き場を分けていると、セッションの記録（sessions/）と会話の記録（projects/）は
     その置き場にある。見るのは、kitty のペインにいる claude の置き場と名簿に記録した置き場だけ（note_config_dirs）。
     マシンの全部の claude から集めると、関係の無い置き場（macOS では ~/Documents の下など、読むと止まる所）まで読むため。"""
-    return list(_CONFIG_DIRS)
+    out = list(_CONFIG_DIRS)
+    # claude-roster 自身を direnv の効いたシェルから動かしたとき（SESSIONS が自分の置き場になる）も、既定の置き場を読む
+    default = str(Path.home() / ".claude")
+    if not ENV.get("CLAUDE_SESSIONS_DIR") and not ENV.get("CLAUDE_PROJECTS_DIR") and default not in out:
+        try:
+            if CLAUDE_HOME.resolve() != Path(default).resolve():
+                out.append(default)
+        except OSError:
+            pass
+    return out
 
 
 def note_config_dirs(dirs):
@@ -125,6 +141,8 @@ def note_pane_config_dirs(data):
         for tab in osw.get("tabs", []):
             for w in tab.get("windows", []):
                 for p in w.get("foreground_processes") or []:
+                    if p.get("pid") and isinstance(p.get("cwd"), str):
+                        _PANE_CWD[p["pid"]] = p["cwd"]
                     info = R.parse_argv(p.get("cmdline"))
                     if info and info["tool"] in ("claude", "claude-wait"):
                         note_config_dirs([config_dir_of(p.get("pid"))])
@@ -368,6 +386,10 @@ def cmd_save(args, view, conf):
         return 0
     new["socket"] = sock
     new = R.carry_over(new, old, new["saved_at"], conf["keep_absent_hours"] * 3600, drop_absent=not args.auto)
+    try:
+        R.check_roster(json.loads(json.dumps(new)))  # 読めない名簿は書かない（次の保存で退けられ、引き継ぎが消えるので）
+    except ValueError as e:
+        die(f"作った名簿がおかしいので書かない（前の名簿のまま）: {e}")
     changed = write_roster(new, conf["generations"])
     if not args.auto:
         show(new)
