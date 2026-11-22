@@ -70,6 +70,7 @@ class BrowserPlacement(unittest.TestCase):
         self.placed = []
         self.b.main_browser_window = lambda st: "B"
         self.b.left_window_id = lambda tab: 1
+        self.b.is_mac = lambda: False  # KWin の経路を試す（macOS で回しても mac_placement に分かれない）
 
     def run_(self, results, opts=None):
         seq = list(results)

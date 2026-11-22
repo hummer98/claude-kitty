@@ -8,6 +8,16 @@
 
 ### 追加
 
+- `claude-roster sleep <役割>` と `wake <役割>`: 役目を終えた担当を「寝かせる」。サーヴァントが増え続けるので、使っていない実行レーンを減らし、あとで会話ごと戻すため（[docs/roster.md](docs/roster.md#sleep--wake)）。
+  - sleep: idle を確かめ（restart と同じ。`--force` で省く）、claude-wait に「終わる」の続きの指示（`"action": "exit"`）を書いて claude に SIGTERM を送り、claude が終わってペインの前面にシェルしか残っていないのを確かめてから `kitten @ close-window` で閉じる。止まらなければ・ほかのプロセスが残っていれば閉じず、名簿も変えない。名簿のその役割に `sleeping`・`slept_at`・`sleep_place`（タブと段組みの位置）を書き、ID・cwd・model・name・slot は残して段組みから外す。統括（`view.left`）と常時表示（`view.pinned`）は断る。ペインが既に無い役割は印を付けるだけ。
+  - 寝ている役割は、自動の保存でも手の保存でも、`keep_absent_hours` を過ぎても消さない。`restore` は開かない（`--include-sleeping` か名指しのときだけ）。`status`・`show` に「寝ている（いつから）」。
+  - wake: `restore <役割>` と同じ決まりで claude-wait の形で開き直し、段組みは寝かせる前の位置に戻して並べ直し、印を外す。
+  - claude-wait: 続きの指示が `"action": "exit"` なら、claude が終わったあとシェルに戻らずに終わる。前の版の claude-wait はこの指示を断ってシェルに戻るだけ（同じ会話を開き直さない）。
+
+## [0.7.4] - 2026-11-23
+
+### 追加
+
 - `claude-presence`（新しいコマンド）と設定 `model_policy`（既定は無効）: 人がいるかを最後に人が打ってからの時間で決め、離席中（既定 20 分）は実装のサブエージェント（Agent ツール）の `model` を軽いもの（既定 `haiku`）に変える。離席中の作業はトークンの少ない方で、人がいるときは呼び出しどおり（速さ優先）にするため（[docs/config.md](docs/config.md#model_policyclaude-presence-離席中のサブエージェントのモデル)）。
   - 記録: claude-state の UserPromptSubmit の hook が、人の入力のときだけ時刻・セッション・役割を `<置き場>/claude-presence/last.json` に書く（全セッション共通の 1 つ）。背景の作業の完了の通知・セッション間メッセージ・claude-relay の起こす知らせ・`state.notice` に当たるもの・入れ子の claude は数えない。
   - 切り替え: PreToolUse の hook（`claude-presence hook`、matcher `Agent|Task`）が呼び出しを `permissionDecision: "deny"` で断り、`permissionDecisionReason` で「離席中なので model を `away_model` にして同じ呼び出しを出し直してください（ほかの項目はそのまま）」と頼む。出し直し（`model` が `away_model`）は通し、そのとき `switches.jsonl` に残す（断った記録は `denials.jsonl`）。入力を書き換える `updatedInput` は使わない: auto mode では hook が入力を変えると判定が無効になって断られ、同じ返答のほかの呼び出し（Bash など）まで巻き込まれたため（実測）。deny なら巻き込まない見込み（実機の auto mode ではまだ確かめていない）。`keep` の語（レビュー・評価・調べものなど）を含むもの、`subagent_type` が `claude-code-guide`・`Explore`・`Plan`・`web-fetch`・`fork` のもの、`model` が `fable` のもの、記録が無いとき、例外のときは止めない。英字の `keep` の語は単語として探す（`guide` は `guideline` に当てない）。同じセッションの同じ prompt を 300 秒以内に断っていたら、元の model のままの出し直しも通す（Claude が従わなかったときに断りをくり返して作業を止めないため）。断りの記録が書けない・読めないときは断らない。
@@ -19,11 +29,9 @@
   - `claude-kitty doctor` に「ディスク: <path>」（使用率と、閾値を超えているか）と「設定: disk_watch」の行。
 - 設定 `view.pinned`（既定 `[]`）: 統括（`view.left`）と同じく常時表示にする役割。`claude-view` のどの操作（`all`・`focus`・`pair`・`restore`・`add`・`remove`・`swap`・`equalize`・`rows`）のあとも右側の 1 段目の先頭（統括のすぐ右上。複数なら書いた順）に置き、standby に下げない。運用の担当を統括と同じく常に見えるところ・同じ場所に置くため。`rows` で別の位置を指定しても先頭へ移し、並べ替えた結果を 1 行出す。`swap` で pinned を入れ替えようとすると断る。`rows`・`restore`・`pair` の指定そのものの誤り（同じ役割を 2 回など）は、pinned を先頭へ移す前の形で断る（保護する窓が前面なら終了コード 2 のまま）。kitty にいない役割・`view.left` と同じ役割は警告を 1 行出して置かずに続ける。`claude-roster restore` のセッションファイルも統括のタブの 1 段目の先頭に開く（名簿で別のタブにいても二重に開かない）。kitty が動いているときに足したのが pinned だけなら、保存した段組みに戻さず `claude-view equalize` で前に出す（[docs/config.md](docs/config.md#viewclaude-viewclaude-showclaude-roster)）。
 
-- `claude-roster sleep <役割>` と `wake <役割>`: 役目を終えた担当を「寝かせる」。サーヴァントが増え続けるので、使っていない実行レーンを減らし、あとで会話ごと戻すため（[docs/roster.md](docs/roster.md#sleep--wake)）。
-  - sleep: idle を確かめ（restart と同じ。`--force` で省く）、claude-wait に「終わる」の続きの指示（`"action": "exit"`）を書いて claude に SIGTERM を送り、claude が終わってペインの前面にシェルしか残っていないのを確かめてから `kitten @ close-window` で閉じる。止まらなければ・ほかのプロセスが残っていれば閉じず、名簿も変えない。名簿のその役割に `sleeping`・`slept_at`・`sleep_place`（タブと段組みの位置）を書き、ID・cwd・model・name・slot は残して段組みから外す。統括（`view.left`）と常時表示（`view.pinned`）は断る。ペインが既に無い役割は印を付けるだけ。
-  - 寝ている役割は、自動の保存でも手の保存でも、`keep_absent_hours` を過ぎても消さない。`restore` は開かない（`--include-sleeping` か名指しのときだけ）。`status`・`show` に「寝ている（いつから）」。
-  - wake: `restore <役割>` と同じ決まりで claude-wait の形で開き直し、段組みは寝かせる前の位置に戻して並べ直し、印を外す。
-  - claude-wait: 続きの指示が `"action": "exit"` なら、claude が終わったあとシェルに戻らずに終わる。前の版の claude-wait はこの指示を断ってシェルに戻るだけ（同じ会話を開き直さない）。
+### 変更
+
+- PRACTICES.md と docs/relay.md: ユーザーの指示があれば、担当どうし（別の端末の担当とも）統括を経由せずに直接やりとりしてよい、と書いた。relay では担当の役割を `relay.receivers` に足せば `<端末>/<役割>` 宛てで直接届く（ユーザーの原文「「統括を経由する」ルールは緩和して、指示があれば直接サーヴァント間会話するのは許容します」）。
 
 ### 修正
 
@@ -317,7 +325,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/hummer98/claude-kitty/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/hummer98/claude-kitty/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/hummer98/claude-kitty/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/hummer98/claude-kitty/compare/v0.7.0...v0.7.1
