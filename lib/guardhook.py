@@ -875,16 +875,16 @@ def allow_names(value):
 
 
 def _git_split(args):
-    """git の全体のオプションを読み、(-C などで変えた場所の列, サブコマンドから後) を返す。"""
+    """git の全体のオプションを読み、(-C などで変えた場所の [(オプション, 値)], サブコマンドから後) を返す。"""
     dirs = []
     i = 0
     while i < len(args):
         a = args[i]
         if a in ("-C", "--work-tree", "--git-dir") and i + 1 < len(args):
-            dirs.append(args[i + 1])
+            dirs.append((a, args[i + 1]))
             i += 2
         elif a.startswith("--work-tree=") or a.startswith("--git-dir="):
-            dirs.append(a.split("=", 1)[1])
+            dirs.append(tuple(a.split("=", 1)))
             i += 1
         elif a in GIT_VALUE_OPTS and i + 1 < len(args):
             i += 2
@@ -1365,10 +1365,14 @@ class Analyzer:
             if assigns.get(env_dir):
                 where = self.path(assigns[env_dir], where)
         dirs, rest = _git_split(args)
-        # GIT_DIR / --git-dir などを明示したか（init・clone は、行き先と別にその場所へも書く）
-        explicit = bool(dirs) or any(assigns.get(e) for e in ("GIT_WORK_TREE", "GIT_DIR"))
-        for d in dirs:
+        base = self.cwd                         # -C だけで決まる場所（clone / init の相対の行き先はここから）
+        for opt, d in dirs:
             where = self.path(d, where)
+            if opt == "-C":
+                base = self.path(d, base)
+        # clone / init は、行き先と別に、作業の木と .git を明示した場所へも書く。-C は場所を変えるだけなので数えない。
+        # 相対のときの基準は -C の前か後か迷うので、両方で見る（止める側）
+        places = [d for opt, d in dirs if opt != "-C"] + [assigns[e] for e in ("GIT_WORK_TREE", "GIT_DIR") if assigns.get(e)]
         if not rest:
             return
         sub, rest = rest[0], rest[1:]
@@ -1385,35 +1389,50 @@ class Analyzer:
             sv, lv = (GIT_CLONE_SHORT, GIT_CLONE_LONG) if sub == "clone" else (GIT_INIT_SHORT, GIT_INIT_LONG)
             pos, vals = _git_opts(rest, sv, lv)
             for opt, value in vals:
-                if opt in GIT_DIR_OPTS and self.roots.covers(self.path(value, where)):
+                if opt in GIT_DIR_OPTS and self.roots.covers(self.path(value, base)):
                     self.add(f"git {sub} {opt} {value}")
                     return
-            if explicit and self.roots.covers(where):
-                self.add(f"git {sub}（{where}）")
-                return
+            for d in places:
+                if self.roots.covers(self.path(d, base)) or self.roots.covers(self.path(d, self.cwd)):
+                    self.add(f"git {sub}（{d}）")
+                    return
             # clone の行き先は 2 つ目（無ければ cwd の下に作る）、init は 1 つ目（無ければ cwd）。
             # 引数が多いのは知らない値をとるオプションの値が混ざったときなので、元より後ろを全部見る（止める側）
             targets = (pos[1:] or ["."]) if sub == "clone" else (pos or ["."])
             for target in targets:
-                if self.roots.covers(self.path(target, where)):
+                if self.roots.covers(self.path(target, base)):
                     self.add(f"git clone の行き先 {target}" if sub == "clone" else f"git init {target}")
                     return
             return
         if sub == "worktree":
-            # -b / -B / --orphan / --reason の値もパスとして見る（取り違えても止める側に倒れるだけ）。repair も行き先の .git を書く
-            if pos and pos[0] in ("add", "move", "remove", "repair") and (
-                    self.roots.covers(where) or any(self.roots.covers(self.path(p, where)) for p in pos[1:])):
+            # list 以外（prune / lock / unlock も）は cwd の .git に書くので、cwd が保護した所なら止める。
+            # add などは行き先も見る。-b / -B / --orphan / --reason の値もパスとして見る（取り違えても止める側に倒れるだけ）。
+            # repair も行き先の .git を書く
+            if pos and pos[0] != "list" and (self.roots.covers(where) or (
+                    pos[0] in ("add", "move", "remove", "repair")
+                    and any(self.roots.covers(self.path(p, where)) for p in pos[1:]))):
                 self.add(f"git worktree {pos[0]}")
             return
         if sub in ("archive", "format-patch"):
-            # -o<dir>・--out <dir>（略）も読む。略が両方に当たっても値は 1 つ
-            out = None
-            for _opt, value in _git_opts(rest, {"o"}, {"--output", "--output-directory"})[1]:
-                out = value
-            if out is None and sub == "archive":
+            # 出力先は -o <dir>・-o<dir>・--output(-directory)・略した --out。-Sfoo の o のような、まとまりの中の o は
+            # 別のオプションの値のことが多いので出力先とはみない。ただ -ko<dir> のように本当に -o のこともあるので、
+            # その読み方の値も候補に足し、どれかが保護した所なら止める（止める側）
+            outs = [v for _o, v in _git_opts(rest, set(), {"--output", "--output-directory"})[1]]
+            for i, a in enumerate(rest):
+                if a == "--":
+                    break
+                if a == "-o" and i + 1 < len(rest):
+                    outs.append(rest[i + 1])
+                elif a.startswith("-o") and len(a) > 2:
+                    outs.append(a[2:])
+            loose = [v for _o, v in _git_opts(rest, {"o"}, set())[1]]
+            if not outs and not loose and sub == "archive":
                 return                          # 標準出力へ
-            if self.roots.covers(self.path(out or ".", where)):
-                self.add(f"git {sub} の出力 {out or where}")
+            outs = (outs or ["."]) + loose      # format-patch は既定で cwd に書く
+            for out in outs:
+                if self.roots.covers(self.path(out, where)):
+                    self.add(f"git {sub} の出力 {out}")
+                    return
             return
         if self.roots.covers(where):
             self.add(f"git {sub}（{where}）")

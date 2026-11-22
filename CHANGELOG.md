@@ -16,7 +16,7 @@
 
 ### 修正
 
-- `claude-guard`: `git clone` の値をとるオプション（`--branch master`・`-b master`・`-bmaster`・`--branch=master`・`--depth 1` など）の値を元、元を行き先と読み、保護したフォルダから外へ写すだけの `git clone -q --branch master <保護> <外>` を止めていた。clone と init の値をとるオプション（略した `--bra` も）を飛ばして元と行き先を読む。`git init -b main <保護>` は `main` を行き先と読んで通していたので止める。`--separate-git-dir` と `--template` の値、`GIT_DIR` / `--git-dir` で指した場所が保護したフォルダなら止める。`git archive -o<保護>/a.tar`・`git format-patch --output-dir <保護>` のように値をくっつけた形・略した形の出力先も止める。`git worktree repair <保護>` も止める。
+- `claude-guard`: `git clone` の値をとるオプション（`--branch master`・`-b master`・`-bmaster`・`--branch=master`・`--depth 1` など）の値を元、元を行き先と読み、保護したフォルダから外へ写すだけの `git clone -q --branch master <保護> <外>` を止めていた。clone と init の値をとるオプション（略した `--bra` も）を飛ばして元と行き先を読む。`git init -b main <保護>` は `main` を行き先と読んで通していたので止める。`--separate-git-dir` と `--template` の値、`GIT_DIR` / `--git-dir` で指した場所が保護したフォルダなら止める。`git archive -o<保護>/a.tar`・`git format-patch --output-dir <保護>` のように値をくっつけた形・略した形の出力先も止める。`git worktree repair <保護>` と、cwd が保護したフォルダのときの `git worktree prune` / `lock` / `unlock` も止める（`list` は通す）。`GIT_WORK_TREE` / `--work-tree` と `GIT_DIR` / `--git-dir` は別々に見る。`-C` は cwd を変えるだけとみて、`git -C <保護> clone <元> <外>` は通す。
 
 ### 上げるときに手で行うこと
 

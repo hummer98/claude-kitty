@@ -296,6 +296,42 @@ class ShellForms(Base):
         self.assertIsNotNone(self.bash(f"git clone --future v ~/dev/m1 {m}/x"))
         self.assertIsNotNone(self.bash(f"git init --future v {m}/x"))
 
+    def test_git_format_patch_o_inside_other_short_options(self):
+        # 回帰: -Sfoo / -Gbo の中の o を -o と読み、前の -o <保護> を上書きして通していた
+        m = self.shared_dir
+        for extra in ("-Sfoo", "-Gbo"):
+            self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git format-patch -o {m}/p {extra} HEAD~1"), extra)
+            self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git format-patch {extra} -o {m}/p HEAD~1"), extra)
+            self.assertIsNone(self.bash(f"cd ~/dev/m1 && git format-patch -o ~/dev/p {extra} HEAD~1"), extra)
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git format-patch -ko {m}/p HEAD~1"))    # 本当の -o のまとまり
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git archive -9o{m}/a.tar HEAD"))
+        self.assertIsNone(self.bash("cd ~/dev/m1 && git archive -9 HEAD"))                      # 標準出力へ
+
+    def test_git_clone_init_work_tree_and_git_dir_separately(self):
+        # 回帰: GIT_WORK_TREE / --work-tree が保護した所で GIT_DIR / --git-dir が外だと、最後の値だけを見て通していた
+        m = self.shared_dir
+        for sub in ("clone ~/dev/m1 ~/dev/out", "init ~/dev/out"):
+            for pre in (f"GIT_WORK_TREE={m}/w GIT_DIR=~/dev/x git", f"GIT_DIR={m}/g GIT_WORK_TREE=~/dev/w git",
+                        f"git --work-tree={m}/w --git-dir=~/dev/x", f"git --git-dir={m}/g --work-tree ~/dev/w"):
+                self.assertIsNotNone(self.bash(f"{pre} {sub}"), f"{pre} {sub}")
+            self.assertIsNone(self.bash(f"GIT_WORK_TREE=~/dev/w GIT_DIR=~/dev/x git {sub}"), sub)
+
+    def test_git_clone_init_dash_c_only_moves_cwd(self):
+        # 回帰: -C を GIT_DIR などと同じく「明示した場所」と数え、-C <保護> で外へ clone するのを止めていた
+        m = self.shared_dir
+        self.assertIsNone(self.bash(f"git -C {m} clone -b master ~/dev/src ~/dev/out"))
+        self.assertIsNone(self.bash(f"git -C {m} init ~/dev/out"))
+        self.assertIsNotNone(self.bash(f"git -C {m} clone -b master ~/dev/src out"))     # 相対は -C の下
+        self.assertIsNotNone(self.bash(f"git -C {m} init"))
+        self.assertIsNotNone(self.bash(f"git -C ~/dev clone ~/dev/src ../app/shared/files/x"))
+
+    def test_git_worktree_prune_lock_unlock_in_protected_cwd(self):
+        m = self.shared_dir
+        for c in ("prune", "prune -n", "lock ~/dev/wt", "lock --reason r ~/dev/wt", "unlock ~/dev/wt"):
+            self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree {c}"), c)
+            self.assertIsNone(self.bash(f"cd ~/dev/m1 && git worktree {c}"), c)
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree list --porcelain"))
+
     def test_git_archive_format_patch_output_forms(self):
         m = self.shared_dir
         for c in (f"archive -o{m}/a.tar HEAD", f"archive --out={m}/a.tar HEAD", f"archive --output {m}/a.tar HEAD",
