@@ -227,8 +227,16 @@ class World:
     def claude(self):
         """hook を子として動かす、生き続ける偽の claude（argv[0] が claude。hook は祖先の claude の pid を記録する）。"""
         if getattr(self, "_claude", None) is None:
-            self._claude = subprocess.Popen(["claude", "-c", FAKE_CLAUDE], executable=sys.executable, text=True,
-                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            if sys.platform == "darwin":
+                # macOS の framework 版の Python は起動の中で Python.app を exec し直し、argv[0] の claude が残らない。
+                # argv[0] を claude にした bash を親として残し（exec -a。中の bash -c は ; exit で exec を省かせない）、
+                # その子で偽の claude を動かす。hook の祖先には argv[0] が claude の bash が居る
+                argv = ["/bin/bash", "-c", 'exec -a claude /bin/bash -c \'"$0" -c "$1"; exit $?\' "$@"',
+                        "claude-fake", sys.executable, FAKE_CLAUDE]
+                self._claude = subprocess.Popen(argv, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            else:
+                self._claude = subprocess.Popen(["claude", "-c", FAKE_CLAUDE], executable=sys.executable, text=True,
+                                                stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         return self._claude
 
     def close(self):
