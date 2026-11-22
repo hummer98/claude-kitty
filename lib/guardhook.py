@@ -819,6 +819,53 @@ def _positional(args, value_opts=()):
     return out
 
 
+# git clone / init の、値をとるオプション。_positional では読めない -bmaster・-qb master・--branch=master・
+# 長いオプションの略（--bra master。git は一意な頭なら受ける）も読み、元と行き先を取り違えないようにする
+GIT_CLONE_SHORT = {"b", "o", "c", "u", "j"}
+GIT_CLONE_LONG = {"--branch", "--origin", "--config", "--depth", "--reference", "--reference-if-able",
+                  "--separate-git-dir", "--template", "--upload-pack", "--jobs", "--filter", "--shallow-since",
+                  "--shallow-exclude", "--server-option", "--bundle-uri", "--ref-format", "--revision"}
+GIT_INIT_SHORT = {"b"}
+GIT_INIT_LONG = {"--template", "--separate-git-dir", "--initial-branch", "--object-format", "--ref-format"}
+# 値がパスで、そこにも書く（--template は読む側だが、迷ったら止める側に倒す）
+GIT_DIR_OPTS = ("--separate-git-dir", "--template")
+
+
+def _git_opts(args, short_vals, long_vals):
+    """git の 1 つのサブコマンドの引数を (オプションでない引数, [(長い名前か -x, 値)]) にする。
+    略した長いオプションは、当たる候補がどれも値をとるなら値をとるとみる（git は曖昧な略を断るので、通るのは一意のときだけ）。"""
+    pos, vals = [], []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            pos += args[i:]
+            break
+        if a == "-" or not a.startswith("-"):
+            pos.append(a)
+        elif a.startswith("--"):
+            name, eq, value = a.partition("=")
+            hits = [name] if name in long_vals else sorted(o for o in long_vals if o.startswith(name) and len(name) > 2)
+            if not hits:
+                continue                                # 値をとらないもの（--no-template なども）
+            if not eq:
+                if i >= len(args):
+                    continue
+                value, i = args[i], i + 1
+            vals += [(h, value) for h in hits]          # 略が複数に当たれば全部の意味で見る（止める側）
+        else:
+            for k, ch in enumerate(a[1:], 1):
+                if ch in short_vals:                    # -qb master / -bmaster
+                    if k + 1 < len(a):
+                        vals.append(("-" + ch, a[k + 1:]))
+                    elif i < len(args):
+                        vals.append(("-" + ch, args[i]))
+                        i += 1
+                    break
+    return pos, vals
+
+
 def allow_names(value):
     """CLAUDE_GUARD_ALLOW の値を名前の集合にする（all / 1 は全部）。"""
     if not isinstance(value, str) or not value.strip():
@@ -1318,6 +1365,8 @@ class Analyzer:
             if assigns.get(env_dir):
                 where = self.path(assigns[env_dir], where)
         dirs, rest = _git_split(args)
+        # GIT_DIR / --git-dir などを明示したか（init・clone は、行き先と別にその場所へも書く）
+        explicit = bool(dirs) or any(assigns.get(e) for e in ("GIT_WORK_TREE", "GIT_DIR"))
         for d in dirs:
             where = self.path(d, where)
         if not rest:
@@ -1332,28 +1381,35 @@ class Analyzer:
             return
         if sub == "read-tree" and not any(a in ("-u", "--reset") for a in rest):
             return
-        if sub == "clone":
-            target = pos[1] if len(pos) > 1 else "."    # 行き先が無ければ cwd の下に作る
-            if self.roots.covers(self.path(target, where)):
-                self.add(f"git clone の行き先 {target}")
+        if sub in ("clone", "init"):
+            sv, lv = (GIT_CLONE_SHORT, GIT_CLONE_LONG) if sub == "clone" else (GIT_INIT_SHORT, GIT_INIT_LONG)
+            pos, vals = _git_opts(rest, sv, lv)
+            for opt, value in vals:
+                if opt in GIT_DIR_OPTS and self.roots.covers(self.path(value, where)):
+                    self.add(f"git {sub} {opt} {value}")
+                    return
+            if explicit and self.roots.covers(where):
+                self.add(f"git {sub}（{where}）")
+                return
+            # clone の行き先は 2 つ目（無ければ cwd の下に作る）、init は 1 つ目（無ければ cwd）。
+            # 引数が多いのは知らない値をとるオプションの値が混ざったときなので、元より後ろを全部見る（止める側）
+            targets = (pos[1:] or ["."]) if sub == "clone" else (pos or ["."])
+            for target in targets:
+                if self.roots.covers(self.path(target, where)):
+                    self.add(f"git clone の行き先 {target}" if sub == "clone" else f"git init {target}")
+                    return
             return
         if sub == "worktree":
-            if pos and pos[0] in ("add", "move", "remove") and (
+            # -b / -B / --orphan / --reason の値もパスとして見る（取り違えても止める側に倒れるだけ）。repair も行き先の .git を書く
+            if pos and pos[0] in ("add", "move", "remove", "repair") and (
                     self.roots.covers(where) or any(self.roots.covers(self.path(p, where)) for p in pos[1:])):
                 self.add(f"git worktree {pos[0]}")
             return
-        if sub == "init":
-            target = pos[0] if pos else "."
-            if self.roots.covers(self.path(target, where)):
-                self.add(f"git init {target}")
-            return
         if sub in ("archive", "format-patch"):
+            # -o<dir>・--out <dir>（略）も読む。略が両方に当たっても値は 1 つ
             out = None
-            for i, a in enumerate(rest):
-                if a in ("-o", "--output", "--output-directory") and i + 1 < len(rest):
-                    out = rest[i + 1]
-                elif a.startswith(("--output=", "--output-directory=")):
-                    out = a.split("=", 1)[1]
+            for _opt, value in _git_opts(rest, {"o"}, {"--output", "--output-directory"})[1]:
+                out = value
             if out is None and sub == "archive":
                 return                          # 標準出力へ
             if self.roots.covers(self.path(out or ".", where)):
