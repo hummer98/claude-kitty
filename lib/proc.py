@@ -30,7 +30,10 @@ def is_darwin():
 
 
 def alive(pid):
-    """pid が生きているか。/proc の無い macOS でも効くよう signal 0 で調べる（権限が無いのは生きている）。"""
+    """pid が生きているか。/proc の無い macOS でも効くよう signal 0 で調べる（権限が無いのは生きている）。
+
+    Linux ではゾンビ（終わったが親がまだ片付けていない）は生きていないとみなす。init の無いコンテナ
+    （CI の python:3.9-slim など）では、親の無いプロセスが止まってもゾンビのまま残り、signal 0 が通るため。"""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     try:
@@ -40,6 +43,8 @@ def alive(pid):
     except PermissionError:
         return True
     except (OSError, OverflowError):
+        return False
+    if is_linux() and _linux_zombie(pid):
         return False
     return True
 
@@ -196,6 +201,12 @@ def _linux_stat(pid):
         return None
 
 
+def _linux_zombie(pid):
+    """/proc/<pid>/stat の状態が Z（ゾンビ）か X（終わった）か。読めなければ False。"""
+    st = _linux_stat(pid)
+    return bool(st) and st[0] in ("Z", "X")
+
+
 def argv(pid):
     """プロセスの引数のリスト。読めなければ None（終わった・権限が無い）。"""
     if not isinstance(pid, int) or pid <= 0:
@@ -261,6 +272,8 @@ def start_time(pid):
         return None
     if is_linux():
         st = _linux_stat(pid)
+        if st and st[0] in ("Z", "X"):
+            return None  # ゾンビは終わったものとして扱う（alive と同じ）
         try:
             return st[19] if st else None
         except IndexError:

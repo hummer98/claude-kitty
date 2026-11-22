@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### 修正
+
+- init の無いコンテナ（CI の Python 3.9 の job など）で、止めたプロセスがゾンビのまま残ると「まだ動いている」と見ていた。`claude-roster sleep` が 30 秒待って止めたことにならなかった。Linux ではゾンビ（`/proc/<pid>/stat` の状態が Z・X）を終わったものとして扱う（`lib/proc.py` の `alive`・`start_time`）。
+
 ### 変更
 
 - docs/relay.md の「まだ無いもの」: LAN の外へ延ばすときや受け手のマシンを共用するときに要る、本文の暗号化と 1 通ごとの署名のこと（いまは要らない理由も）。
