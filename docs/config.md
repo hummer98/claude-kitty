@@ -145,6 +145,7 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `ignore` | `[]` | 名簿に入れない役割 |
 | `generations` | `5` | 残す名簿の世代の数（1〜50） |
 | `keep_absent_hours` | `24` | ペインが無くなった役割を、自動の保存で名簿に残す時間（`claude-roster sleep` で寝かせた役割には効かない。ずっと残す） |
+| `claude` | `{}` | フォルダ → 開き直すときに claude の代わりに使うコマンド（`claude-wait` の `CLAUDE_WAIT_CLAUDE`）。プロジェクトごとに権限のモードや環境の守りを決めた包みを使うとき。いちばん長く当たるフォルダを選ぶ。先頭の `~` は広げる |
 
 名簿の場所は `$CLAUDE_ROSTER_DIR`（既定 `~/.local/share/claude-kitty`）。詳細は [roster.md](roster.md)。
 

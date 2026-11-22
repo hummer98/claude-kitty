@@ -198,6 +198,49 @@ class Model(unittest.TestCase):
         self.assertEqual((s["e"]["model"], s["e"]["model_source"]), (None, None))  # ID が無ければ記録も見ない
 
 
+class ConfigDir(unittest.TestCase):
+    """プロジェクトごとに CLAUDE_CONFIG_DIR で設定の置き場を分けているとき（direnv の .envrc など）。"""
+
+    def test_build_records_config_dir_of_running_claude(self):
+        osw = [{"tabs": [{"title": "t", "windows": [
+            win(1, "x", [proc(12, "claude", "--resume", SID_A)]),
+            win(2, "y", [proc(13, "claude", "--resume", SID_B)]),
+            win(3, "z", [proc(101, "python3", "/u/claude-wait", "z", SID_C)])]}]}]
+        dirs = {12: "/p/blog/.config"}
+        r = R.build_roster(osw, [], "lead", tab_pane_fraction, config_dir_fn=dirs.get)
+        self.assertEqual(r["sessions"]["x"]["config_dir"], "/p/blog/.config")
+        self.assertNotIn("config_dir", r["sessions"]["y"])  # 既定の置き場なら書かない
+        self.assertNotIn("config_dir", r["sessions"]["z"])  # claude-wait が待っているだけのものは読まない
+        R.check_roster(json.loads(json.dumps(r)))
+
+    def test_pane_command_passes_config_dir_and_claude(self):
+        e = {"session_id": SID_A, "model": "opus", "config_dir": "/p/blog/.config", "claude": "/h/bin/claude-bypass"}
+        cmd = R.pane_command("x", e, "/bin/claude-wait")
+        self.assertEqual(cmd[:2], ["bash", "-lic"])
+        self.assertEqual(shlex.split(cmd[2]), ["env", "CLAUDE_CONFIG_DIR=/p/blog/.config",
+                                               "CLAUDE_WAIT_CLAUDE=/h/bin/claude-bypass",
+                                               "/bin/claude-wait", "x", SID_A, "--model", "opus"])
+        # どちらも無ければ前と同じ形
+        self.assertEqual(shlex.split(R.pane_command("x", {"session_id": SID_A}, "/bin/claude-wait")[2]),
+                         ["/bin/claude-wait", "x", SID_A])
+
+    def test_claude_for_longest_folder(self):
+        m = {"/p": "/bin/a", "/p/blog": "~/bin/b", "/q/": "/bin/q"}
+        home = lambda s: s.replace("~", "/h", 1) if s.startswith("~") else s
+        self.assertEqual(R.claude_for("/p/blog/apps", m, home), "/h/bin/b")
+        self.assertEqual(R.claude_for("/p/other", m, home), "/bin/a")
+        self.assertEqual(R.claude_for("/q", m, home), "/bin/q")
+        self.assertIsNone(R.claude_for("/pp", m, home))  # 名前の頭が同じだけの別のフォルダには当てない
+        self.assertIsNone(R.claude_for(None, m, home))
+        self.assertIsNone(R.claude_for("/p", {}, home))
+
+    def test_check_rejects_relative_config_dir(self):
+        r = built()
+        r["sessions"]["a"]["config_dir"] = "rel/.config"
+        with self.assertRaises(ValueError):
+            R.check_roster(json.loads(json.dumps(r)))
+
+
 class SessionFile(unittest.TestCase):
     def roster(self):
         r = built()

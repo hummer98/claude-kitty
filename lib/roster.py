@@ -203,11 +203,13 @@ def pane_session(win, sessions_by_pid, sessions_by_sid):
 
 
 def build_roster(osw_list, sessions, left, fraction, conf_models=None, settings_fn=None, transcript_fn=None,
-                 now=0.0, ignore=()):
+                 now=0.0, ignore=(), config_dir_fn=None):
     """kitten @ ls と ~/.claude/sessions/*.json（dict のリスト）から名簿を作る。
 
     fraction(tab, window_id) → (x, y, w, h)（geometry.tab_pane_fraction）。role の無いペイン・overlay・
     ignore の role・名前に区切り文字を含む role は入れない（復元できないか、claude-view で扱えないため）。
+    config_dir_fn(pid) → その claude の CLAUDE_CONFIG_DIR（既定の置き場なら None）。プロジェクトごとに
+    設定の置き場を分けている（direnv の .envrc など）とき、開き直すのに同じ置き場が要るので名簿に残す。
     """
     settings_fn = settings_fn or (lambda cwd: None)
     transcript_fn = transcript_fn or (lambda sid: None)
@@ -239,6 +241,9 @@ def build_roster(osw_list, sessions, left, fraction, conf_models=None, settings_
                     "window_id": w.get("id"), "tab": strip_mark(tab.get("title")),
                     "slot": (w.get("user_vars") or {}).get("slot"),
                 }
+                cdir = config_dir_fn(ps["front_pid"] or ps["pid"]) if config_dir_fn and ps["state"] == "running" else None
+                if cdir:
+                    entries[role]["config_dir"] = cdir
                 roles.append(role)
             if not roles:
                 continue
@@ -372,6 +377,9 @@ def check_roster(roster):
             raise ValueError(f"{seen[sid]} と {role} が同じセッション ID {sid[:8]} を持っている")
         if sid:
             seen[sid] = role
+        cdir = e.get("config_dir")
+        if cdir is not None and not (isinstance(cdir, str) and cdir.startswith("/")):
+            raise ValueError(f"{role} の config_dir が絶対パスでない: {cdir!r}")
     for t in roster["tabs"]:
         for role in t.get("roles", []):
             if role not in sess:
@@ -400,8 +408,32 @@ def pane_command(role, entry, wait_cmd):
         inner += ["--model", entry["model"]]
     if entry.get("name") and entry["name"] != role:
         inner.append("--rename")  # resume では -n が効かないので、claude-wait が /rename の案内を出す
+    # 設定の置き場（名簿の config_dir）と、claude の代わりに開くコマンド（設定の roster.claude）は環境で渡す
+    env = []
+    if entry.get("config_dir"):
+        env.append(f"CLAUDE_CONFIG_DIR={entry['config_dir']}")
+    if entry.get("claude"):
+        env.append(f"CLAUDE_WAIT_CLAUDE={entry['claude']}")
+    if env:
+        inner = ["env"] + env + inner
     # ログインシェルの PATH（~/.local/bin など）で claude を見つける。claude-wait が最後にシェルへ戻る
     return ["bash", "-lic", shlex.join(inner)]
+
+
+def claude_for(cwd, mapping, expand=os.path.expanduser):
+    """設定の roster.claude（フォルダ → コマンド）から、cwd に当たるもの。いちばん長く当たるフォルダを選ぶ。
+
+    コマンドの先頭の ~ は広げる（claude-wait は CLAUDE_WAIT_CLAUDE をそのまま 1 語として起動するため）。"""
+    if not cwd or not mapping:
+        return None
+    cwd = os.path.normpath(cwd)
+    best = None
+    for folder, cmd in mapping.items():
+        f = os.path.normpath(expand(folder))
+        if cwd == f or cwd.startswith(f.rstrip("/") + "/"):
+            if best is None or len(f) > len(best[0]):
+                best = (f, cmd)
+    return expand(best[1]) if best else None
 
 
 def _launch_line(role, entry, wait_cmd, extra=()):

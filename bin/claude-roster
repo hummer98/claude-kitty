@@ -87,10 +87,55 @@ def cmdline(pid):
     return proc.argv(pid) or []
 
 
+_CONFIG_DIRS = []
+
+
+def config_dir_of(pid):
+    """その claude が起動したときの CLAUDE_CONFIG_DIR（既定の置き場・読めないときは None）。"""
+    env = proc.environ(pid) if pid else None
+    d = (env or {}).get("CLAUDE_CONFIG_DIR")
+    if not d:
+        return None
+    try:
+        return None if Path(d).resolve() == CLAUDE_HOME.resolve() else d
+    except OSError:
+        return d
+
+
+def config_dirs():
+    """既定の置き場の他に見る設定の置き場（プロジェクトごとに CLAUDE_CONFIG_DIR で分けたもの）。
+
+    direnv の .envrc でプロジェクトごとに置き場を分けていると、セッションの記録（sessions/）と会話の記録（projects/）は
+    その置き場にある。見るのは、kitty のペインにいる claude の置き場と名簿に記録した置き場だけ（note_config_dirs）。
+    マシンの全部の claude から集めると、関係の無い置き場（macOS では ~/Documents の下など、読むと止まる所）まで読むため。"""
+    return list(_CONFIG_DIRS)
+
+
+def note_config_dirs(dirs):
+    for d in dirs:
+        if d and d not in _CONFIG_DIRS:
+            _CONFIG_DIRS.append(d)
+
+
+def note_pane_config_dirs(data):
+    """kitten @ ls のペインの前面のプロセスのうち、claude の置き場を覚える。"""
+    for osw in data or []:
+        for tab in osw.get("tabs", []):
+            for w in tab.get("windows", []):
+                for p in w.get("foreground_processes") or []:
+                    info = R.parse_argv(p.get("cmdline"))
+                    if info and info["tool"] == "claude":
+                        note_config_dirs([config_dir_of(p.get("pid"))])
+
+
 def live_sessions():
-    """~/.claude/sessions/*.json のうち、プロセスが生きているもの（procStart で pid の再利用を除く）。"""
+    """~/.claude/sessions/*.json（と、ほかの設定の置き場の sessions/）のうち、プロセスが生きているもの
+    （procStart で pid の再利用を除く）。"""
     out = []
-    for f in SESSIONS.glob("*.json"):
+    files = list(SESSIONS.glob("*.json"))
+    for d in config_dirs():
+        files += list((Path(d) / "sessions").glob("*.json"))
+    for f in files:
         try:
             d = json.loads(f.read_text())
         except (OSError, ValueError):
@@ -132,6 +177,8 @@ def transcript_model(sid):
     """会話記録の末尾から、最後の assistant の model。大きいので後ろから読む。"""
     try:
         files = list(PROJECTS.glob(f"*/{sid}.jsonl"))
+        for d in config_dirs():
+            files += list((Path(d) / "projects").glob(f"*/{sid}.jsonl"))
     except OSError:
         return None
     files = [f for f in files if f.is_file()]
@@ -231,7 +278,9 @@ def load_roster(path=None, set_aside=False):
     （壊れた名簿のせいで自動保存が永久に止まらないように。退けたものは手で調べられる）。"""
     path = Path(path) if path else roster_dir() / "roster.json"
     try:
-        return R.check_roster(json.loads(path.read_text()))
+        rost = R.check_roster(json.loads(path.read_text()))
+        note_config_dirs(e.get("config_dir") for e in rost["sessions"].values())
+        return rost
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as e:
@@ -275,8 +324,9 @@ def current_roster(sock, data, left, conf):
 
 
 def _current_roster(data, left, conf):
+    note_pane_config_dirs(data)
     return R.build_roster(data, live_sessions(), left, tab_pane_fraction, conf["models"], settings_model,
-                          transcript_model, now=time.time(), ignore=set(conf["ignore"]))
+                          transcript_model, now=time.time(), ignore=set(conf["ignore"]), config_dir_fn=config_dir_of)
 
 
 def show(rost):
@@ -366,7 +416,15 @@ def restore(args, view, conf, rost):
     lock = roster_lock()  # 途中で自動保存が半端な名簿を書かないように
     sock, data = find_kitty(args.to, left, rost["sessions"].keys())
     present = roles_in(data) if data else set()
+    note_config_dirs(e.get("config_dir") for e in rost["sessions"].values())
+    note_pane_config_dirs(data)
     busy = busy_sessions(live_sessions())
+    for entry in rost["sessions"].values():  # 設定の roster.claude（フォルダ → 包み）は開くときの設定で決める
+        cmd = R.claude_for(entry.get("cwd"), conf.get("claude"))
+        if cmd:
+            entry["claude"] = cmd
+        else:
+            entry.pop("claude", None)
     try:
         launch, skipped = R.plan_restore(rost, present, busy, only=args.roles, include_absent=args.include_absent,
                                          include_sleeping=args.include_sleeping)

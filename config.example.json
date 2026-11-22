@@ -72,7 +72,8 @@
     "models": {"dev-a": "opus"},
     "ignore": ["scratch"],
     "generations": 5,
-    "keep_absent_hours": 24
+    "keep_absent_hours": 24,
+    "claude": {"~/work/app": "~/bin/claude-bypass-app"}
   },
   "relay": {
     "enabled": true,

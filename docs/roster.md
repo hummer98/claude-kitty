@@ -53,6 +53,15 @@ claude-roster show [--from FILE]   # 名簿の中身
   待っているだけの役割の ID は消して `dup_of` を付ける。読めない名簿は `roster.json.bad` へ退けて、保存を続ける。
 - タブの題に claude-state の「● 」が付いていても外して記録する。
 
+## プロジェクトごとの設定の置き場と包み
+
+プロジェクトごとに `CLAUDE_CONFIG_DIR` で設定の置き場を分けている（direnv の `.envrc` など）と、セッションの記録と会話の記録はその置き場にある。
+
+- `save` は、ペインの claude が起動したときの `CLAUDE_CONFIG_DIR` を読み、既定の置き場でなければ名簿の役割に `config_dir` として残す（セッションの記録とモデルもその置き場から読む）。
+- `restore` は、`config_dir` のある役割を `env CLAUDE_CONFIG_DIR=<置き場> claude-wait …` で開く（同じ置き場で resume しないと会話が見つからない）。
+- 開くときに claude の代わりに使うコマンド（権限のモードや環境の守りを決めた包み）は、設定の `roster.claude`（フォルダ → コマンド）で決める。当たれば `CLAUDE_WAIT_CLAUDE=<コマンド>` を付ける（[config.md](config.md#roster)）。
+- 見る置き場は、kitty のペインにいる claude の置き場と名簿に記録した置き場だけ。マシンの全部の claude からは集めない（関係の無い置き場まで読むと、macOS では保護されたフォルダで止まる）。
+
 ## 自動の保存
 
 systemd のユーザータイマー（5 分ごと）。Claude Code の `settings.json`（hook）は変えない。

@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-roster`: プロジェクトごとに `CLAUDE_CONFIG_DIR` で設定の置き場を分けている（direnv の `.envrc` など）ときに、名簿と復元が効くようにした（[docs/roster.md](docs/roster.md#プロジェクトごとの設定の置き場と包み)）。
+  - `save` はペインの claude の `CLAUDE_CONFIG_DIR` を読み、既定でなければ役割に `config_dir` を残す。セッションの記録・モデルもその置き場から読む。
+  - `restore` は `config_dir` のある役割を `env CLAUDE_CONFIG_DIR=… claude-wait …` で開く（同じ置き場でないと resume で会話が見つからない）。
+  - 設定 `roster.claude`（既定 `{}`）: フォルダ → 開くときに claude の代わりに使うコマンド（`CLAUDE_WAIT_CLAUDE`）。プロジェクトごとの包み（権限のモード・環境の守り）で開き直すため。
+  - 見る置き場は kitty のペインの claude と名簿に記録したものだけ（マシンの全部の claude から集めると、macOS では `~/Documents` の下などの保護されたフォルダを読んで止まった）。
+
 ## [0.7.6] - 2026-11-23
 
 ### 修正
