@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-guard`: `commands` の `{"program"}` の `block` の項目に `but_if_any`。`unless_any` のフラグで通すものでも、`but_if_any` のどれかがあれば止める（`{"sub": "road", "unless_any": ["--dry-run", "--inspect-node"], "but_if_any": ["--engine-check"]}`）。読むだけの形でも、エンジンに評価させるフラグを足すとゲームが落ちる余地があるため。`if_any` / `unless_any` だけの項目の意味は変わらない。`unless_any` 無しの `but_if_any` は設定の誤りとして知らせる（[docs/guard-hook.md](docs/guard-hook.md)）。
+
 ## [0.7.4] - 2026-11-23
 
 ### 追加
