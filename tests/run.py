@@ -3194,7 +3194,8 @@ class StateWatchCli(unittest.TestCase):
             try:
                 # 1 回目でフォーカスを覚え、2 回目（3 秒後）に idle
                 with self.assertRaises(Stop):
-                    cs.cmd_watch(env, ["unix:" + path], sleep=sleep, now=lambda: next(clock), monotonic=lambda: 5.0)
+                    cs.cmd_watch(env, ["unix:" + path], sleep=sleep, now=lambda: next(clock), monotonic=lambda: 5.0,
+                                 disk=False)
             finally:
                 srv.close()
             self.assertEqual(sleeps, [1.0, 1.0])  # 壁時計でなく単調な時計で待つ
@@ -3202,7 +3203,7 @@ class StateWatchCli(unittest.TestCase):
                                                   "background=#232627"]])
             self.assertEqual(json.loads((rt / "claude-state" / "a.json").read_text())["state"], "idle")
             # socket が無くても落ちずに errors.log に残す
-            self.assertEqual(cs.cmd_watch(env, ["unix:" + path + "-gone"], once=True), 0)
+            self.assertEqual(cs.cmd_watch(env, ["unix:" + path + "-gone"], once=True, disk=False), 0)
             self.assertIn("watch", (rt / "claude-state" / "errors.log").read_text())
 
 
@@ -3223,7 +3224,7 @@ class StateWatchClock(unittest.TestCase):
                 raise Stop
             with self.assertRaises(Stop):
                 cs.cmd_watch(env, ["unix:" + t + "/none"], sleep=sleep, now=lambda: next(walls, 0.0),
-                             monotonic=lambda: next(mono))
+                             monotonic=lambda: next(mono), disk=False)
             self.assertLessEqual(sleeps[0], 1.0)
 
 
@@ -3253,6 +3254,7 @@ SIDE_TESTS = {
     "macos_test": "Mac",
     "relay_test": "Relay",
     "presence_test": "Presence",
+    "disk_watch_test": "Disk",
 }
 
 

@@ -73,7 +73,10 @@ class FakeWorld:
         return self.answers.get(name, (None, "no such command"))
 
     def ctx(self, os_name="Linux", python=(3, 12, 1), **env):
-        return D.Ctx(env=self.env(**env), os_name=os_name, run=self.run, which=self.which_map.get, repo=ROOT, python=python)
+        # ディスクは偽の statvfs で（手元の /tmp の使い方で結果が変わらないよう）。容量 10%・inode 5%
+        low = os.statvfs_result((4096, 4096, 1000, 900, 900, 1000, 950, 950, 0, 255))
+        return D.Ctx(env=self.env(**env), os_name=os_name, run=self.run, which=self.which_map.get, repo=ROOT, python=python,
+                     statvfs=lambda p: low)
 
 
 class Doctor(unittest.TestCase):
@@ -312,7 +315,7 @@ class ConfigExample(unittest.TestCase):
 
     def test_every_section_present(self):
         self.assertEqual(set(self.data), {"view", "kitty", "browser", "state", "lang", "guard_hook", "session_stats", "roster",
-                                          "relay", "model_policy"})
+                                          "relay", "model_policy", "disk_watch"})
 
     def test_loaders_read_example(self):
         from config import load_roster_config, load_state_config, load_view_config
@@ -353,6 +356,9 @@ class ConfigExample(unittest.TestCase):
         from presence import DEFAULT_MODEL_POLICY
         self.assertEqual(load_model_policy(self.env, self.PATH), self.data["model_policy"])
         self.assertEqual(self.data["model_policy"], DEFAULT_MODEL_POLICY)  # 写しただけでは切り替えない（既定と同じ）
+        from config import DEFAULT_DISK_WATCH, load_disk_watch_config
+        self.assertEqual(load_disk_watch_config(self.env, self.PATH), self.data["disk_watch"])
+        self.assertEqual(self.data["disk_watch"], DEFAULT_DISK_WATCH)  # 写しただけでは送らない（既定と同じ）
 
     def test_example_guard_blocks_nothing_when_copied(self):
         import guardhook as gh
@@ -393,6 +399,9 @@ class ConfigExample(unittest.TestCase):
         from presence import DEFAULT_MODEL_POLICY
         for k, v in DEFAULT_MODEL_POLICY.items():
             self.assertEqual(default_of(k, "model_policy"), f"`{json.dumps(v, ensure_ascii=False)}`", k)
+        from config import DEFAULT_DISK_WATCH
+        for k, v in DEFAULT_DISK_WATCH.items():
+            self.assertEqual(default_of(k, "disk_watch"), f"`{json.dumps(v)}`", k)
         self.assertEqual(default_of("left", "view"), f"`{json.dumps(DEFAULT_VIEW['left'])}`")
 
 

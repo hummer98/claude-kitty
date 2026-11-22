@@ -20,9 +20,10 @@ import time
 # 頭に来るもの: 背景の作業の完了の通知、Claude Code のセッション間メッセージ、サブエージェントの報告、システムの注記
 MACHINE_PREFIXES = ("<task-notification", "<cross-session-message", "<agent-message", "<system-reminder")
 # 中にあれば人でないもの。claude-kitty の道具が Claude Code の socket に直接送る文には、必ずこのどれかを入れる
-# （claude-relay の起こす知らせ = lib/relay.py の wake_text。足したら tests の照合も足す）。
+# （claude-relay の起こす知らせ = lib/relay.py の wake_text、ディスクの見張り = lib/diskwatch.py の MARK。
+# 足したら tests の照合も足す）。
 # <cross-session-message は頭でなくても（前に空白・別の文があっても）人でないとみる（claude-state の判定と同じ）
-MACHINE_MARKS = ("[relay-wake ids=", "<cross-session-message")
+MACHINE_MARKS = ("[relay-wake ids=", "<cross-session-message", "[claude-kitty disk]")
 
 AGENT_TOOLS = ("Agent", "Task")  # Task は Agent ツールの古い名前
 # 止めない subagent_type（調べもの・設計・ガイド・自分の写し）と model

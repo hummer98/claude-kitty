@@ -324,6 +324,50 @@ def load_relay_config(env, path=None):
     return out
 
 
+DEFAULT_DISK_WATCH = {"enabled": True, "paths": ["/tmp"], "thresholds": [70, 85], "notify_role": None, "interval_sec": 60}
+
+
+def load_disk_watch_config(env, path=None):
+    """claude-state watch のディスクの見張りの設定 {"enabled", "paths", "thresholds", "notify_role", "interval_sec"} を返す
+    （無ければ既定: /tmp を 60 秒ごと、70 % と 85 %、送り先の役割は無し = デスクトップの通知だけ）。
+
+      {"disk_watch": {"paths": ["/tmp", "$XDG_RUNTIME_DIR", "~/.cache/cc-tmp"], "notify_role": "main"}}
+
+    paths の ~ と $VAR は使うときに展開する（無い path は飛ばす）。thresholds は 1〜100 の数で、小さい順・重なり無しに
+    そろえる。壊れていれば ValueError（watch は見張りだけを止めて errors.log に残す）。"""
+    import re
+    path = Path(path) if path else config_path(env)
+    out = json.loads(json.dumps(DEFAULT_DISK_WATCH))
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return out
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    d = data.get("disk_watch", {}) if isinstance(data, dict) else {}
+    if not isinstance(d, dict):
+        raise ValueError(f"{path} の disk_watch がオブジェクトでない")
+    e = d.get("enabled", True)
+    if not isinstance(e, bool):
+        raise ValueError(f"{path} の disk_watch.enabled は true / false: {e!r}")
+    ps = d.get("paths", DEFAULT_DISK_WATCH["paths"])
+    if not (isinstance(ps, list) and all(isinstance(x, str) and x for x in ps)):
+        raise ValueError(f"{path} の disk_watch.paths は空でない文字列のリスト（[\"/tmp\"] など）: {ps!r}")
+    ts = d.get("thresholds", DEFAULT_DISK_WATCH["thresholds"])
+    if not (isinstance(ts, list) and ts
+            and all(isinstance(x, (int, float)) and not isinstance(x, bool) and 1 <= x <= 100 for x in ts)):
+        raise ValueError(f"{path} の disk_watch.thresholds は 1〜100 の数のリスト（[70, 85] など）: {ts!r}")
+    role = d.get("notify_role")
+    if role is not None and not (isinstance(role, str) and re.match(RELAY_NAME, role)):
+        raise ValueError(f"{path} の disk_watch.notify_role は役割名（英数字と . _ -、64 字まで）か null: {role!r}")
+    iv = d.get("interval_sec", DEFAULT_DISK_WATCH["interval_sec"])
+    if isinstance(iv, bool) or not isinstance(iv, (int, float)) or not 5 <= iv <= 86400:
+        raise ValueError(f"{path} の disk_watch.interval_sec は 5〜86400 の数（秒）: {iv!r}")
+    out.update(enabled=e, paths=list(dict.fromkeys(ps)), thresholds=sorted(set(ts)), notify_role=role,
+               interval_sec=float(iv))
+    return out
+
+
 MODEL_NAME = r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$"
 
 
