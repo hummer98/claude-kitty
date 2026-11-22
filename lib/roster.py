@@ -17,7 +17,7 @@ import os
 import re
 import shlex
 
-from view import current_rows, left_percent, overlay_ids
+from view import current_rows, left_percent, overlay_ids, pin_rows
 
 MARK = "● "  # claude-state が待受中のペインのいるタブの題に付ける印（lib/state.py の MARK と同じ）
 
@@ -387,12 +387,15 @@ def _launch_line(role, entry, wait_cmd, extra=()):
     return shlex.join(args + pane_command(role, entry, wait_cmd))
 
 
-def main_tab_lines(left, rows, sessions, wait_cmd):
+def main_tab_lines(left, rows, sessions, wait_cmd, pinned=()):
     """統括のタブ: 左に統括、右に段組みどおり（等分割に近い比で。最後は claude-view rows で正確にそろえる）。
 
     kitty のセッションの launch は、いま前にあるペインを割る（--bias は新しいペインの割合）。
     claude-view の plan と同じく、先に各段の先頭を縦に積み、そのあと段の中を左から埋める。
+    pinned（設定の view.pinned。常時表示）は claude-view と同じく 1 段目の先頭に置く。left と同じもの・
+    sessions に無いものは置かない。
     """
+    rows = pin_rows(rows, [p for p in pinned if p != left and p in sessions])
     out = [_launch_line(left, sessions[left], wait_cmd)]
     if not rows:
         return out
@@ -442,19 +445,22 @@ def plan_restore(roster, present_roles, busy, only=None, include_absent=False):
     return launch, skipped
 
 
-def session_file(roster, launch, wait_cmd, header=""):
+def session_file(roster, launch, wait_cmd, header="", pinned=()):
     """kitty のセッションファイルの本文。launch の role だけを開く（統括は必ず先頭のタブの左）。
 
     統括のタブ以外は、名簿のタブの題のまま作り、縦に積む（claude-view は standby を題で探す）。
+    pinned（設定の view.pinned）は、名簿で別のタブや段にいても統括のタブの 1 段目の先頭に開く
+    （保存したあとで設定に足した役割も、開き直したときから常時表示にするため）。
     """
     sess, left = roster["sessions"], roster["left"]
     keep = set(launch)
     lines = [f"# {header}" if header else "# claude-roster が名簿から作った", ""]
     main = next((t for t in roster["tabs"] if "rows" in t), None)
     first = True
+    placed = set()
     if main and left in keep:
         lines += ["new_tab " + shlex.quote(main["title"] or "main"), "layout splits"]
-        rows = filter_rows(main.get("rows"), keep)
+        rows = pin_rows(filter_rows(main.get("rows"), keep), [p for p in pinned if p in keep and p != left])
         lines += main_tab_lines(left, rows, sess, wait_cmd)
         placed = {left} | {r for row in rows for r in row}
         # 段組みに無かったが統括のタブにいた role（段の計算から漏れたもの）は standby に回す
@@ -467,7 +473,7 @@ def session_file(roster, launch, wait_cmd, header=""):
     for t in roster["tabs"]:
         if t is main:
             continue
-        roles = [r for r in t["roles"] if r in keep]
+        roles = [r for r in t["roles"] if r in keep and r not in placed]
         if t["title"] == STANDBY:
             roles = rest_main + roles
             rest_main = []
@@ -500,8 +506,10 @@ def launch_args(role, entry, wait_cmd, tab_title, tab_exists):
     return args + pane_command(role, entry, wait_cmd)
 
 
-def target_tab(roster, role):
-    """足すときに入れるタブの題。統括のタブの役は standby に入れて、claude-view rows で前に出す。"""
+def target_tab(roster, role, pinned=()):
+    """足すときに入れるタブの題。統括のタブの役と常時表示（pinned）は standby に入れて、claude-view rows で前に出す。"""
+    if role in pinned:
+        return STANDBY
     for t in roster["tabs"]:
         if role in t["roles"]:
             return STANDBY if "rows" in t else (t["title"] or STANDBY)

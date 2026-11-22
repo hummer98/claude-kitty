@@ -12,6 +12,8 @@
   claude-view rows "a,b/c"           任意の段組み（/ で段、, で横並び）
   claude-view status                 いまの配置
 どの操作も最後は等分割（段ごとに幅を等しく、統括の左の列も 1 列分）にそろえる。
+設定の view.pinned の役割は統括と同じく常時表示: どの操作のあとも右側の 1 段目の先頭（複数ならその順）に置き、
+focus・remove などで standby に下げない（kitty にいなければ警告して続ける）。
   共通: --left ROLE（既定は設定の view.left か $CLAUDE_VIEW_LEFT、無ければ main）、--to SOCKET、--dry-run、
         --force（保護する窓が前面でも実行）
 
@@ -34,8 +36,8 @@ from geometry import tab_pane_fraction  # noqa: E402
 from guard import guarded_in_front as _guarded_in_front  # noqa: E402
 from kstate import Kitten, refresh_marks, state_dir, state_lock  # noqa: E402
 from rundir import live_kitty_sockets, runtime_dir  # noqa: E402
-from view import (add_role, current_rows, overlay_ids, parse_rows, plan, remove_role,  # noqa: E402
-                  split_two, swap_roles, validate)
+from view import (active_pins, add_role, current_rows, overlay_ids, parse_rows, pin_rows, plan,  # noqa: E402
+                  remove_role, split_two, swap_roles, validate)
 
 KITTEN = kitten_path(os.environ)
 STANDBY = "standby"
@@ -173,9 +175,32 @@ def main(argv=None):
                 "swap": lambda: swap_roles(now, args.a, args.b)}[args.cmd]()
     except ValueError as e:
         die(str(e))
+    # pinned を先頭に移すと、指定そのものの誤り（rows・restore・pair で 2 回出てくるなど）が消えて黙って通るので、
+    # 移す前の形で調べておく。断るのは保護する窓の判定のあと（前面なら誤りでも終了コード 2 のまま）
+    try:
+        validate(args.left, rows, smap.keys())
+        spec_error = None
+    except ValueError as e:
+        spec_error = str(e)
+    # 常時表示（view.pinned）は、どの操作のあとでも 1 段目の先頭へ戻す
+    pins, notes = active_pins(conf["pinned"], args.left, smap.keys())
+    for note in notes:
+        print(f"claude-view: 注意: {note}", file=sys.stderr)
+    if args.cmd == "remove" and args.role in pins:
+        print(f"claude-view: 注意: {args.role} は常時表示（view.pinned）なので下げない", file=sys.stderr)
+    if args.cmd == "swap" and {args.a, args.b} & set(pins):
+        # 入れ替えても先頭へ戻すので、相手の位置だけが動いて段の形が崩れる。黙って崩さず断る
+        die(f"{(set(pins) & {args.a, args.b}).pop()} は常時表示（view.pinned）で場所が固定なので入れ替えない")
+    pinned_rows = pin_rows(rows, pins)
+    moved = pins and pinned_rows != rows
+    rows = pinned_rows
 
     if not args.dry_run and not args.force and guarded_in_front(conf["guard"]):
         die("保護する窓（view.guard）が前面にあるので何もしない（--force で実行）", 2)
+    if spec_error:
+        die(spec_error)
+    if moved:  # 何もしないとき（保護する窓が前面）には出さない
+        print("常時表示（view.pinned）を 1 段目の先頭に置いた: " + "/".join(",".join(r) for r in rows))
 
     # 同時に 2 つ並べ替えると形が崩れるので 1 つずつ
     lock = open(runtime_dir() / "claude-view.lock", "w")

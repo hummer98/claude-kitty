@@ -17,6 +17,7 @@
   - 閾値ごとに 1 回だけ。閾値より 10 ポイント下がってからまた超えたら、もう 1 回。知らせた印は `$XDG_RUNTIME_DIR/claude-disk-watch/state.json` に置き、watch を起動し直しても繰り返さない。inode の数を持たないファイルシステム（btrfs など）は inode を見ない。無い path は飛ばす。
   - 送り先は `notify_role` の役割のセッション（既定 `null` = デスクトップの通知だけ）。claude-relay 第 2 段の起こす部品（`lib/relay.py` の `WAKERS`、cross-session の socket）で 1 通送り、止まっているセッションにも届ける。送れなければデスクトップの通知（`notify-send` / `osascript`）。本文に、直下の項目を名前の頭（`tmp*`・`lua_*`・`pytest-*` など）でまとめた数の上位 3 つと、直下の項目の数。直下が少なければ、直下のフォルダごとの中の数の上位 2 つも（1 秒で数え終わらなければ省く・途中まで）。`claude-state watch --once` は測った値を出すだけで、知らせない。本文の頭の `[claude-kitty disk]` は claude-presence が人の入力と数えない。
   - `claude-kitty doctor` に「ディスク: <path>」（使用率と、閾値を超えているか）と「設定: disk_watch」の行。
+- 設定 `view.pinned`（既定 `[]`）: 統括（`view.left`）と同じく常時表示にする役割。`claude-view` のどの操作（`all`・`focus`・`pair`・`restore`・`add`・`remove`・`swap`・`equalize`・`rows`）のあとも右側の 1 段目の先頭（統括のすぐ右上。複数なら書いた順）に置き、standby に下げない。運用の担当を統括と同じく常に見えるところ・同じ場所に置くため。`rows` で別の位置を指定しても先頭へ移し、並べ替えた結果を 1 行出す。`swap` で pinned を入れ替えようとすると断る。`rows`・`restore`・`pair` の指定そのものの誤り（同じ役割を 2 回など）は、pinned を先頭へ移す前の形で断る（保護する窓が前面なら終了コード 2 のまま）。kitty にいない役割・`view.left` と同じ役割は警告を 1 行出して置かずに続ける。`claude-roster restore` のセッションファイルも統括のタブの 1 段目の先頭に開く（名簿で別のタブにいても二重に開かない）。kitty が動いているときに足したのが pinned だけなら、保存した段組みに戻さず `claude-view equalize` で前に出す（[docs/config.md](docs/config.md#viewclaude-viewclaude-showclaude-roster)）。
 
 ### 修正
 
@@ -26,6 +27,7 @@
 
 - 使うときだけ: 設定に `"model_policy": {"enabled": true}` を書き、`tools/install.sh --hooks=model`。
 - `systemctl --user restart claude-state-watch.service`（ディスクの見張りを始める）。統括に送るなら設定に `"disk_watch": {"notify_role": "<役割>"}` を書く（その役割が `relay.receivers` に入り、relay の hook が入っていること）。
+- 使うときだけ: 設定の `view` に `"pinned": ["<役割>"]` を書く。
 
 ## [0.7.3] - 2026-11-22
 

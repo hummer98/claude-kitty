@@ -33,6 +33,7 @@ from guard import guarded_in_front  # noqa: E402
 import proc  # noqa: E402
 import roster as R  # noqa: E402
 from rundir import live_kitty_sockets, runtime_dir  # noqa: E402
+from view import pin_rows  # noqa: E402
 
 ENV = os.environ
 KITTEN = kitten_path(ENV)
@@ -335,12 +336,14 @@ def wait_for_kitty(left, roles, before, timeout=20.0):
 
 
 def run_view(sock, left, rows, dry):
-    spec = R.rows_spec(rows)
-    cmd = [str(HERE / "bin/claude-view"), "--to", sock, "--left", left] + (["--dry-run"] if dry else []) + ["rows", spec]
-    print("並べ直す: claude-view rows " + repr(spec))
+    """claude-view rows で並べ直す。rows が None なら claude-view equalize（いまの並びのまま）。"""
+    sub = ["equalize"] if rows is None else ["rows", R.rows_spec(rows)]
+    shown = " ".join(sub[:1] + [repr(x) for x in sub[1:]])
+    cmd = [str(HERE / "bin/claude-view"), "--to", sock, "--left", left] + (["--dry-run"] if dry else []) + sub
+    print("並べ直す: claude-view " + shown)
     r = subprocess.run(cmd)
     if r.returncode == 2:
-        print("claude-roster: 保護する窓が前面なので並べ直さなかった。あとで claude-view rows " + repr(spec), file=sys.stderr)
+        print("claude-roster: 保護する窓が前面なので並べ直さなかった。あとで claude-view " + shown, file=sys.stderr)
     return r.returncode
 
 
@@ -371,7 +374,8 @@ def cmd_restore(args, view, conf):
             die("保護するプロセス（view.guard。全画面のアプリなど）が動いているので kitty を起動しない（--force で実行）", 2)
         if left not in launch:
             print(f"注意: 統括 {left} を開かないので、並べ直しはしない")
-        text = R.session_file(rost, launch, wait_cmd, header=f"claude-roster restore（名簿 {time.strftime('%F %T', time.localtime(rost['saved_at']))}）")
+        text = R.session_file(rost, launch, wait_cmd, header=f"claude-roster restore（名簿 {time.strftime('%F %T', time.localtime(rost['saved_at']))}）",
+                              pinned=view["pinned"])
         if text is None:
             print("開くものが無い")
             return 0
@@ -391,7 +395,11 @@ def cmd_restore(args, view, conf):
             die("起動した kitty が見つからない（20 秒待った）")
         print(f"起動した: {sock}")
         rows = R.filter_rows(main.get("rows") if main else [], set(launch))
-        if left in launch and rows:
+        # 常時表示（view.pinned）は名簿の段組みに無くても前に出す（claude-view rows が 1 段目の先頭に置く）
+        # 統括のタブ（段組み）が名簿に無ければ、セッションファイルも pinned を前に置いていないので並べ直さない
+        if main:
+            rows = pin_rows(rows, [p for p in view["pinned"] if p in launch and p != left])
+        if left in launch and main and rows:
             time.sleep(1.0)
             run_view(sock, left, rows, False)
         lock.close()
@@ -401,9 +409,13 @@ def cmd_restore(args, view, conf):
         print("欠けている役割は無い")
         return 0
     tabs = {t["title"] for osw in data for t in osw.get("tabs", [])}
+    # 並べ直しが走るとき（統括とそのタブがあるとき）だけ、常時表示（view.pinned）を standby に入れて前に出す。
+    # 走らないのに standby へ入れると、名簿のタブにも出ず見えなくなる
+    rearrange = bool((left in present or left in launch) and main)
+    pins = [p for p in view["pinned"] if p != left] if rearrange else []
     for role in launch:
         # 統括は名簿の統括のタブ（無ければ新しいタブ）へ。ほかは standby に入れて claude-view rows で前に出す
-        title = (main["title"] or "main") if role == left and main else R.target_tab(rost, role)
+        title = (main["title"] or "main") if role == left and main else R.target_tab(rost, role, pins)
         a = R.launch_args(role, rost["sessions"][role], wait_cmd, title, title in tabs)
         print("足す: " + role + (f"（タブ {title}）"))
         if args.dry_run:
@@ -411,11 +423,17 @@ def cmd_restore(args, view, conf):
             continue
         kitten(sock, *a)
         tabs.add(title)
-    if (left in present or left in launch) and main and any(r in launch for row in main.get("rows", []) for r in row):
-        rows = R.filter_rows(main["rows"], present | set(launch))
+    if rearrange and any(r in launch for row in main.get("rows", []) for r in row):
+        rows = pin_rows(R.filter_rows(main["rows"], present | set(launch)), [p for p in pins if p in present | set(launch)])
         if not args.dry_run:
             time.sleep(0.5)
         run_view(sock, left, rows, args.dry_run)
+    elif rearrange and any(p in launch for p in pins):
+        # 足したのが常時表示だけなら、名簿の段組みに戻さず（保存のあとに手で並べた形を崩さない）、
+        # いまの並びのまま claude-view が pinned を 1 段目の先頭に置く
+        if not args.dry_run:
+            time.sleep(0.5)
+        run_view(sock, left, None, args.dry_run)
     lock.close()
     return 0
 

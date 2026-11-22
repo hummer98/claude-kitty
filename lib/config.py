@@ -4,9 +4,9 @@
 設定ファイルは $CLAUDE_KITTY_CONFIG、無ければ $XDG_CONFIG_HOME/claude-kitty/config.json
 （既定 ~/.config/claude-kitty/config.json）。リポジトリの外に置き、手元の役割名はそこに書く。
 
-  {"view": {"left": "main", "restore": [["dev-a"], ["dev-b"]], "guard": ["^\\\\./fullscreen-app"]}}
+  {"view": {"left": "main", "pinned": ["ops"], "restore": [["dev-a"], ["dev-b"]], "guard": ["^\\\\./fullscreen-app"]}}
 
-restore は段のリストか "a,b/c" の形の文字列。guard は前面にあったら並べ替えない窓のプロセスの
+pinned は left と同じく常時表示にする役割（右側の 1 段目の先頭に固定）。restore は段のリストか "a,b/c" の形の文字列。guard は前面にあったら並べ替えない窓のプロセスの
 正規表現（pgrep -f に渡す）。既定は空で、そのときは前面の窓を調べない（KWin を呼ばない）。
 """
 import json
@@ -17,7 +17,7 @@ from pathlib import Path
 from view import parse_rows
 
 # 既定値は kitty/example.session に合わせる
-DEFAULT_VIEW = {"left": "main", "restore": [["dev-a"], ["dev-b"]], "guard": []}
+DEFAULT_VIEW = {"left": "main", "pinned": [], "restore": [["dev-a"], ["dev-b"]], "guard": []}
 
 
 def config_path(env):
@@ -37,7 +37,7 @@ def _rows(value, where):
 
 
 def load_view_config(env, path=None):
-    """claude-view の設定 {"left", "restore", "guard"} を返す。設定ファイルが壊れていれば ValueError。"""
+    """claude-view の設定 {"left", "pinned", "restore", "guard"} を返す。設定ファイルが壊れていれば ValueError。"""
     path = Path(path) if path else config_path(env)
     out = {k: (list(v) if isinstance(v, list) else v) for k, v in DEFAULT_VIEW.items()}
     try:
@@ -58,6 +58,14 @@ def load_view_config(env, path=None):
             if not isinstance(view["left"], str) or not view["left"]:
                 raise ValueError(f"{path} の view.left が正しくない: {view['left']!r}")
             out["left"] = view["left"]
+        if "pinned" in view:
+            pins = view["pinned"]
+            if isinstance(pins, str):
+                pins = [pins]
+            # 区切り（, /）を含む名前は claude-view rows の段組みに入れられない
+            if not isinstance(pins, list) or not all(isinstance(x, str) and x and not set(x) & set(",/ ") for x in pins):
+                raise ValueError(f"{path} の view.pinned が正しくない: {view['pinned']!r}")
+            out["pinned"] = list(dict.fromkeys(pins))
         if "restore" in view:
             out["restore"] = _rows(view["restore"], f"{path} の view.restore")
         if "guard" in view:

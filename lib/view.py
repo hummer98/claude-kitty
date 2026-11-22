@@ -67,6 +67,36 @@ def swap_roles(rows, a, b):
     return [[b if r == a else a if r == b else r for r in row] for row in rows]
 
 
+def pin_rows(rows, pinned):
+    """pinned（常時表示の役割。設定の view.pinned）を 1 段目の先頭へ、その順に置く。残りの並びは変えない。
+
+    ユーザーの指示「運用担当は統括と同様に、常時表示セッションとしてください。できれば場所も固定で、統括の
+    すぐ右上がいいですね」。どの操作の段組みにも最後にかけるので、ほかの段にいても先頭へ移し、空いた段は捨てる。
+    """
+    pins = list(dict.fromkeys(pinned))
+    if not pins:
+        return [list(r) for r in rows]
+    rest = [[r for r in row if r not in pins] for row in rows]
+    first = pins + (rest[0] if rest else [])
+    return [first] + [row for row in rest[1:] if row]
+
+
+def active_pins(pinned, left, known):
+    """配置に使う pinned と、警告の行のリストを返す。
+
+    left と同じ役割（設定の誤り）と、kitty にいない役割は外して続ける（並べ替え全体を止めるほどではないため）。
+    """
+    pins, notes = [], []
+    for role in dict.fromkeys(pinned):
+        if role == left:
+            notes.append(f"view.pinned の {role} は左の枠（--left / view.left）と同じなので、右には置かない（設定を見直す）")
+        elif role not in known:
+            notes.append(f"view.pinned の {role} が kitty に見つからないので、置かずに続ける")
+        else:
+            pins.append(role)
+    return pins, notes
+
+
 def parse_rows(spec):
     """"a,b,c/d,e" → [["a","b","c"],["d","e"]]。空の段は捨てる。"""
     return [[r.strip() for r in row.split(",") if r.strip()] for row in spec.split("/") if row.strip()]

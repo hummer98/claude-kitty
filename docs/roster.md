@@ -66,9 +66,10 @@ systemctl --user daemon-reload && systemctl --user enable --now claude-roster-sa
 - **kitty が無いとき**: 保護するプロセスが動いているだけでも起動しない（新しい窓は最大化して出るので。`--force` で実行）。名簿からセッションファイル（`$XDG_RUNTIME_DIR/claude-roster/restore-<時刻>.session`）を作り、
   `claude-kitty <ファイル>` で起動する。各ペインは `--var role=<役割> --cwd <フォルダ>` で、
   `bash -lic 'claude-wait <役割> <ID> --model <モデル>'` を開く（ID が無い役割はシェルだけ）。統括のタブは段組みどおりに割り、
-  最後に `claude-view rows "<段組み>"` で元の並びと等分割にそろえる。`--dry-run` はファイルを表示するだけ。
+  最後に `claude-view rows "<段組み>"` で元の並びと等分割にそろえる。設定の `view.pinned`（常時表示）の役割は、名簿で別のタブにいても
+  統括のタブの 1 段目の先頭に開く。`--dry-run` はファイルを表示するだけ。
 - **kitty が動いていて一部だけ欠けているとき**: `kitten @ launch --keep-focus` で欠けた役割だけ足し（統括のタブの役割は standby タブへ、
-  ほかは名簿のタブへ）、統括のタブの役割を足したときだけ `claude-view rows` で並べ直す。新しいペインの環境は kitty のもの
+  ほかは名簿のタブへ。`view.pinned` の役割は、並べ直しが走るとき（統括とそのタブがあるとき）だけ standby タブへ）、統括のタブの役割を足したときだけ `claude-view rows` で並べ直す。足したのが pinned だけなら、保存した段組みには戻さず `claude-view equalize`（いまの並びのまま、pinned を 1 段目の先頭に置く）。新しいペインの環境は kitty のもの
   （呼んだ claude の `CLAUDE_*` は入らない）。
 - ペインはあるが claude がいない（シェルに戻った）役割は開かない（ペインを作らないので）。そのペインで `claude-wait <役割> <ID>` を打つ。
 - kitty が落ちた直後は、claude の後片付けが終わらず「いま動いている」と見えることがある。数秒後にもう一度 `restore` する。

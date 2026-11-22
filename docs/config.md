@@ -16,6 +16,7 @@ claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`�
 | 項目 | 既定 | 意味 |
 |---|---|---|
 | `left` | `"main"` | 左の列に固定する統括の役割名。`claude-view` はこの役割のいる kitty を操作し、`claude-browser --area right` / `--area others`（`--mode show` の既定）はこのペインを除いた右側を範囲にする |
+| `pinned` | `[]` | 左の列と同じく常時表示にする役割のリスト（文字列 1 つでもよい）。`claude-view` のどの操作のあとも右側の 1 段目の先頭（統括のすぐ右上。複数なら書いた順）に置き、`focus`・`remove` などで standby に下げない。`rows` で別の位置を指定しても先頭へ移す（`pair A B` は 1 段目が pinned,A、2 段目が B）。`swap` で入れ替えようとすると断る。`claude-roster restore` も統括のタブの 1 段目の先頭に開く（名簿で別のタブにいても）。kitty にいない役割・`left` と同じ役割は警告を出して置かない。名前に `,` `/` 空白は使えない |
 | `restore` | `[["dev-a"], ["dev-b"]]` | `claude-view restore` の配置。段（上から）のリストで、各段は左から並べる役割名。`"dev-a,dev-c/dev-b"` の文字列でも書ける |
 | `guard` | `[]` | 前面にあったら画面を並べ替えない窓のプロセス（`pgrep -f` の正規表現。文字列 1 つでもよい）。全画面のアプリや発表中の画面など。空なら前面の窓を調べない。前面の窓は KDE Plasma なら KWin、macOS なら `lsappinfo` で読む（macOS で読めないときは、当たるプロセスが動いているだけで並べ替えを控える） |
 
