@@ -13,6 +13,7 @@
   - 切り替え: PreToolUse の hook（`claude-presence hook`、matcher `Agent|Task`）が呼び出しを `permissionDecision: "deny"` で断り、`permissionDecisionReason` で「離席中なので model を `away_model` にして同じ呼び出しを出し直してください（ほかの項目はそのまま）」と頼む。出し直し（`model` が `away_model`）は通し、そのとき `switches.jsonl` に残す（断った記録は `denials.jsonl`）。入力を書き換える `updatedInput` は使わない: auto mode では hook が入力を変えると判定が無効になって断られ、同じ返答のほかの呼び出し（Bash など）まで巻き込まれたため（実測）。deny なら巻き込まない見込み（実機の auto mode ではまだ確かめていない）。`keep` の語（レビュー・評価・調べものなど）を含むもの、`subagent_type` が `claude-code-guide`・`Explore`・`Plan`・`web-fetch`・`fork` のもの、`model` が `fable` のもの、記録が無いとき、例外のときは止めない。英字の `keep` の語は単語として探す（`guide` は `guideline` に当てない）。同じセッションの同じ prompt を 300 秒以内に断っていたら、元の model のままの出し直しも通す（Claude が従わなかったときに断りをくり返して作業を止めないため）。断りの記録が書けない・読めないときは断らない。
   - `claude-presence [--json] [--recent N]` で最後の入力からの分数・判定・設定・hook・直近の切り替え・断った数（うち切り替わった数）を見る。`claude-kitty doctor` に「モデルの切り替え」と「設定: model_policy」の行。
   - `tools/install.sh --hooks=model` で hook を入れる（`--all` には入らない。`--uninstall` で外せる）。
+- 設定 `view.pinned`（既定 `[]`）: 統括（`view.left`）と同じく常時表示にする役割。`claude-view` のどの操作（`all`・`focus`・`pair`・`restore`・`add`・`remove`・`swap`・`equalize`・`rows`）のあとも右側の 1 段目の先頭（統括のすぐ右上。複数なら書いた順）に置き、standby に下げない。運用の担当を統括と同じく常に見えるところ・同じ場所に置くため。`rows` で別の位置を指定しても先頭へ移し、並べ替えた結果を 1 行出す。`swap` で pinned を入れ替えようとすると断る。kitty にいない役割・`view.left` と同じ役割は警告を 1 行出して置かずに続ける。`claude-roster restore` のセッションファイルも統括のタブの 1 段目の先頭に開く（名簿で別のタブにいても二重に開かない）。kitty が動いているときに足したのが pinned だけなら、保存した段組みに戻さず `claude-view equalize` で前に出す（[docs/config.md](docs/config.md#viewclaude-viewclaude-showclaude-roster)）。
 
 ### 修正
 
@@ -21,6 +22,7 @@
 ### 上げるときに手で行うこと
 
 - 使うときだけ: 設定に `"model_policy": {"enabled": true}` を書き、`tools/install.sh --hooks=model`。
+- 使うときだけ: 設定の `view` に `"pinned": ["<役割>"]` を書く。
 
 ## [0.7.3] - 2026-11-22
 

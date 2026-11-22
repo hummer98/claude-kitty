@@ -1,6 +1,7 @@
 {
   "view": {
     "left": "main",
+    "pinned": [],
     "restore": [["dev-a"], ["dev-b"]],
     "guard": []
   },

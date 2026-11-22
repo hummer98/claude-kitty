@@ -7,8 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from geometry import (fit_correction, others_area_fraction, pane_fraction, right_area_fraction,  # noqa: E402
                       split_rects, tab_pane_fraction, target_rect)
-from view import (add_role, current_rows, left_percent, parse_rows, plan, remove_role,  # noqa: E402
-                  split_two, swap_roles, validate)
+from view import (active_pins, add_role, current_rows, left_percent, parse_rows, pin_rows, plan,  # noqa: E402
+                  remove_role, split_two, swap_roles, validate)
 ALLROWS = [["dev-a", "dev-c", "dev-d"], ["dev-b", "dev-e"]]
 import json  # noqa: E402
 from core import (check_layout, choose_key, kitty_pid_from_socket, resolve_place_opts,  # noqa: E402
@@ -725,6 +725,75 @@ class ViewOps(unittest.TestCase):
         self.assertIn(("bias", 33), ops)  # 左 = 1/(2+1)
 
 
+class ViewPinned(unittest.TestCase):
+    """view.pinned（常時表示）: どの操作のあとも右側の 1 段目の先頭に置く。"""
+
+    def test_pinned_goes_first_in_first_row(self):
+        self.assertEqual(pin_rows([["a", "b"], ["c"]], ["ops"]), [["ops", "a", "b"], ["c"]])
+        self.assertEqual(pin_rows([["a"]], ["ops", "mon"]), [["ops", "mon", "a"]])  # 複数はその順に
+        self.assertEqual(pin_rows([], ["ops"]), [["ops"]])
+        self.assertEqual(pin_rows([["a"], ["b"]], []), [["a"], ["b"]])
+        self.assertEqual(pin_rows([], []), [])
+
+    def test_rows_elsewhere_moves_back_to_front(self):
+        # rows で別の位置を指定しても先頭に戻し、残りはそのまま
+        self.assertEqual(pin_rows(parse_rows("a,ops/b,c"), ["ops"]), [["ops", "a"], ["b", "c"]])
+        self.assertEqual(pin_rows(parse_rows("a,b/c,ops"), ["ops"]), [["ops", "a", "b"], ["c"]])
+        # ほかの段にいて、その段が空になれば段ごと消す
+        self.assertEqual(pin_rows([["a"], ["ops"], ["b"]], ["ops"]), [["ops", "a"], ["b"]])
+        # 1 段目が pinned だけなら形はそのまま
+        self.assertEqual(pin_rows([["ops"], ["a"]], ["ops"]), [["ops"], ["a"]])
+        # 順番も設定の順に直す
+        self.assertEqual(pin_rows([["mon", "ops", "a"]], ["ops", "mon"]), [["ops", "mon", "a"]])
+
+    def test_after_every_operation(self):
+        rows = [["ops", "a"], ["b"]]
+        self.assertEqual(pin_rows(add_role(rows, "x", 0), ["ops"]), [["ops", "a", "x"]] + [["b"]])
+        self.assertEqual(pin_rows(add_role(rows, "ops", 1), ["ops"]), [["ops", "a"], ["b"]])
+        self.assertEqual(pin_rows(swap_roles(rows, "a", "b"), ["ops"]), [["ops", "b"], ["a"]])
+        self.assertEqual(pin_rows(split_two(["a", "b", "ops", "c"]), ["ops"]), [["ops", "a", "b"], ["c"]])
+
+    def test_focus_and_remove_keep_pinned(self):
+        # focus は [[ROLE]]、remove は抜いた段組み。どちらも pinned を足し直すので standby に残らない
+        self.assertEqual(pin_rows([["a"]], ["ops"]), [["ops", "a"]])
+        self.assertEqual(pin_rows([["ops"]], ["ops"]), [["ops"]])  # focus ops
+        self.assertEqual(pin_rows(remove_role([["ops", "a"]], "ops"), ["ops"]), [["ops", "a"]])
+        self.assertEqual(pin_rows(remove_role([["ops"]], "ops"), ["ops"]), [["ops"]])
+        ops = plan("L", pin_rows([["a"]], ["ops"]), ["L", "ops", "a", "b"])
+        brought = [o[1] for o in ops if o[0] == "bring"]
+        self.assertEqual(brought, ["ops", "a"])  # 最初に左の枠のすぐ右へ持ってくる = 右上
+        self.assertNotIn("b", brought)
+        self.assertEqual(ops[-1], ("focus", "L"))
+
+    def test_missing_pinned_is_skipped_with_note(self):
+        pins, notes = active_pins(["ops"], "L", {"L", "a"})
+        self.assertEqual(pins, [])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("ops", notes[0])
+        self.assertEqual(pin_rows([["a"]], pins), [["a"]])
+        self.assertEqual(active_pins([], "L", {"L"}), ([], []))
+
+    def test_pinned_same_as_left_is_ignored(self):
+        pins, notes = active_pins(["L", "ops"], "L", {"L", "ops"})
+        self.assertEqual(pins, ["ops"])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("view.left", notes[0])
+        validate("L", pin_rows([["a"]], pins), {"L", "ops", "a"})  # 左の役が右に入らない
+
+    def test_restore_rows_without_pinned(self):
+        restore = [["dev-a"], ["dev-b"]]
+        self.assertEqual(pin_rows(restore, ["ops"]), [["ops", "dev-a"], ["dev-b"]])
+        self.assertEqual(restore, [["dev-a"], ["dev-b"]])  # 設定の値は変えない
+
+    def test_equalize_counts_pinned_in_width(self):
+        rows = pin_rows([["a", "b"], ["c"]], ["ops"])
+        self.assertEqual(left_percent(rows), 25)  # 1 段目 3 人 + 統括 = 4 等分
+        ops = plan("L", rows, ["L", "ops", "a", "b", "c"])
+        self.assertIn(("bias", 33), ops)  # 1 段目の 3 人を等分
+        self.assertEqual(ops[:6], [("park", "ops"), ("park", "a"), ("park", "b"), ("park", "c"),
+                                   ("focus", "L"), ("bring", "ops")])
+
+
 class Ledger(unittest.TestCase):
     def test_new_entry(self):
         led = ledger_touch({}, "role-dev-c", "2026-11-20 10:00", url="http://x", session="s1",
@@ -981,14 +1050,14 @@ class Config(unittest.TestCase):
 
     def test_no_file_gives_generic_defaults(self):
         c = load_view_config({}, self.path)
-        self.assertEqual(c, {"left": "main", "restore": [["dev-a"], ["dev-b"]], "guard": []})
+        self.assertEqual(c, {"left": "main", "pinned": [], "restore": [["dev-a"], ["dev-b"]], "guard": []})
         c["restore"].append(["x"])  # 返した値を変えても既定値は変わらない
         self.assertEqual(DEFAULT_VIEW["restore"], [["dev-a"], ["dev-b"]])
 
     def test_file_values(self):
         self.write({"view": {"left": "boss", "restore": [["a"], ["b", "c"]], "guard": ["^\\./fullscreen-app"]}})
         self.assertEqual(load_view_config({}, self.path),
-                         {"left": "boss", "restore": [["a"], ["b", "c"]], "guard": ["^\\./fullscreen-app"]})
+                         {"left": "boss", "pinned": [], "restore": [["a"], ["b", "c"]], "guard": ["^\\./fullscreen-app"]})
 
     def test_restore_as_spec_string_and_guard_as_string(self):
         self.write({"view": {"restore": "a,b/c", "guard": "x"}})
@@ -998,14 +1067,14 @@ class Config(unittest.TestCase):
     def test_env_beats_file(self):
         self.write({"view": {"left": "boss", "restore": [["a"]], "guard": ["g"]}})
         env = {"CLAUDE_VIEW_LEFT": "env-left", "CLAUDE_VIEW_RESTORE": "p/q", "CLAUDE_VIEW_GUARD": "none"}
-        self.assertEqual(load_view_config(env, self.path), {"left": "env-left", "restore": [["p"], ["q"]], "guard": []})
+        self.assertEqual(load_view_config(env, self.path), {"left": "env-left", "pinned": [], "restore": [["p"], ["q"]], "guard": []})
         self.assertEqual(load_view_config({"CLAUDE_VIEW_GUARD": "^x"}, self.path)["guard"], ["^x"])
 
     def test_empty_env_does_not_drop_file_values(self):
         # 空のまま export された環境変数で、設定ファイルの guard（保護する窓の指定）が外れない
         self.write({"view": {"left": "boss", "restore": [["a"]], "guard": ["g"]}})
         env = {"CLAUDE_VIEW_LEFT": "", "CLAUDE_VIEW_RESTORE": "", "CLAUDE_VIEW_GUARD": ""}
-        self.assertEqual(load_view_config(env, self.path), {"left": "boss", "restore": [["a"]], "guard": ["g"]})
+        self.assertEqual(load_view_config(env, self.path), {"left": "boss", "pinned": [], "restore": [["a"]], "guard": ["g"]})
 
     def test_empty_file_view_keeps_defaults(self):
         self.write({})
@@ -1015,10 +1084,20 @@ class Config(unittest.TestCase):
         for bad in ("", "{", "[]", {"view": []}, {"view": {"left": ""}}, {"view": {"left": None}},
                     {"view": {"restore": []}}, {"view": {"restore": [[]]}}, {"view": {"restore": "/"}},
                     {"view": {"restore": [["a", 1]]}}, {"view": {"restore": None}},
-                    {"view": {"guard": [""]}}, {"view": {"guard": 3}}):
+                    {"view": {"guard": [""]}}, {"view": {"guard": 3}},
+                    {"view": {"pinned": [""]}}, {"view": {"pinned": 3}}, {"view": {"pinned": ["a,b"]}},
+                    {"view": {"pinned": [None]}}):
             self.write(bad)
             with self.assertRaises(ValueError, msg=repr(bad)):
                 load_view_config({}, self.path)
+
+    def test_pinned(self):
+        self.write({"view": {"pinned": ["ops", "mon", "ops"]}})
+        self.assertEqual(load_view_config({}, self.path)["pinned"], ["ops", "mon"])  # 重なりは 1 つに
+        self.write({"view": {"pinned": "ops"}})
+        self.assertEqual(load_view_config({}, self.path)["pinned"], ["ops"])
+        self.write({"view": {"pinned": []}})
+        self.assertEqual(load_view_config({}, self.path)["pinned"], [])
 
     def test_bad_env_restore_refused(self):
         with self.assertRaises(ValueError):
@@ -1098,6 +1177,43 @@ class ClaudeViewCli(unittest.TestCase):
         r = self.run_view("--left", "dev-e", "--dry-run", "restore", CLAUDE_VIEW_LEFT="dev-b", CLAUDE_VIEW_RESTORE="dev-c")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines()[-1], "focus dev-e")
+
+    def pinned_run(self, *args, pinned=("dev-c",)):
+        self.conf.write_text(json.dumps({"view": {"pinned": list(pinned)}}))
+        r = self.run_view("--dry-run", *args)
+        return r, [x for x in r.stdout.splitlines() if x.startswith("bring ")]
+
+    def test_pinned_first_after_focus_rows_restore(self):
+        r, brought = self.pinned_run("focus", "dev-a")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(brought, ["bring dev-c", "bring dev-a"])
+        r, brought = self.pinned_run("rows", "dev-a,dev-b/dev-c")
+        self.assertEqual(brought, ["bring dev-c", "bring dev-a", "bring dev-b"])
+        self.assertIn("常時表示（view.pinned）を 1 段目の先頭に置いた: dev-c,dev-a,dev-b", r.stdout.splitlines())
+        r, brought = self.pinned_run("restore")
+        self.assertEqual(brought, ["bring dev-c", "bring dev-b", "bring dev-a"])  # 段の先頭を先に積む
+
+    def test_pinned_remove_keeps_and_swap_refused(self):
+        r, brought = self.pinned_run("remove", "dev-c")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(brought[0], "bring dev-c")
+        self.assertIn("下げない", r.stderr)
+        r, _ = self.pinned_run("swap", "dev-a", "dev-c")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("入れ替えない", r.stderr)
+        r, _ = self.pinned_run("rows", "dev-c,dev-a/dev-c")  # 指定そのものの重なりは先頭へ移す前に断る
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("2 回", r.stderr)
+        r, brought = self.pinned_run("swap", "dev-a", "dev-b")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(brought[0], "bring dev-c")
+
+    def test_pinned_missing_or_left_warns_and_continues(self):
+        r, brought = self.pinned_run("focus", "dev-a", pinned=("ghost", "main"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(brought, ["bring dev-a"])
+        self.assertEqual(len([x for x in r.stderr.splitlines() if "注意" in x]), 2)  # 1 つにつき 1 行
+        self.assertNotIn("常時表示", r.stdout)
 
     def test_unknown_left_refused(self):
         r = self.run_view("--dry-run", "restore", CLAUDE_VIEW_LEFT="nobody")

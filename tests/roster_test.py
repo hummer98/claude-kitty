@@ -242,6 +242,29 @@ class SessionFile(unittest.TestCase):
             "focus_matching_window var:role=a", ("c", "--location=hsplit", "--bias=50"),
             "focus_matching_window var:role=a", ("b", "--location=vsplit", "--bias=50")])
 
+    def test_main_tab_pinned_first(self):
+        sess = self.roster()["sessions"]
+        lines = R.main_tab_lines("lead", [["a", "b"], ["c"]], sess, "w", pinned=["c"])
+        first = [shlex.split(x)[2] for x in lines if x.startswith("launch")]
+        self.assertEqual(first[:2], ["lead", "c"])  # 統括のすぐ右 = 1 段目の先頭
+        self.assertIn("--bias=75", lines[1])  # c が抜けて 1 段になり、c,a,b の 3 列 + 統括 → 統括 25%
+        self.assertEqual(first, ["lead", "c", "a", "b"])
+        # left と同じ・名簿に無い pinned は置かない
+        self.assertEqual(R.main_tab_lines("lead", [["a"]], sess, "w", pinned=["lead", "ghost"]),
+                         R.main_tab_lines("lead", [["a"]], sess, "w"))
+
+    def test_session_file_pinned_from_other_tab(self):
+        r = self.roster()
+        text = R.session_file(r, ["lead", "a", "b", "c", "d", "e"], "w", pinned=["d"])
+        lines = text.splitlines()
+        i = lines.index("new_tab main")
+        self.assertEqual(shlex.split(lines[i + 3])[2], "d")  # 統括の次 = 1 段目の先頭
+        launches = [x for x in lines if x.startswith("launch ") and "role=d" in shlex.split(x)]
+        self.assertEqual(len(launches), 1, text)  # 元のタブ（standby）には開かない（二重に開かない）
+        # 開かない pinned は置かない
+        self.assertNotIn("role=d", R.session_file(r, ["lead", "a"], "w", pinned=["d"]))
+        self.assertEqual(R.target_tab(r, "d", ["d"]), R.STANDBY)
+
     def test_only_launched_roles_and_missing_rows(self):
         r = self.roster()
         text = R.session_file(r, ["lead", "c", "d"], "w")
@@ -658,6 +681,43 @@ json.dump({{"waiter_pid": pid, "wait_id": {SID_A!r}, "session_id": {SID_A!r}, "c
         flat = json.dumps(calls)
         for bad in ("close-window", "close-tab", "send-text", "send-key"):
             self.assertNotIn(bad, flat)
+
+    def pinned_restore(self, ls_roles, main_tab=True):
+        cfg = json.loads((self.d / "config.json").read_text())
+        cfg["view"]["pinned"] = ["c"]
+        (self.d / "config.json").write_text(json.dumps(cfg))
+        tabs = ([{"title": "main", "roles": ["lead", "a", "b"], "rows": [["a"], ["b"]]}] if main_tab else []) + [
+            {"title": "work", "roles": ["c"]}]
+        roster = {"version": 1, "saved_at": 1.0, "left": "lead", "tabs": tabs,
+                  "sessions": {r: {"session_id": sid, "cwd": "/" + r}
+                               for r, sid in (("lead", SID_L), ("a", SID_A), ("b", SID_B), ("c", SID_C))}}
+        if not main_tab:
+            roster["tabs"].insert(0, {"title": "main", "roles": ["lead", "a", "b"]})
+        (self.d / "data/roster.json").write_text(json.dumps(roster))
+        self.write_ls([win(i + 1, r, []) for i, r in enumerate(ls_roles)])
+        out = self.roster("restore").stdout
+        calls = [json.loads(x) for x in self.klog.read_text().splitlines()]
+        tabs_of = {c[c.index("--var") + 1]: (c[c.index("--match") + 1] if "--match" in c else c[c.index("--tab-title") + 1])
+                   for c in calls if c[:1] == ["launch"]}
+        return out, tabs_of
+
+    def test_restore_pinned_only_uses_equalize(self):
+        # 足したのが常時表示だけなら、保存した段組みでなく、いまの並びのまま先頭に置く
+        out, tabs_of = self.pinned_restore(["lead", "b", "a"])
+        self.assertEqual(tabs_of, {"role=c": "standby"})  # 名簿のタブ（work）でなく standby から前に出す
+        self.assertIn("並べ直す: claude-view equalize", out)
+        self.assertNotIn("claude-view rows", out)
+
+    def test_restore_pinned_with_row_role_goes_first(self):
+        out, tabs_of = self.pinned_restore(["lead", "a"])
+        self.assertEqual(set(tabs_of), {"role=b", "role=c"})
+        self.assertIn("並べ直す: claude-view rows 'c,a/b'", out)
+
+    def test_restore_pinned_without_rearrange_keeps_roster_tab(self):
+        # 統括のタブに段組みが無い（並べ直しが走らない）なら、standby に入れず名簿のタブへ
+        out, tabs_of = self.pinned_restore(["lead", "a", "b"], main_tab=False)
+        self.assertEqual(tabs_of, {"role=c": "work"})
+        self.assertNotIn("並べ直す", out)
 
     def test_restore_without_kitty_writes_session_file(self):
         roster = {"version": 1, "saved_at": 1.0, "left": "lead",
