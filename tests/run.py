@@ -3418,6 +3418,7 @@ SIDE_TESTS = {
     "relay_test": "Relay",
     "presence_test": "Presence",
     "disk_watch_test": "Disk",
+    "active_test": "Active",
 }
 
 
