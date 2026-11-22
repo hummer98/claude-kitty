@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-roster sleep <役割>` と `wake <役割>`: 役目を終えた担当を「寝かせる」。サーヴァントが増え続けるので、使っていない実行レーンを減らし、あとで会話ごと戻すため（[docs/roster.md](docs/roster.md#sleep--wake)）。
+  - sleep: idle を確かめ（restart と同じ。`--force` で省く）、claude-wait に「終わる」の続きの指示（`"action": "exit"`）を書いて claude に SIGTERM を送り、claude が終わってペインの前面にシェルしか残っていないのを確かめてから `kitten @ close-window` で閉じる。止まらなければ・ほかのプロセスが残っていれば閉じず、名簿も変えない。名簿のその役割に `sleeping`・`slept_at`・`sleep_place`（タブと段組みの位置）を書き、ID・cwd・model・name・slot は残して段組みから外す。統括（`view.left`）と常時表示（`view.pinned`）は断る。ペインが既に無い役割は印を付けるだけ。
+  - 寝ている役割は、自動の保存でも手の保存でも、`keep_absent_hours` を過ぎても消さない。`restore` は開かない（`--include-sleeping` か名指しのときだけ）。`status`・`show` に「寝ている（いつから）」。
+  - wake: `restore <役割>` と同じ決まりで claude-wait の形で開き直し、段組みは寝かせる前の位置に戻して並べ直し、印を外す。
+  - claude-wait: 続きの指示が `"action": "exit"` なら、claude が終わったあとシェルに戻らずに終わる。前の版の claude-wait はこの指示を断ってシェルに戻るだけ（同じ会話を開き直さない）。
+
 ## [0.7.4] - 2026-11-23
 
 ### 追加

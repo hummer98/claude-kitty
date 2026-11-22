@@ -2,9 +2,11 @@
 """kitty の中の Claude Code セッションの名簿を保ち、kitty の再起動や落ちたあとに元へ戻す。
 
   claude-roster save [--auto]                       いまの名簿を保存する（世代を残す。--auto はタイマー用）
-  claude-roster restore [ROLE...] [--from FILE] [--dry-run] [--include-absent] [--force]
+  claude-roster restore [ROLE...] [--from FILE] [--dry-run] [--include-absent] [--include-sleeping] [--force]
                                                     名簿の役割のうち、kitty にいないものを開いて並べ直す
   claude-roster restart ROLE [--model M] [--cwd DIR] 1 人を起動し直す（idle のときだけ。保護するプロセスが動いている間はしない）
+  claude-roster sleep ROLE [--force] [--dry-run]    1 人を寝かせる（claude を止めてペインを閉じ、名簿に残す。idle のときだけ）
+  claude-roster wake ROLE [--dry-run]               寝かせた役割を開き直し、同じ会話を resume する
   claude-roster status                              名簿といまの差
   claude-roster show                                名簿の中身（1 行 1 人）
   共通: --to SOCKET（kitty を指定）
@@ -12,7 +14,8 @@
 名簿: $CLAUDE_ROSTER_DIR（既定 $XDG_DATA_HOME/claude-kitty、無ければ ~/.local/share/claude-kitty）/roster.json。
 設定: ~/.config/claude-kitty/config.json の view.left / view.guard と roster
   {"roster": {"models": {"dev-a": "opus"}, "ignore": ["scratch"], "generations": 5, "keep_absent_hours": 24}}
-ペインを閉じる操作と send-text は使わない。他のセッションの claude を止めるのは restart だけ。
+send-text は使わない。他のセッションの claude を止めるのは restart と sleep だけ。ペインを閉じるのは sleep だけで、
+そのペインの claude（と claude-wait）が終わったのを確かめてから閉じる。
 """
 import argparse
 import fcntl
@@ -284,6 +287,7 @@ def show(rost):
         sid = (e.get("session_id") or "-")[:8]
         extra = " 引き継ぎ" if e.get("carried") else ""
         extra += " （ペイン無し）" if e.get("absent_since") else ""
+        extra += f" {R.sleep_label(e)}" if e.get("sleeping") else ""
         print(f"  {role}: {sid} {e.get('state')} {e.get('kind') or '-'} model={e.get('model') or '-'}"
               f"({e.get('model_source') or '-'}) {e.get('cwd')}{extra}")
 
@@ -351,6 +355,11 @@ def cmd_restore(args, view, conf):
     rost = load_roster(args.source)
     if rost is None:
         die("名簿が無い（先に claude-roster save）")
+    return restore(args, view, conf, rost)[0]
+
+
+def restore(args, view, conf, rost):
+    """名簿 rost から開く。(終了コード, 開いた役割, 開かなかった役割と理由) を返す（wake も使う）。"""
     left = rost["left"]
     if not args.dry_run and not args.force and guarded_in_front(view["guard"]):
         die("保護する窓（view.guard）が前面にあるので開かない（--force で実行）", 2)
@@ -359,7 +368,8 @@ def cmd_restore(args, view, conf):
     present = roles_in(data) if data else set()
     busy = busy_sessions(live_sessions())
     try:
-        launch, skipped = R.plan_restore(rost, present, busy, only=args.roles, include_absent=args.include_absent)
+        launch, skipped = R.plan_restore(rost, present, busy, only=args.roles, include_absent=args.include_absent,
+                                         include_sleeping=args.include_sleeping)
     except ValueError as e:
         die(str(e))
     for role, why in skipped:
@@ -378,7 +388,7 @@ def cmd_restore(args, view, conf):
                               pinned=view["pinned"])
         if text is None:
             print("開くものが無い")
-            return 0
+            return 0, launch, skipped
         sdir = RT / "claude-roster"
         sdir.mkdir(mode=0o700, exist_ok=True)
         sfile = sdir / f"restore-{int(time.time())}.session"
@@ -386,7 +396,7 @@ def cmd_restore(args, view, conf):
         print(f"kitty が無いので、セッションファイルから起動する: {sfile}")
         if args.dry_run:
             print(text, end="")
-            return 0
+            return 0, launch, skipped
         before = {s for s, _ in kitties()}
         launcher = ENV.get("CLAUDE_ROSTER_LAUNCHER") or str(HERE / "bin/claude-kitty")
         subprocess.run([launcher, str(sfile)], check=False)
@@ -403,11 +413,11 @@ def cmd_restore(args, view, conf):
             time.sleep(1.0)
             run_view(sock, left, rows, False)
         lock.close()
-        return 0
+        return 0, launch, skipped
     # kitty は動いている: 欠けた分だけ足す
     if not launch:
         print("欠けている役割は無い")
-        return 0
+        return 0, launch, skipped
     tabs = {t["title"] for osw in data for t in osw.get("tabs", [])}
     # 並べ直しが走るとき（統括とそのタブがあるとき）だけ、常時表示（view.pinned）を standby に入れて前に出す。
     # 走らないのに standby へ入れると、名簿のタブにも出ず見えなくなる
@@ -435,7 +445,7 @@ def cmd_restore(args, view, conf):
             time.sleep(0.5)
         run_view(sock, left, None, args.dry_run)
     lock.close()
-    return 0
+    return 0, launch, skipped
 
 
 def guard_running(patterns):
@@ -552,6 +562,192 @@ def cmd_restart(args, view, conf):
     return 1
 
 
+def pane_by_id(data, wid):
+    for osw in data or []:
+        for t in osw.get("tabs", []):
+            for w in t.get("windows", []):
+                if w.get("id") == wid:
+                    return w
+    return None
+
+
+def sid_live(sid):
+    return any(s.get("sessionId") == sid for s in live_sessions())
+
+
+def cmd_sleep(args, view, conf):
+    left, role = view["left"], args.role
+    if role == left or role in view["pinned"]:
+        die(R.sleep_refusal(role, left, view["pinned"], None, None, None, ""), 3)
+    if guard_running(view["guard"]):
+        if not args.dry_run:
+            die("保護するプロセス（view.guard。全画面のアプリなど）が動いているので止めない", 2)
+        print("注意: 保護するプロセス（view.guard）が動いているので、--dry-run でなければ止めない")
+    lock = roster_lock()  # 寝かせ終わるまで自動の保存に半端な名簿を書かせない
+    old = load_roster()
+    sock, data = find_kitty(args.to, left, (old or {}).get("sessions", {}).keys())
+    win = find_pane(data, role) if data else None
+    now = time.time()
+    sessions = live_sessions()
+    by_pid = {s["pid"]: s for s in sessions}
+    by_sid = {s.get("sessionId"): s for s in sessions}
+    cur = current_roster(sock, data, left, conf) if data else None
+    if cur and cur["sessions"] and (left in cur["sessions"] or not old or left not in old["sessions"]):
+        # いまの kitty から作った名簿に、前の名簿の引き継ぎ（absent・寝ている役割）を足したものを土台にする
+        base = R.carry_over(cur, old, now, conf["keep_absent_hours"] * 3600)
+        base["socket"] = sock
+    elif win:
+        # 統括のペインが無いときに書くと、統括と段組みが名簿から消える（自動の保存と同じ理由）
+        die(f"統括 {left} のペインが無いので寝かせない（claude-roster save で確定してから）", 3)
+    elif old is None:
+        die("名簿が無く、kitty にもその役割がいない")
+    else:
+        base = json.loads(json.dumps(old))  # kitty が無い: 名簿に印を付けるだけ
+    pane = R.pane_session(win, by_pid, by_sid) if win else None
+    if not win and role not in base["sessions"] and old and role in old["sessions"]:
+        base["sessions"][role] = dict(old["sessions"][role])  # keep_absent_hours を過ぎて引き継がれなかった
+    entry = base["sessions"].get(role)
+    sj = (pane or {}).get("session")
+    if pane and sj is None and pane.get("session_id"):
+        sj = by_sid.get(pane["session_id"])
+    sid = (pane or {}).get("session_id")
+    why = R.sleep_refusal(role, left, view["pinned"], entry, pane, sj,
+                          state_word(sid) if sid and not args.force else "", force=args.force)
+    if why:
+        die(why, 3)
+    if pane is None:
+        # ペインはもう無い: 名簿に印を付けるだけ（その ID がどこかで開いていれば、寝ているとは言えないので断る）
+        busy = busy_sessions(sessions)
+        if entry["session_id"] in busy:
+            die(f"{role} の {entry['session_id'][:8]} は{busy[entry['session_id']]}（寝かせない）", 3)
+        print(f"{role}: ペインが無いので、名簿に寝ている印だけ付ける（{entry['session_id'][:8]}、{entry.get('cwd')}）")
+        if args.dry_run:
+            return 0
+        write_roster(R.mark_sleeping(base, role, entry, now), conf["generations"])
+        print(f"寝かせた: {role}（claude-roster wake {role} で起こす）")
+        return 0
+    target = R.stop_target(pane, sj, sessions, allow_bg=args.allow_bg)
+    if not target:
+        die("止める pid を決められない（背景セッションは --allow-bg を付けたときだけ。host を他と共有していれば止めない）", 3)
+    wait_id = pane.get("wait_id")
+    waiter = read_waiter(wait_id) if wait_id else None
+    if waiter and (not pane.get("waiter_pid") or waiter["pid"] != pane["waiter_pid"]
+                   or (pane.get("front_pid") and ppid_of(pane["front_pid"]) != waiter["pid"])):
+        waiter = None  # そのペインの claude を開いた claude-wait ではない
+    wid = win.get("id")
+    how = ("claude-wait にシェルへ戻らず終わるよう伝える" if waiter
+           else "claude-wait の続きの指示が使えないので、claude が終わってシェルに戻ったあとペインを閉じる")
+    print(f"{role}: {sid[:8]} を止めてペイン（window {wid}）を閉じ、名簿に寝かせる（{entry.get('cwd')} / "
+          f"モデル {entry.get('model') or '既定'}）。{how}")
+    if args.dry_run:
+        print(f"  kill -TERM {target}")
+        print(f"  kitten @ close-window --match id:{wid} --ignore-no-match（claude が終わったのを確かめてから）")
+        return 0
+    nxt = RT / "claude-wait" / f"{wait_id}.next" if waiter else None
+    if nxt:
+        tmp = nxt.with_name(f".{nxt.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(R.exit_payload(waiter["pid"], wait_id, time.time())))
+        os.replace(tmp, nxt)
+    # 止める直前にもう一度: 同じプロセスのまま idle か（--force なら idle は見ない）
+    st = start_time(target)
+    front = pane.get("front_pid")
+    front_st = start_time(front) if front and front != target else None  # 背景セッションの前面を、あとで同じか比べる
+    again = next((s for s in live_sessions() if s.get("sessionId") == sid), None)
+    word = "" if args.force else state_word(sid)
+    if (st is None or not again or guard_running(view["guard"])
+            or (not args.force and (again.get("status") != "idle" or (word and word not in ("idle", "done"))))):
+        if nxt:
+            nxt.unlink(missing_ok=True)
+        die("止める直前に状態が変わったのでやめた", 3)
+    os.kill(target, signal.SIGTERM)
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline and start_time(target) == st:
+        time.sleep(0.3)
+    if start_time(target) == st:
+        if nxt:
+            nxt.unlink(missing_ok=True)  # 後で人が /exit したときに勝手に終わらない（シェルに戻る）ように
+        if start_time(target) == st:  # 消す間に終わっていれば（指示を読んだかもしれない）、そのまま続ける
+            print(f"claude-roster: {args.timeout:.0f} 秒で止まらなかったので、ペインは閉じない（名簿も変えない）",
+                  file=sys.stderr)
+            return 1
+    if sj.get("kind") == "bg" and front_st is not None and start_time(front):
+        time.sleep(3)
+        if R.bg_front_stoppable(front_st, start_time(front), ppid_of(front), waiter["pid"] if waiter else None):
+            os.kill(front, signal.SIGTERM)
+    # 閉じる前に: そのセッションの claude がどこにもいないこと、ペインの前面にシェルしか残っていないこと
+    closed, closable, ls_failed, unreadable = False, False, False, False
+    while time.monotonic() < deadline + min(10.0, args.timeout):
+        now_ls = ls(sock)
+        ls_failed = now_ls is None  # ls に失敗したときを「閉じた」と取り違えない
+        if not ls_failed:
+            w2 = pane_by_id(now_ls, wid)
+            closed = closed or w2 is None  # claude-wait が終わってペインが自分で閉じた（window id は使い回されない）
+            closable = closed or R.pane_closable(w2)
+            unreadable = not closed and not (w2 or {}).get("foreground_processes")
+        if closable and not sid_live(sid):
+            break
+        time.sleep(0.3)
+    else:
+        if nxt:
+            nxt.unlink(missing_ok=True)
+        if not closed and ls_failed:
+            print(f"claude-roster: claude は止めたが、kitten @ ls に失敗し続けてペインの中を確かめられないので閉じない"
+                  f"（名簿も変えない。確認して閉じてから claude-roster sleep {role} で印を付ける）", file=sys.stderr)
+            return 1
+        if not closed and unreadable:
+            print(f"claude-roster: claude は止めたが、ペインの前面のプロセスが読めない（空）ので閉じない"
+                  f"（名簿も変えない。確認して閉じてから claude-roster sleep {role} で印を付ける）", file=sys.stderr)
+            return 1
+        if not closed:
+            print(f"claude-roster: claude は止めたが、ペインに claude か claude-wait かシェル以外が残っているので閉じない"
+                  f"（名簿も変えない。確認して閉じてから claude-roster sleep {role} で印を付ける）", file=sys.stderr)
+            return 1
+        # ペインはもう無い: 戻せるように印は付ける（その ID がまだどこかで動いていれば、wake は二重に開かない）
+        print(f"claude-roster: ペインは閉じたが、{sid[:8]} がまだどこかで動いている（印は付ける）", file=sys.stderr)
+    if not closed:
+        kitten(sock, "close-window", "--match", f"id:{wid}", "--ignore-no-match")
+        time.sleep(0.3)
+        after = ls(sock)
+        if after is None or pane_by_id(after, wid) is not None:
+            # ペインが残ると次の保存で印が外れるので、ここでは書かない（閉じたあとの sleep は印を付けるだけ）
+            why = "閉じたか ls で確かめられなかった" if after is None else "閉じなかった"
+            print(f"claude-roster: ペイン（window {wid}）が{why}（名簿は変えない。閉じたのを確かめてから "
+                  f"claude-roster sleep {role} で印を付ける）", file=sys.stderr)
+            return 1
+    was_main = any(role in t["roles"] and "rows" in t for t in base["tabs"])
+    write_roster(R.mark_sleeping(base, role, entry, time.time()), conf["generations"])
+    print(f"寝かせた: {role}（{sid[:8]}。claude-roster wake {role} で起こす）")
+    if was_main and find_pane(ls(sock) or [], left):
+        run_view(sock, left, None, False)  # 閉じたペインの分を等分割に戻す
+    return 0
+
+
+def cmd_wake(args, view, conf):
+    rost = load_roster()
+    if rost is None:
+        die("名簿が無い（先に claude-roster save）")
+    e = rost["sessions"].get(args.role)
+    if e is None:
+        die(f"名簿に無い役割: {args.role}")
+    if not e.get("sleeping"):
+        die(f"{args.role} は寝ていない（ペインが無いなら claude-roster restore {args.role} で開く）")
+    print(f"{args.role}: {R.sleep_label(e)}。{(e.get('session_id') or '-')[:8]} を {e.get('cwd')} で開き直す")
+    # 寝かせる前に統括のタブの段組みにいたなら、その位置に戻した名簿で開く（restore で 1 人を開くのと同じ決まり）
+    awake = R.mark_awake(json.loads(json.dumps(rost)), args.role)
+    ns = argparse.Namespace(roles=[args.role], source=None, dry_run=args.dry_run, include_absent=False,
+                            include_sleeping=True, force=args.force, to=args.to)
+    rc, launch, skipped = restore(ns, view, conf, awake)
+    if rc or args.dry_run or args.role in {r for r, _ in skipped}:
+        return rc or (0 if args.dry_run else 1)
+    lock = roster_lock()
+    latest = load_roster()
+    if latest and (latest["sessions"].get(args.role) or {}).get("sleeping"):
+        write_roster(R.mark_awake(latest, args.role), conf["generations"])
+    lock.close()
+    print(f"起こした: {args.role}" if args.role in launch else f"{args.role} はもう kitty にいる（寝ている印を外した）")
+    return 0
+
+
 def cmd_status(args, view, conf):
     rost = load_roster()
     if rost is None:
@@ -586,9 +782,16 @@ def main(argv=None):
     p = sub.add_parser("restore", parents=[common]); p.add_argument("roles", nargs="*")
     p.add_argument("--from", dest="source"); p.add_argument("--dry-run", action="store_true")
     p.add_argument("--include-absent", action="store_true"); p.add_argument("--force", action="store_true")
+    p.add_argument("--include-sleeping", action="store_true", help="寝かせた役割も開く")
     p = sub.add_parser("restart", parents=[common]); p.add_argument("role"); p.add_argument("--model"); p.add_argument("--cwd")
     p.add_argument("--timeout", type=float, default=30.0); p.add_argument("--dry-run", action="store_true")
     p.add_argument("--allow-bg", action="store_true", help="背景セッション（kind=bg）も止める（実物では確認していない）")
+    p = sub.add_parser("sleep", parents=[common]); p.add_argument("role")
+    p.add_argument("--force", action="store_true", help="idle の確認を省く")
+    p.add_argument("--timeout", type=float, default=30.0); p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--allow-bg", action="store_true", help="背景セッション（kind=bg）も止める（実物では確認していない）")
+    p = sub.add_parser("wake", parents=[common]); p.add_argument("role"); p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force", action="store_true", help="保護する窓が前面でも開く（restore と同じ）")
     sub.add_parser("status", parents=[common])
     p = sub.add_parser("show"); p.add_argument("--from", dest="source")
     args = ap.parse_args(argv)
@@ -598,7 +801,8 @@ def main(argv=None):
             die("名簿が無い")
         show(rost)
         return 0
-    return {"save": cmd_save, "restore": cmd_restore, "restart": cmd_restart, "status": cmd_status}[args.cmd](args, view, conf)
+    return {"save": cmd_save, "restore": cmd_restore, "restart": cmd_restart, "status": cmd_status,
+            "sleep": cmd_sleep, "wake": cmd_wake}[args.cmd](args, view, conf)
 
 
 if __name__ == "__main__":
