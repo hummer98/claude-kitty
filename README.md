@@ -241,6 +241,11 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - 画像（png/jpg/jpeg/webp/gif/svg）: 自分のペインに kitty の overlay を重ねて `kitten icat --hold` で表示する。閉じるには、overlay をクリックしてからキーを押す。svg などは ImageMagick があれば表示できる。
 - 入力先は変えない（overlay も常に `--keep-focus`。ユーザーが打っている途中の文字が overlay に吸われないように）。自分のペインが表示されていないタブにあれば、その旨を `note` に書く。
 - 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確認できないときも同じ）。
+- 設定 `view.playtest_guard` に claude-guard のガードの名前（例 `{"view": {"playtest_guard": "tf3-running"}}`）があれば、そのガードの `process`（ゲームなど）が動いている間は、人がテストプレイ中かを見る。既定は無し（今までどおり）。
+  - 人がプレイ中なら、前面かどうかに関わらず何も開かないで exit 2（結果は `"skipped": "ゲームをテストプレイ中"`、`playtest` に理由、`retry` に「テストプレイが終わってから呼び直す」）。
+  - 見分けは、ガードの `commands` の `allow_owner` の起動の記録（`file`、例 `$XDG_RUNTIME_DIR/tf3ctl/launched.json`）。記録が無い・記録の pid が動いていないか別のプロセス・owner が役割（`claude-roster` の名簿か `claude-state` の記録の role）でない、のどれかなら人がプレイ中。記録が生きていて owner が役割なら担当の e2e で、今までどおり（前面のときだけ断る）。記録の読み方と pid の照合は claude-guard の `allow_owner` と同じ。
+  - プロセスが動いていない（`pgrep` を呼べないときも、claude-guard と同じく動いていないと数える）ときは今までどおり。ガードが無い・無効（`enabled: false`）・`process` が無いときも開くが、保護が効いていないので結果の `warnings` に知らせを入れる。`view.playtest_guard` の値が文字列でなければ、開かない側に倒して exit 2。
+  - 担当が起動したゲーム（記録の owner が役割）を、そのまま人に渡して遊んでもらうと、e2e と見分けられず開いてしまう。テストプレイ用に渡すときは、人の名前など役割でない owner で起動し直す。
 - kitty の外では `xdg-open`（macOS は `open`）に渡す。
 - 設定の `browser.enabled` が `false` なら、kitty の中でも HTML・画像・URL（ほかの種類のファイルも、kitty の外と同じく）を `xdg-open`（macOS は `open`）に渡す（結果の `via` が `"browser.enabled: false"`）。
 - overlay は重ねた先のペインと同じ window group に入るので、claude-view は並べ替えの対象に数えない。

@@ -11,6 +11,9 @@
 - 入力先は動かさない（HTML の Chrome も画像の overlay も、フォーカスを取らない。ユーザーが打っている途中の
   文字が、別の窓に入ってしまわないように）。
 - 保護する窓（view.guard、全画面のアプリや発表中の画面など）が前面なら何もしないで、その旨を返す（exit 2）。
+- view.playtest_guard に claude-guard のガードの名前があり、そのプロセス（ゲームなど）が動いていて、担当の e2e でない
+  （allow_owner の起動の記録が無い・古い・owner が役割でない）なら、人がテストプレイ中として何もしない（exit 2）。
+  担当の e2e なら今までどおり（前面のときだけ断る）。
 - kitty の外では xdg-open（macOS は open）に渡す。
 - 設定の browser.enabled が false なら、kitty の中でも HTML・画像・URL（ほかの種類も kitty の外と同じく）を xdg-open（macOS は open）に渡す
   （結果の shown がそのコマンド、via が "browser.enabled: false"）。
@@ -28,7 +31,7 @@ from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
-from config import kitten_path, load_browser_config, load_view_config  # noqa: E402
+from config import kitten_path, load_browser_config, load_playtest_guard, load_view_config  # noqa: E402
 from guard import guarded_in_front  # noqa: E402
 from kstate import Kitten  # noqa: E402
 from state import find_window  # noqa: E402
@@ -93,6 +96,31 @@ def is_guarded(env, run=subprocess.run, active_pid=None):
         return True, "前面の窓を確認できない"
 
 
+def pgrep_running(patterns, run=subprocess.run):
+    """pgrep -f を 1 回。動いていれば True、いなければ False、呼べなければ None（claude-guard と同じく「動いていない」に数える）。"""
+    pat = "|".join(f"({p})" for p in patterns) if len(patterns) > 1 else patterns[0]
+    try:
+        r = run(["pgrep", "-f", pat], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return {0: True, 1: False}.get(r.returncode)
+
+
+def playtesting(env, run=subprocess.run):
+    """(人がテストプレイ中か, 説明, 知らせ)。view.playtest_guard が無ければ (False, None, None)（今までどおり）。
+    playtest_guard の値の誤りは「開かない」側に倒す（is_guarded と同じ）。ガードが見つからないなどは開くが、
+    保護が効いていないことに気づけるよう知らせを返す（結果の warnings に入れる）。"""
+    try:
+        name = load_playtest_guard(env)
+    except ValueError as e:
+        return True, str(e), None
+    if not name:
+        return False, None, None
+    from guardhook import playtest_state
+    kind, why = playtest_state(env, name, running=lambda pats: pgrep_running(pats, run))
+    return kind == "human", why, (why if kind == "config" else None)
+
+
 def overlay_args(kitten, wid, path):
     """自分のペインに重ねる overlay の launch 引数。入力先は変えない（--keep-focus）。"""
     return ["launch", "--type=overlay", "--match", f"window_id:{wid}", "--next-to", f"id:{wid}",
@@ -121,6 +149,18 @@ def show(target, env, ratio, run=subprocess.run, active_pid=None):
     kind, val = classify(target)
     if kind != "url" and not Path(val).is_file():
         return 1, {"error": f"ファイルが無い: {val}"}
+    playing, why, warn = playtesting(env, run=run)
+    if playing:  # 前面かどうかに関わらず、ユーザーの遊んでいる画面に何も出さない
+        return 2, {"skipped": "ゲームをテストプレイ中", "playtest": why, "target": str(val),
+                   "retry": "テストプレイが終わってから呼び直す"}
+    code, out = _show(kind, val, env, ratio, run, active_pid)
+    if warn:  # ガードが見つからないなど: 開くが、テストプレイの保護が効いていないことを呼び手に知らせる
+        out["warnings"] = out.get("warnings", []) + [warn]
+    return code, out
+
+
+def _show(kind, val, env, ratio, run, active_pid):
+    """テストプレイの判定のあと: 保護する窓 → kitty の外・browser.enabled → claude-browser / overlay。"""
     guarded, why = is_guarded(env, run=run, active_pid=active_pid)
     if guarded:
         return 2, {"skipped": why, "target": str(val)}
@@ -173,7 +213,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
     code, out = show(args.target, os.environ, args.ratio)
     print(json.dumps(out, ensure_ascii=False))
-    if code == 2:
+    if code == 2 and "playtest" in out:
+        print(f"claude-show: {out['skipped']}なので開かない。終わってから（{out['playtest']}）", file=sys.stderr)
+    elif code == 2:
         print(f"claude-show: {out['skipped']}ので開かない", file=sys.stderr)
     return code
 

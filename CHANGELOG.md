@@ -21,6 +21,8 @@
   - 会話の記録の `origin.kind` / `turnOrigin` が `human` の文字列の行だけを数える（自動の要約・起動の引数で渡した最初の指示・他のセッションからの知らせ・見回りの cron・背景の仕事の知らせ・道具の結果・付き物・出どころの無い古い行は数えない）。
   - 既定は 20 分以内で終了コード 0、超えれば 1（`--minutes N`）。見分けに自信が無ければ `unknown` で 2（起きているとは答えない）。`--json`。時刻は JST。
   - 記録は session ID で projects の全フォルダから探し、末尾から読む。待たせた発話（queued）は、打った時刻（`queue-operation` の enqueue）で数える。
+- `claude-show`: 設定 `view.playtest_guard`（claude-guard のガードの名前、既定 `null` = 今までどおり）。そのガードのプロセス（ゲームなど）が動いていて、人がテストプレイ中なら何も開かないで exit 2（「ゲームをテストプレイ中なので開かない。終わってから」）。テストプレイ中の画面に Chrome や overlay を出さないため（[README](README.md#claude-show見てほしいものを開く)・[docs/config.md](docs/config.md#viewclaude-viewclaude-showclaude-roster)）。
+  - 見分けは claude-guard の `allow_owner` の起動の記録（`lib/guardhook.py` の `read_launch_record` を使い回す）。記録が無い・pid が今のプロセスでない・owner が役割（名簿か claude-state）でなければ人がプレイ中。記録が生きていて owner が役割なら担当の e2e として今までどおり（前面のときだけ断る）。
 
 ## [0.7.6] - 2026-11-23
 

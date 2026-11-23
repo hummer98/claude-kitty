@@ -8,6 +8,7 @@
 
 pinned は left と同じく常時表示にする役割（右側の 1 段目の先頭に固定）。restore は段のリストか "a,b/c" の形の文字列。guard は前面にあったら並べ替えない窓のプロセスの
 正規表現（pgrep -f に渡す）。既定は空で、そのときは前面の窓を調べない（KWin を呼ばない）。
+playtest_guard は claude-show が「人がテストプレイ中か」を見る claude-guard のガードの名前（既定 null = 見ない）。
 """
 import json
 import os
@@ -83,6 +84,27 @@ def load_view_config(env, path=None):
     if env.get("CLAUDE_VIEW_GUARD"):
         out["guard"] = [] if env["CLAUDE_VIEW_GUARD"] == "none" else [env["CLAUDE_VIEW_GUARD"]]
     return out
+
+
+def load_playtest_guard(env, path=None):
+    """view.playtest_guard（claude-show が「人がテストプレイ中か」を見る claude-guard のガードの名前）か None。
+    既定は None（見ない = 今までどおり）。値が文字列でなければ ValueError。
+    設定ファイルそのものが読めない・壊れているときは None（load_view_config がその誤りを返すので、ここでは重ねない。
+    テストプレイ中でもないのに「テストプレイ中」と断らないため）。"""
+    path = Path(path) if path else config_path(env)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    view = data.get("view", {}) if isinstance(data, dict) else None
+    if not isinstance(view, dict):
+        return None
+    name = view.get("playtest_guard")
+    if name is None:
+        return None
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"{path} の view.playtest_guard はガードの名前（文字列）か null: {name!r}")
+    return name
 
 
 def kitten_path(env, exists=os.path.exists, which=shutil.which):

@@ -1060,6 +1060,73 @@ def session_role(env, session):
     return role if isinstance(role, str) and role else None
 
 
+def known_roles(env):
+    """役割の名前の集合: 名簿（claude-roster の roster.json の sessions）と、claude-state の記録の role。
+    読めないものは飛ばす（無ければ空。空なら誰も役割とみなさない）。"""
+    roles = set()
+    if env.get("CLAUDE_ROSTER_DIR"):
+        roster = Path(env["CLAUDE_ROSTER_DIR"]) / "roster.json"
+    else:
+        home = Path(env["HOME"]) if env.get("HOME") else Path.home()
+        base = Path(env["XDG_DATA_HOME"]) if env.get("XDG_DATA_HOME") else home / ".local/share"
+        roster = base / "claude-kitty" / "roster.json"
+    try:
+        sessions = json.loads(roster.read_text()).get("sessions")
+        if isinstance(sessions, dict):
+            roles.update(k for k in sessions if isinstance(k, str) and k)
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        from rundir import runtime_dir
+        files = sorted((runtime_dir(env, create=False) / "claude-state").glob("*.json"))
+    except (OSError, ImportError):
+        files = []
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        role = data.get("role") if isinstance(data, dict) else None
+        if isinstance(role, str) and role:
+            roles.add(role)
+    return roles
+
+
+def playtest_state(env, name, running=None, path=None):
+    """claude-show 用: ガード name のプロセス（ゲームなど）を、人がテストプレイしているか。(種類, 説明) を返す。
+
+    種類は "config"（ガードが無い・無効・process が無い → 今までどおりだが、設定の誤りかもしれないので知らせる）、
+    None（プロセスが動いていない → 今までどおり）、
+    "e2e"（allow_owner の起動の記録が生きていて、owner が役割 = 担当の e2e）、"human"（それ以外 = 人がプレイ中）。
+    記録・pid の照合は allow_owner と同じ read_launch_record。running は patterns → True / False / None（pgrep）。"""
+    guards, _ = load_guard_config(env, path)
+    g = next((x for x in guards if x["name"] == name), None)
+    if g is None:
+        return "config", f"view.playtest_guard のガード {name} が guard_hook.guards に無い（か設定の誤りで外された）"
+    if not g["enabled"] or not g["process"]:
+        return "config", f"view.playtest_guard のガード {name} が無効か、process が無い"
+    if not (running or process_running)(g["process"]):
+        return None, f"ガード {name} のプロセスが動いていない"
+    files = []
+    for kind, spec in g["commands"]:
+        o = spec.get("allow_owner") if kind == "program" else None
+        if o and launch_file(o["file"], env) not in files:
+            files.append(launch_file(o["file"], env))
+    if not files:
+        return "human", "起動の記録（allow_owner の file）が設定に無い"
+    roles, whys = None, []
+    for f in files:
+        rec, why = read_launch_record(f, g["process"])
+        if why:
+            whys.append(why)
+            continue
+        roles = known_roles(env) if roles is None else roles
+        if rec["owner"] in roles:
+            return "e2e", f"{rec['owner']} が起動した（pid {rec['pid']}）"
+        whys.append(f"記録の owner {rec['owner']} は役割でない")
+    return "human", "、".join(whys)
+
+
 class Context:
     """1 回の判定で共有するもの（hook の環境・セッション）と、記録・役割の読みの控え（同じコマンドの中で 1 度だけ読む）。"""
 
