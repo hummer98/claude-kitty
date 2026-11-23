@@ -23,6 +23,10 @@
   - 記録は session ID で projects の全フォルダから探し、末尾から読む。待たせた発話（queued）は、打った時刻（`queue-operation` の enqueue）で数える。
 - `claude-show`: 設定 `view.playtest_guard`（claude-guard のガードの名前、既定 `null` = 今までどおり）。そのガードのプロセス（ゲームなど）が動いていて、人がテストプレイ中なら何も開かないで exit 2（「ゲームをテストプレイ中なので開かない。終わってから」）。テストプレイ中の画面に Chrome や overlay を出さないため（[README](README.md#claude-show見てほしいものを開く)・[docs/config.md](docs/config.md#viewclaude-viewclaude-showclaude-roster)）。
   - 見分けは claude-guard の `allow_owner` の起動の記録（`lib/guardhook.py` の `read_launch_record` を使い回す）。記録が無い・pid が今のプロセスでない・owner が役割（名簿か claude-state）でなければ人がプレイ中。記録が生きていて owner が役割なら担当の e2e として今までどおり（前面のときだけ断る）。
+- 共同作業（coop）: 人が動かしているゲームを AI の担当と一緒に操作できるようにした。占有の決まりのままだと、人が起動したゲームでは担当の操作がすべて止まるため（[docs/guard-hook.md](docs/guard-hook.md#共同作業coop)）。
+  - `claude-guard`: 起動の記録に `"coop": {"with": 担当かそのリスト, "reason", "since", "until"}` があり、期限内で記録の pid が今のプロセスなら、`with` の担当も `allow_owner` と同じ照合（`option`・`env`・`same_role`）で通す。旗・ロックの間は使わない。保護したパスへの書き込みと git は共同作業でも止める。`owner` の無い記録も `coop` があれば読む（人が `--owner` なしで起動した形）。
+  - `claude-guard status`: 「共同作業: <担当>、HH:MM（JST）まで（理由）」。`coop.modified` / `coop.changes` があれば「プレイ用のセーブを N 回変えた」を添える（判定には使わない）。
+  - `claude-show`（`view.playtest_guard`）: 呼んだペインの役割が `coop.with` にあれば、人がいても開く（見せるのが目的）。ゲームの窓が前面なら断る（exit 2）。
 
 ## [0.7.6] - 2026-11-23
 

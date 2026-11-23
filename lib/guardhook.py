@@ -29,6 +29,9 @@ PreToolUse hook（Bash / Edit / Write / NotebookEdit）から呼ぶ。判定は 
   - 許可のファイル $XDG_RUNTIME_DIR/claude-guard/<名前>.allow（claude-guard allow。期限まで有効）
   - {"program"} の項目の allow_owner: 起動の記録のファイルの owner と、コマンドの --owner X（か前に付けた環境変数）が
     同じで、記録の pid がそのガードの process に当たるプロセスとして動いていて、セッションの役割も X なら、その項目では止めない
+  - 共同作業（記録の coop: {"with": 担当かそのリスト, "reason", "since", "until"}）: 期限内で記録の pid が生きていれば、
+    with の担当も owner と同じ照合（option / env / same_role）で通す。ユーザーと AI が同じゲームを一緒に動かすため。
+    旗・ロックの間は使わない。paths（書き込み・git）は共同作業でも止める
 """
 import json
 import os
@@ -1008,7 +1011,9 @@ def read_launch_record(path, patterns):
     """(記録の dict, None) か、例外にならないとき (読めた分の dict か None, 理由)。
 
     通すのは: 自分の普通のファイルで、{"v": 1, "owner": 空でない文字列, "pid": 正の整数} の形で、その pid が動いていて、
-    引数（pgrep -f と同じく空白でつないだもの）が patterns のどれかに当たるときだけ（pid の使い回し・古い記録を効かせない）。"""
+    引数（pgrep -f と同じく空白でつないだもの）が patterns のどれかに当たるときだけ（pid の使い回し・古い記録を効かせない）。
+    owner が無い（か null）記録は、coop（オブジェクト）があるときだけ読む（人が --owner なしで起動して共同作業にした形）。
+    そのとき owner は None で、owner としては誰とも合わない。"""
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError:
@@ -1032,7 +1037,8 @@ def read_launch_record(path, patterns):
     if not isinstance(data, dict) or data.get("v") != 1:
         return None, "記録のファイルの形が違う"
     owner, pid = data.get("owner"), data.get("pid")
-    if not isinstance(owner, str) or not owner or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+    owner_ok = (isinstance(owner, str) and owner) or (owner is None and isinstance(data.get("coop"), dict))
+    if not owner_ok or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return None, "記録のファイルの形が違う"
     import proc
     argv = proc.argv(pid)
@@ -1044,6 +1050,75 @@ def read_launch_record(path, patterns):
     if not any(re.search(p, line) for p in patterns):
         return data, f"pid {pid} は別のプロセス（引数が process に当たらない）"
     return data, None
+
+
+def coop_of(rec, now=None):
+    """記録の共同作業の印を読む。{"with": [担当], "reason", "since", "until", "changes"} か None。
+
+    None は: coop が無い・形が違う・until を過ぎた（pid の照合は read_launch_record の側）。changes は
+    プレイ用のセーブを変えた回数（表示だけに使う。modified / changes が無い・形が違えば None）。"""
+    c = rec.get("coop") if isinstance(rec, dict) else None
+    if not isinstance(c, dict):
+        return None
+    w = c.get("with")
+    names = [w] if isinstance(w, str) else w
+    if not isinstance(names, list) or not names or not all(isinstance(x, str) and x for x in names):
+        return None
+    until = c.get("until")
+    if isinstance(until, bool) or not isinstance(until, (int, float)) or until != until:
+        return None
+    now = time.time() if now is None else now
+    # NaN・Infinity（json は読む）や桁外れの期限は、書き手の誤りで共同作業が終わらなくなるので印とみなさない。
+    # 上限は旗と同じ 7 日
+    if not now < until <= now + MAX_MINUTES * 60:
+        return None
+    reason = c.get("reason") if isinstance(c.get("reason"), str) else ""
+    since = c.get("since")
+    since = since if isinstance(since, (int, float)) and not isinstance(since, bool) and since == since else None
+    n = c.get("changes")
+    changes = n if c.get("modified") is True and isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
+    return {"with": names, "reason": reason, "since": since, "until": until, "changes": changes}
+
+
+def jst_hhmm(t):
+    """epoch 秒 → JST の HH:MM（統括・ユーザーは JST で読む。マシンの時間帯に左右されないよう固定）。"""
+    from datetime import datetime, timedelta, timezone
+    return datetime.fromtimestamp(t, timezone(timedelta(hours=9))).strftime("%H:%M")
+
+
+def coop_text(coop):
+    """status の「共同作業: <担当>、HH:MM（JST）まで（理由）」。"""
+    text = f"共同作業: {', '.join(coop['with'])}、{jst_hhmm(coop['until'])}（JST）まで"
+    if coop["reason"]:
+        text += f"（{coop['reason']}）"
+    if coop["changes"]:
+        text += f"、プレイ用のセーブを {coop['changes']} 回変えた"
+    return text
+
+
+def window_role(env):
+    """このペイン（KITTY_WINDOW_ID と KITTY_LISTEN_ON）の役割。claude-state の記録から読む（kitty には聞かない）。
+    claude-show のようにセッション id を持たないコマンド用。分からなければ None。"""
+    wid, sock = env.get("KITTY_WINDOW_ID"), env.get("KITTY_LISTEN_ON")
+    if not wid or not wid.isdigit() or not sock:     # ペインの id は kitty ごとなので、socket が無ければ決められない
+        return None
+    try:
+        from rundir import runtime_dir
+        files = sorted((runtime_dir(env, create=False) / "claude-state").glob("*.json"))
+    except (OSError, ImportError):
+        return None
+    best = None
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("window") != int(wid) or data.get("socket") != sock:
+            continue
+        role = data.get("role")
+        if isinstance(role, str) and role and (best is None or (data.get("updated") or 0) > best[0]):
+            best = (data.get("updated") or 0, role)
+    return best[1] if best else None
 
 
 def session_role(env, session):
@@ -1092,12 +1167,14 @@ def known_roles(env):
     return roles
 
 
-def playtest_state(env, name, running=None, path=None):
+def playtest_state(env, name, running=None, path=None, role=None, now=None):
     """claude-show 用: ガード name のプロセス（ゲームなど）を、人がテストプレイしているか。(種類, 説明) を返す。
 
     種類は "config"（ガードが無い・無効・process が無い → 今までどおりだが、設定の誤りかもしれないので知らせる）、
     None（プロセスが動いていない → 今までどおり）、
-    "e2e"（allow_owner の起動の記録が生きていて、owner が役割 = 担当の e2e）、"human"（それ以外 = 人がプレイ中）。
+    "e2e"（allow_owner の起動の記録が生きていて、owner が役割 = 担当の e2e）、
+    "coop"（記録が生きていて共同作業の印があり、呼んだペインの役割 role が with にある = ユーザーと一緒に操作中。
+    見せるのが目的なので開いてよい。ゲームの窓が前面かは呼び手が見る）、"human"（それ以外 = 人がプレイ中）。
     記録・pid の照合は allow_owner と同じ read_launch_record。running は patterns → True / False / None（pgrep）。"""
     guards, _ = load_guard_config(env, path)
     g = next((x for x in guards if x["name"] == name), None)
@@ -1121,18 +1198,24 @@ def playtest_state(env, name, running=None, path=None):
             whys.append(why)
             continue
         roles = known_roles(env) if roles is None else roles
-        if rec["owner"] in roles:
+        if rec.get("owner") in roles:
             return "e2e", f"{rec['owner']} が起動した（pid {rec['pid']}）"
-        whys.append(f"記録の owner {rec['owner']} は役割でない")
+        coop = coop_of(rec, now)
+        if coop and role and role in coop["with"]:
+            return "coop", coop_text(coop)
+        whys.append(f"記録の owner {rec['owner']} は役割でない" if rec.get("owner") else "記録に owner が無い")
+        if coop:
+            whys.append(f"共同作業の担当（{', '.join(coop['with'])}）は呼んだペインの役割（{role or '不明'}）でない")
     return "human", "、".join(whys)
 
 
 class Context:
     """1 回の判定で共有するもの（hook の環境・セッション）と、記録・役割の読みの控え（同じコマンドの中で 1 度だけ読む）。"""
 
-    def __init__(self, env, session=None, owner_ok=True):
+    def __init__(self, env, session=None, owner_ok=True, now=None):
         self.env = env
         self.session = session
+        self.now = now
         self.owner_ok = owner_ok                  # allow_owner を使うか（旗・ロックで働いている間は使わない）
         self._launch = {}
         self._role = None
@@ -1372,8 +1455,13 @@ class Analyzer:
         if not claimed:
             return False
         rec, why = self.ctx.launch(self.guard, o)
-        if why or not rec or rec["owner"] != claimed:
+        if why or not rec:
             return False
+        if rec.get("owner") != claimed:
+            # 共同作業の印の担当も、owner と同じ照合で通す（旗・ロックの間は上の owner_ok で使わない）
+            coop = coop_of(rec, self.ctx.now)
+            if not coop or claimed not in coop["with"]:
+                return False
         if o["same_role"]:
             return self.ctx.role() == claimed     # 役割が分からないセッションは通さない（今までどおり止める）
         return True
@@ -1769,7 +1857,7 @@ def active(guard, env, probe=Probe, now=None, assume=False):
 
 # ---- 判定 ------------------------------------------------------------------
 
-def find_reasons(guard, tool, tool_input, cwd, env, session=None, owner_ok=True):
+def find_reasons(guard, tool, tool_input, cwd, env, session=None, owner_ok=True, now=None):
     """1 つのガードについて、止める候補の理由のリスト（働いているかは見ない）。owner_ok は allow_owner を使うか。"""
     if tool in FILE_TOOLS:
         roots = Roots(guard["paths"])
@@ -1783,7 +1871,7 @@ def find_reasons(guard, tool, tool_input, cwd, env, session=None, owner_ok=True)
         cmd = tool_input.get("command")
         if not isinstance(cmd, str) or not cmd.strip():
             return []
-        return Analyzer(guard, cwd, env, ctx=Context(env, session, owner_ok)).run(cmd)
+        return Analyzer(guard, cwd, env, ctx=Context(env, session, owner_ok, now)).run(cmd)
     return []
 
 
@@ -1824,7 +1912,7 @@ def evaluate(data, env, probe=Probe, now=None, path=None, assume=False):
         if session and flag and flag.get("owner") == session:
             continue                      # ロックの持ち主（デプロイしている本人）は、このガードでは止めない
         # 旗・ロックは「全員を止める」。allow_owner（起動した担当の例外）は process だけで働いているときに使う
-        reasons = find_reasons(g, tool, tool_input, cwd, env, session, owner_ok=not flag)
+        reasons = find_reasons(g, tool, tool_input, cwd, env, session, owner_ok=not flag, now=now)
         if not reasons:
             continue                      # 止める候補が無ければ、働く条件も調べない（pgrep を呼ばない）
         if read_state(env, g["name"], "allow", now) or read_state(env, "all", "allow", now):
@@ -1874,12 +1962,18 @@ def owner_status(guard, env, now=None):
         if flagged:
             out.append(head + "旗（ロック）の間は使わない（全員を止める）")
         elif rec and not why:
-            out.append(head + f"owner {rec['owner']}、pid {rec['pid']} が動いている → {rec['owner']} は通す"
-                       + ("（役割も同じとき）" if o["same_role"] else ""))
+            if rec.get("owner"):
+                out.append(head + f"owner {rec['owner']}、pid {rec['pid']} が動いている → {rec['owner']} は通す"
+                           + ("（役割も同じとき）" if o["same_role"] else ""))
+            else:
+                out.append(head + f"owner なし、pid {rec['pid']} が動いている")
         elif rec:
-            out.append(head + f"owner {rec['owner']}、{why} → 例外にならない")
+            out.append(head + f"owner {rec.get('owner') or 'なし'}、{why} → 例外にならない")
         else:
             out.append(head + f"{why} → 例外にならない")
+        coop = coop_of(rec, now) if rec and not why else None
+        if coop:
+            out.append(coop_text(coop) + ("（旗（ロック）の間は使わない）" if flagged else ""))
     return out
 
 

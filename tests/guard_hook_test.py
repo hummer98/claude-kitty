@@ -1011,6 +1011,167 @@ class AllowOwner(Base):
         self.assertIn("deny", r.stdout)
 
 
+class Coop(Base):
+    """共同作業（起動の記録の coop）: 期限内で pid が生きていれば、with の担当も owner と同じ照合で通す。"""
+    NOW = 1_800_000_000          # 2027-01-15 17:00 JST
+
+    def setUp(self):
+        Base.setUp(self)
+        self.rec_dir = self.run_dir / "svcctl"
+        self.rec_dir.mkdir()
+        self.rec = self.rec_dir / "launched.json"
+        self.write_owner_config()
+        self.argv = {4242: ["./fullscreen-app", "--x"]}
+        for name, fn in (("argv", lambda pid: self.argv.get(pid)), ("alive", lambda pid: pid in self.argv)):
+            pt = mock.patch(f"proc.{name}", side_effect=fn)
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    write_owner_config = AllowOwner.write_owner_config
+    role = AllowOwner.role
+
+    def launched(self, owner="aom-master", pid=4242, coop=None, **kw):
+        rec = {"v": 1, "pid": pid, "started_at": 1, "cmd": "launch"}
+        if owner is not None:
+            rec["owner"] = owner
+        if coop is not None:
+            rec["coop"] = coop
+        rec.update(kw)
+        self.rec.write_text(json.dumps(rec))
+
+    def coop(self, who="probe", **kw):
+        return dict({"with": who, "reason": "一緒に列車を走らせる", "since": self.NOW - 60, "until": self.NOW + 3600}, **kw)
+
+    def bash(self, command, session="s-probe", env=None):
+        data = self.hook_input("Bash", {"command": command}, None, session)
+        return gh.evaluate(data, env or self.env, fake_probe(process=True), now=self.NOW)
+
+    def status(self):
+        return next(l for l in gh.status_lines(self.env, fake_probe(process=True), now=self.NOW)[0]
+                    if l.startswith("app-running:"))
+
+    def test_coop_member_passes(self):
+        self.launched(coop=self.coop())
+        self.role("s-probe", "probe")
+        for c in ("svcctl --owner probe quit", "SVCCTL_OWNER=probe svcctl deploy"):
+            self.assertIsNone(self.bash(c), c)
+
+    def test_without_coop_unchanged(self):
+        self.launched()                                                     # owner は別の担当、印なし
+        self.role("s-probe", "probe")
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit"))
+
+    def test_other_member_or_role_blocked(self):
+        self.launched(coop=self.coop())
+        self.role("s-probe", "probe")
+        self.role("s-ui", "ui")
+        self.assertIsNotNone(self.bash("svcctl --owner ui quit", session="s-ui"))       # with に無い担当
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit", session="s-ui"))    # 名乗りと役割が違う
+        self.assertIsNotNone(self.bash("svcctl quit"))                                  # 名乗らない
+
+    def test_expired_or_broken_coop_blocked(self):
+        self.role("s-probe", "probe")
+        for c in (self.coop(until=self.NOW), self.coop(until=self.NOW - 1), self.coop(until="later"),
+                  self.coop(until=True), self.coop(who=""), self.coop(who=[]), self.coop(who=["probe", 3]),
+                  self.coop(until=self.NOW + 8 * 24 * 3600), self.coop(until=1e20),
+                  {"with": "probe"}, "probe", ["probe"]):
+            self.launched(coop=c)
+            self.assertIsNotNone(self.bash("svcctl --owner probe quit"), c)
+
+    def test_nan_or_infinite_until(self):
+        # json は NaN・Infinity を読む。印とみなさず（hook で期限切れにならないのを防ぐ）、status も落ちない
+        self.role("s-probe", "probe")
+        for v in ("NaN", "Infinity", "-Infinity"):
+            self.rec.write_text('{"v": 1, "owner": "m", "pid": 4242, "coop": {"with": "probe", "until": %s, "since": NaN}}' % v)
+            self.assertIsNotNone(self.bash("svcctl --owner probe quit"), v)
+            self.assertNotIn("共同作業", self.status(), v)
+        self.rec.write_text('{"v": 1, "owner": "m", "pid": 4242, "coop": {"with": "probe", "until": %d, "since": NaN}}'
+                            % (self.NOW + 60))
+        self.assertIn("共同作業: probe", self.status())                     # since が NaN でも表示だけの欄
+
+    def test_pid_dead_or_other_process_blocked(self):
+        self.role("s-probe", "probe")
+        self.launched(pid=999, coop=self.coop())
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit"))
+        self.argv[999] = ["/usr/bin/sleep", "100"]
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit"))
+
+    def test_owner_less_record_with_coop(self):
+        # 人が --owner なしで起動して、共同作業の印だけを付けた形
+        self.role("s-probe", "probe")
+        self.launched(owner=None, coop=self.coop())
+        self.assertIsNone(self.bash("svcctl --owner probe quit"))
+        self.rec.write_text(json.dumps({"v": 1, "owner": None, "pid": 4242, "coop": self.coop()}))   # owner: null も同じ
+        self.assertIsNone(self.bash("svcctl --owner probe quit"))
+        self.launched(owner=None)                                           # owner も coop も無い → 形が違う
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit"))
+        self.assertIn("形が違う", self.status())
+        self.launched(owner=None, coop=self.coop(until=self.NOW - 1))       # 期限切れ: 誰も通さない
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit"))
+
+    def test_with_list(self):
+        self.launched(owner=None, coop=self.coop(who=["ui", "probe"]))
+        self.role("s-probe", "probe")
+        self.role("s-ui", "ui")
+        self.role("s-text", "text")
+        self.assertIsNone(self.bash("svcctl --owner probe quit"))
+        self.assertIsNone(self.bash("svcctl --owner ui quit", session="s-ui"))
+        self.assertIsNotNone(self.bash("svcctl --owner text quit", session="s-text"))
+
+    def test_owner_still_passes_with_coop(self):
+        self.launched(owner="master", coop=self.coop())
+        self.role("s-master", "master")
+        self.assertIsNone(self.bash("svcctl --owner master quit", session="s-master"))
+
+    def test_paths_and_git_still_blocked(self):
+        self.launched(coop=self.coop())
+        self.role("s-probe", "probe")
+        for c in (f"echo x > {self.shared_dir}/a", f"cp /tmp/x {self.shared_dir}/m1/",
+                  f"cd {self.shared_dir}/m1 && git pull", f"git -C {self.shared_dir}/m1 checkout main",
+                  f"svcctl --owner probe quit > {self.shared_dir}/log"):
+            self.assertIsNotNone(self.bash(c), c)
+        data = self.hook_input("Write", {"file_path": f"{self.shared_dir}/m1/a.lua"}, None, "s-probe")
+        self.assertIsNotNone(gh.evaluate(data, self.env, fake_probe(process=True), now=self.NOW))
+
+    def test_flag_or_lock_disables_coop(self):
+        self.launched(coop=self.coop())
+        self.role("s-probe", "probe")
+        gh.write_state(self.env, "app-running", "on", 10, "maintenance", now=self.NOW)
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit"))
+        self.assertIn("（旗（ロック）の間は使わない）", self.status())
+        gh.remove_state(self.env, "app-running", "on")
+        self.assertTrue(gh.acquire(self.env, "app-running", 10, "deploy", "s-deployer", now=self.NOW)[0])
+        self.assertIsNotNone(self.bash("svcctl --owner probe quit"))
+
+    def test_status_line(self):
+        self.launched(coop=self.coop())
+        line = self.status()
+        self.assertIn("共同作業: probe、18:00（JST）まで（一緒に列車を走らせる）", line)
+        self.assertNotIn("セーブ", line)
+        self.launched(owner=None, coop=self.coop(who=["ui", "probe"], reason=""))
+        line = self.status()
+        self.assertIn("owner なし、pid 4242 が動いている", line)
+        self.assertIn("共同作業: ui, probe、18:00（JST）まで", line)
+        self.launched(coop=self.coop(until=self.NOW - 1))
+        self.assertNotIn("共同作業", self.status())
+        self.launched(pid=999, coop=self.coop())
+        self.assertNotIn("共同作業", self.status())
+
+    def test_status_save_changes(self):
+        self.launched(coop=self.coop(modified=True, changes=3))
+        self.assertIn("（一緒に列車を走らせる）、プレイ用のセーブを 3 回変えた", self.status())
+        # 欄が無い・形が違うときは黙って省く（判定にも使わない）
+        self.role("s-probe", "probe")
+        for extra in ({"modified": True}, {"changes": 3}, {"modified": "yes", "changes": 3},
+                      {"modified": True, "changes": "3"}, {"modified": True, "changes": True},
+                      {"modified": True, "changes": 0}, {"modified": False, "changes": 2}):
+            self.launched(coop=self.coop(**extra))
+            line = self.status()
+            self.assertIn("共同作業: probe", line, extra)
+            self.assertNotIn("セーブ", line, extra)
+            self.assertIsNone(self.bash("svcctl --owner probe quit"), extra)
+
+
 class Robustness(Base):
     def run_hook(self, stdin, env=None):
         e = dict(os.environ, **(env or self.env))

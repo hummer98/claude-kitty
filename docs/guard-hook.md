@@ -76,6 +76,7 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 2. 許可のファイル: `claude-guard allow <名前|all> --minutes 30 --reason "e2e"`。`$XDG_RUNTIME_DIR/claude-guard/<名前>.allow` に期限と理由を書く。期限が過ぎれば無効。`claude-guard revoke <名前|all>` で消す。
 3. ロックの持ち主（下）。
 4. 起動した担当（`commands` の `{"program"}` の項目の `allow_owner`。下）。その項目の形だけを通す。旗・ロックの間は使わない。
+5. 共同作業の担当（起動の記録の `coop.with`。[下](#共同作業coop)）。4 と同じ照合・同じ範囲。
 
 ### 起動した担当だけ通す（allow_owner）
 
@@ -102,6 +103,26 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 
 記録が無い・読めない・壊れている・どれかが合わないときは例外にならず、今までどおり止める。設定の誤り（`file` の形が違う、`option` / `env` が無いなど）は、その例外を使わずに「問題:」に出す。`allow_owner` は `process` のあるガードの `commands` の `{"program"}` の項目にだけ書ける。例外はその項目の `block` 全部に効く。起動した担当にも一部（`load` など）は止めたいなら、項目を 2 つに分け、`allow_owner` は通してよいサブコマンド（`quit` など）の項目にだけ書く。例外が外すのは項目の形の理由だけ（同じコマンドの保護したパスへの書き込みは止める）。**旗（`claude-guard on <名前>`）・ロック（`acquire`）が立っている間は例外を使わない**（旗は「全員を止める」ため。process も同時に動いていても止める）。例外が効くのは、旗もロックも無く、`process`（か `command`）で働いているときだけ。`claude-guard status` は旗の間「旗（ロック）の間は使わない」と出す。
 
+### 共同作業（coop）
+
+ユーザーが自分で動かしているゲームを、AI の担当と一緒に操作するとき（人が起動したので `owner` が担当でない）のための印。起動の記録に `coop` を足すと、`with` の担当も `allow_owner` の例外と同じ扱いで通す。
+
+```json
+{"v": 1, "owner": "aom-master", "pid": 4242, "started_at": 1795400000, "cmd": "launch",
+ "coop": {"with": ["aom-probe", "aom-ui"], "reason": "一緒にダイヤを組む", "since": 1795400100, "until": 1795407300}}
+```
+
+- `with` は担当の名前 1 つか、そのリスト。`until`（epoch 秒）を過ぎたら共同作業ではない。`until` が数でない・7 日より先（旗の上限と同じ）なら印とみなさない（書き誤りで共同作業が終わらなくならないよう）。`reason`・`since` は表示用（`since` は判定に使わない）。
+- 照合は `allow_owner` と同じ（`file`・`option`・`env`・`same_role`）で、`owner` の代わりに `with` の担当と照らす: コマンドが名乗る担当 X が `with` にあり、`same_role` なら役割も X。記録の形と pid の照合（allow_owner の条件の 2・3）もそのまま要る（記録の pid が今のゲームでなければ共同作業ではない）。`owner` の担当は今までどおり通る。
+- 人が `--owner` なしで起動したときは、`owner` の無い（か `null` の）記録に `coop` だけが付く。`coop` があるときに限り、この形を読む（`owner` としては誰とも合わない）。`owner` も `coop` も無い記録は今までどおり形の誤り。
+- `coop` が無い・形が違う（`with` が空・文字列でない、`until` が数でない）ときは、今までどおり止める。
+- **旗・ロックの間は使わない**（`allow_owner` と同じ）。**保護したパスへの書き込みと git は、共同作業でも止める**（例外が外すのは項目の形の理由だけ。ゲームが動いている間に MOD のフォルダを書くと落ちるため）。
+- `coop.modified`（`true`）と `coop.changes`（正の整数）は、記録を書く道具が「プレイ用のセーブを担当が変えた回数」を残す欄。判定には使わず、`status` に添えるだけ（無い・形が違えば黙って省く）。
+- 例外は項目の `block` 全部に効く（`quit`・`load` なども）。人のゲームで担当に使わせたくないサブコマンドがあれば、`allow_owner` と同じく項目を 2 つに分け、`allow_owner` は通してよい項目にだけ書く。
+- 記録を書く道具は、一時ファイルに書いてから置き換える（読みかけの壊れた記録で例外を外さない）。
+
+`claude-guard status` は、印が生きている間 `共同作業: aom-probe, aom-ui、16:15（JST）まで（一緒にダイヤを組む）、プレイ用のセーブを 3 回変えた` のように出す（時刻は JST で固定。旗の間は「（旗（ロック）の間は使わない）」を添える）。`claude-show` も同じ印を見る（[docs/config.md の playtest_guard](config.md#viewclaude-viewclaude-showclaude-roster)）。
+
 理由の文には通す道を書かない（止められたサブエージェントが自分で外さないように）。外すのは依頼主か統括の判断。
 
 ## 旗とロック
@@ -122,7 +143,7 @@ $ claude-guard status
 app-running: 働いている（プロセス ^\./fullscreen-app）、条件 process/旗、止めるもの paths 1・commands 1、許可あり（残り 25 分、e2e）
 deploy: 働いている（旗（残り 12 分、持ち主 5d0c…）、v1.4 を出す）、条件 旗、止めるもの paths 1・commands 2・例外 1
 device-test: 働いていない、条件 command/旗、止めるもの paths 1・commands 0
-game: 働いている（プロセス ^\./game）、条件 process/旗、止めるもの paths 1・commands 1、起動した担当の例外（/run/user/1000/svcctl/launched.json）: owner probe、pid 4242 が動いている → probe は通す（役割も同じとき）
+game: 働いている（プロセス ^\./game）、条件 process/旗、止めるもの paths 1・commands 1、起動した担当の例外（/run/user/1000/svcctl/launched.json）: owner probe、pid 4242 が動いている → probe は通す（役割も同じとき）、共同作業: aom-ui、16:15（JST）まで（一緒に操作）
 問題: guard_hook.guards.broken.process の正規表現が読めない: …
 ```
 
@@ -172,7 +193,7 @@ claude-guard release deploy-prod
 - 止めるのは Claude Code のツール呼び出し（Bash / Edit / Write / NotebookEdit）だけ。人の手、CI、cron、ほかの道具は止めない。ロックは、ほかの道具も `claude-guard acquire` を呼ぶときだけ排他になる。
 - サブエージェントの中のツール呼び出しにも効く（設定ファイルの hook はサブエージェントの中でも同じように動き、入力に `agent_id` / `agent_type` が付く。公式の hooks の説明）。
 - Bash はシェルの静的な読みなので、見えない書き込み（スクリプトの中、alias、`eval`）がある。コマンドの名前を変数に入れた形は、同じコマンドの中で代入したものだけ読む（上の「コマンドの位置の変数」）。
-- `allow_owner` の担当の名前は自己申告（`--owner`）と役割の照合で、なりすましは防がない（うっかり別の担当のものを止めることを防ぐ）。
+- `allow_owner` と共同作業の担当の名前は自己申告（`--owner`）と役割の照合で、なりすましは防がない（うっかり別の担当のものを止めることを防ぐ）。
 - 速さ: 止める候補が無ければ Python の起動だけ（手元で約 0.03 秒）。候補があれば pgrep を 1 回（手元で 0.06 秒前後。pgrep 自体が 0.03 秒）。
 - hook の `timeout` は、候補に当たるガードの `command_timeout` の合計と pgrep（打ち切り 5 秒）より長くする。超えると Claude Code が hook を打ち切り、そのときは止めずに通る。
 

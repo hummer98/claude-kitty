@@ -3148,6 +3148,96 @@ class ClaudeShowPlaytest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("playtest_guard", out["playtest"])
 
+    # ---- 共同作業（起動の記録の coop）: 印の担当のペインなら、人がいても開く（ゲームの窓が前面なら断る） ----
+
+    def coop_launched(self, who="aom-probe", owner=None, pid=GAME_PID, until=None):
+        import time
+        rec = {"v": 1, "pid": pid, "started_at": 1, "cmd": "launch",
+               "coop": {"with": who, "reason": "一緒に操作", "since": time.time() - 60,
+                        "until": time.time() + 3600 if until is None else until}}
+        if owner:
+            rec["owner"] = owner
+        self.rec.write_text(json.dumps(rec))
+
+    def my_pane(self, role, window=4, sock="unix:/fake/kitty-1"):
+        d = self.run_dir / "claude-state"; d.mkdir(exist_ok=True)
+        (d / f"pane-{role}-{window}.json").write_text(json.dumps(
+            {"session_id": f"pane-{role}", "role": role, "window": window, "socket": sock}))
+
+    def coop_show(self, front=5, target=None):
+        return self.show.show(str(target or self.html), self.env, None, run=self.run_, active_pid=lambda: front)
+
+    def test_coop_member_opens(self):
+        self.coop_launched()                     # 人が --owner なしで起動して、印だけを付けた形
+        self.my_pane("aom-probe")
+        code, out = self.coop_show()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.opened()[0][0].endswith("claude-browser"))
+        self.assertIn("共同作業: aom-probe", out["coop"])
+
+    def test_coop_with_list_and_owner(self):
+        self.coop_launched(who=["aom-ui", "aom-probe"], owner="someone")
+        self.my_pane("aom-probe")
+        self.assertEqual(self.coop_show()[0], 0)
+        self.runs.clear()
+        self.coop_show(target=self.img)          # 画像の overlay も出す
+        self.assertTrue([c for c in read_calls(self.calls) if "launch" in c])
+
+    def test_coop_refused_when_game_in_front(self):
+        self.coop_launched()
+        self.my_pane("aom-probe")
+        code, out = self.coop_show(front=77)     # 偽の pgrep はゲームの pid 77 を返す
+        self.assertEqual((code, out["skipped"]), (2, "ゲームの窓が前面にある"), out)
+        self.assertNotIn("playtest", out)
+        self.assertEqual(self.opened(), [])
+
+    def test_coop_other_pane_refused(self):
+        self.coop_launched()
+        self.my_pane("aom-ui")                   # 印に無い担当
+        out = self.refused()
+        self.assertIn("共同作業の担当（aom-probe）は呼んだペインの役割（aom-ui）でない", out["playtest"])
+        self.my_pane("aom-probe", window=9)      # 別のペインの記録
+        (self.run_dir / "claude-state" / "pane-aom-ui-4.json").unlink()
+        self.assertIn("役割（不明）", self.refused()["playtest"])
+        self.my_pane("aom-probe", sock="unix:/fake/kitty-2")   # 同じ id でも別の kitty
+        self.assertIn("役割（不明）", self.refused()["playtest"])
+
+    def test_coop_front_unknown_refuses(self):
+        # 前面を確認できない（pgrep の失敗・KWin が無い）・ガードの process が読めないときも、重ねない側に倒す
+        self.coop_launched()
+        self.my_pane("aom-probe")
+
+        def bad_pgrep(argv, **kw):
+            if argv[0] == "pgrep" and "--" in argv:     # 前面の判定の pgrep だけを失敗させる
+                return SimpleNamespace(returncode=2, stdout="", stderr="bad")
+            return self.run_(argv, **kw)
+        code, out = self.show.show(str(self.html), self.env, None, run=bad_pgrep, active_pid=lambda: 5)
+        self.assertEqual((code, out["skipped"]), (2, "ゲームの窓が前面にある"), out)
+
+        def no_kwin():
+            raise SystemExit(1)
+        self.assertEqual(self.show.show(str(self.html), self.env, None, run=self.run_, active_pid=no_kwin)[0], 2)
+        self.assertTrue(self.show.game_in_front(self.env, "no-such-guard", run=self.run_, active_pid=lambda: 5))
+        self.assertEqual(self.opened(), [])
+
+    def test_coop_without_kitty_socket_is_no_role(self):
+        # ペインの id は kitty ごと。KITTY_LISTEN_ON が無ければ、別の kitty の同じ id の記録を自分とみなさない
+        self.coop_launched()
+        self.my_pane("aom-probe")
+        self.env.pop("KITTY_LISTEN_ON")
+        code, out = self.show.show(str(self.html), self.env, None, run=self.run_, active_pid=lambda: 5)
+        self.assertEqual((code, out["skipped"]), (2, "ゲームをテストプレイ中"), out)
+
+    def test_coop_expired_or_stale_refused(self):
+        import time
+        self.my_pane("aom-probe")
+        self.coop_launched(until=time.time() - 1)
+        self.refused()
+        self.coop_launched(pid=999)              # 記録の pid が今のゲームでない
+        self.assertIn("動いていない", self.refused()["playtest"])
+        self.launched("someone")                 # 印なし
+        self.refused()
+
     def test_main_prints_reason(self):
         import contextlib
         import io

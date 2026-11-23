@@ -14,6 +14,8 @@
 - view.playtest_guard に claude-guard のガードの名前があり、そのプロセス（ゲームなど）が動いていて、担当の e2e でない
   （allow_owner の起動の記録が無い・古い・owner が役割でない）なら、人がテストプレイ中として何もしない（exit 2）。
   担当の e2e なら今までどおり（前面のときだけ断る）。
+  起動の記録に共同作業の印（coop）があり、このペインの役割が coop.with にあれば、ユーザーと一緒に操作しているので
+  開く（見せるのが目的）。ただしゲームの窓（ガードの process）が前面なら断る（exit 2。ゲームに重ねない・入力先を動かさない）。
 - kitty の外では xdg-open（macOS は open）に渡す。
 - 設定の browser.enabled が false なら、kitty の中でも HTML・画像・URL（ほかの種類も kitty の外と同じく）を xdg-open（macOS は open）に渡す
   （結果の shown がそのコマンド、via が "browser.enabled: false"）。
@@ -107,18 +109,30 @@ def pgrep_running(patterns, run=subprocess.run):
 
 
 def playtesting(env, run=subprocess.run):
-    """(人がテストプレイ中か, 説明, 知らせ)。view.playtest_guard が無ければ (False, None, None)（今までどおり）。
-    playtest_guard の値の誤りは「開かない」側に倒す（is_guarded と同じ）。ガードが見つからないなどは開くが、
-    保護が効いていないことに気づけるよう知らせを返す（結果の warnings に入れる）。"""
+    """(人がテストプレイ中か, 説明, 知らせ, 共同作業のときガード名)。view.playtest_guard が無ければ
+    (False, None, None, None)（今までどおり）。playtest_guard の値の誤りは「開かない」側に倒す（is_guarded と同じ）。
+    ガードが見つからないなどは開くが、保護が効いていないことに気づけるよう知らせを返す（結果の warnings に入れる）。"""
     try:
         name = load_playtest_guard(env)
     except ValueError as e:
-        return True, str(e), None
+        return True, str(e), None, None
     if not name:
-        return False, None, None
-    from guardhook import playtest_state
-    kind, why = playtest_state(env, name, running=lambda pats: pgrep_running(pats, run))
-    return kind == "human", why, (why if kind == "config" else None)
+        return False, None, None, None
+    from guardhook import playtest_state, window_role
+    kind, why = playtest_state(env, name, running=lambda pats: pgrep_running(pats, run), role=window_role(env))
+    return kind == "human", why, (why if kind == "config" else None), (name if kind == "coop" else None)
+
+
+def game_in_front(env, name, run=subprocess.run, active_pid=None):
+    """共同作業のとき: ガード name の process（ゲーム）の窓が前面か。確認できなければ前面とみなす（重ねない側）。"""
+    from guardhook import load_guard_config
+    g = next((x for x in load_guard_config(env)[0] if x["name"] == name), None)
+    if g is None or not g["process"]:
+        return True
+    try:
+        return guarded_in_front(g["process"], run=run, active_pid=active_pid)
+    except (ValueError, SystemExit):
+        return True
 
 
 def overlay_args(kitten, wid, path):
@@ -149,11 +163,17 @@ def show(target, env, ratio, run=subprocess.run, active_pid=None):
     kind, val = classify(target)
     if kind != "url" and not Path(val).is_file():
         return 1, {"error": f"ファイルが無い: {val}"}
-    playing, why, warn = playtesting(env, run=run)
+    playing, why, warn, coop = playtesting(env, run=run)
     if playing:  # 前面かどうかに関わらず、ユーザーの遊んでいる画面に何も出さない
         return 2, {"skipped": "ゲームをテストプレイ中", "playtest": why, "target": str(val),
                    "retry": "テストプレイが終わってから呼び直す"}
+    if coop and game_in_front(env, coop, run=run, active_pid=active_pid):
+        # 一緒に操作していても、ゲームの窓に重ねたり入力先を動かしたりはしない
+        return 2, {"skipped": "ゲームの窓が前面にある", "coop": why, "target": str(val),
+                   "retry": "ゲームの窓が前面でなくなってから呼び直す"}
     code, out = _show(kind, val, env, ratio, run, active_pid)
+    if coop:
+        out["coop"] = why
     if warn:  # ガードが見つからないなど: 開くが、テストプレイの保護が効いていないことを呼び手に知らせる
         out["warnings"] = out.get("warnings", []) + [warn]
     return code, out
