@@ -1172,9 +1172,10 @@ def playtest_state(env, name, running=None, path=None, role=None, now=None):
 
     種類は "config"（ガードが無い・無効・process が無い → 今までどおりだが、設定の誤りかもしれないので知らせる）、
     None（プロセスが動いていない → 今までどおり）、
-    "e2e"（allow_owner の起動の記録が生きていて、owner が役割 = 担当の e2e）、
-    "coop"（記録が生きていて共同作業の印があり、呼んだペインの役割 role が with にある = ユーザーと一緒に操作中。
-    見せるのが目的なので開いてよい。ゲームの窓が前面かは呼び手が見る）、"human"（それ以外 = 人がプレイ中）。
+    "coop"（記録が生きていて共同作業の印が効いていて、呼んだペインの役割 role が with にある = ユーザーと一緒に
+    操作中。見せるのが目的なので開いてよい。ゲームの窓が前面かは呼び手が見る）、
+    "e2e"（記録が生きていて共同作業の印が無く（期限切れも含む）、owner が役割 = 担当の e2e）、
+    "human"（それ以外 = 人がプレイ中。印が効いていて role が with に無ければ、owner が役割でもこれ）。
     記録・pid の照合は allow_owner と同じ read_launch_record。running は patterns → True / False / None（pgrep）。"""
     guards, _ = load_guard_config(env, path)
     g = next((x for x in guards if x["name"] == name), None)
@@ -1191,21 +1192,29 @@ def playtest_state(env, name, running=None, path=None, role=None, now=None):
             files.append(launch_file(o["file"], env))
     if not files:
         return "human", "起動の記録（allow_owner の file）が設定に無い"
-    roles, whys = None, []
+    roles, whys, e2e, coop_seen = None, [], None, False
     for f in files:
         rec, why = read_launch_record(f, g["process"])
         if why:
             whys.append(why)
             continue
+        # 共同作業の印を owner より先に見る。launch --coop は owner が担当でも人がゲームを操作しているので、
+        # owner の判定（e2e）に進むと誰が呼んでも開いてしまう。印が効いている間は with の担当だけが開ける
+        # （どれかの記録に印があれば、ほかの記録の owner でも e2e にしない）
+        coop = coop_of(rec, now)
+        if coop:
+            if role and role in coop["with"]:
+                return "coop", coop_text(coop)
+            coop_seen = True
+            whys.append(f"共同作業の担当（{', '.join(coop['with'])}）は呼んだペインの役割（{role or '不明'}）でない")
+            continue
         roles = known_roles(env) if roles is None else roles
         if rec.get("owner") in roles:
-            return "e2e", f"{rec['owner']} が起動した（pid {rec['pid']}）"
-        coop = coop_of(rec, now)
-        if coop and role and role in coop["with"]:
-            return "coop", coop_text(coop)
+            e2e = e2e or f"{rec['owner']} が起動した（pid {rec['pid']}）"
+            continue
         whys.append(f"記録の owner {rec['owner']} は役割でない" if rec.get("owner") else "記録に owner が無い")
-        if coop:
-            whys.append(f"共同作業の担当（{', '.join(coop['with'])}）は呼んだペインの役割（{role or '不明'}）でない")
+    if e2e and not coop_seen:
+        return "e2e", e2e
     return "human", "、".join(whys)
 
 

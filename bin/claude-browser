@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """kitty のペインに Chrome を「常に最前面」で重ねる。ペインの役割・席ごとに独立した Chrome を持つ。
 
-  claude-browser open URL [--mode self|show] [--ratio R] [--area pane|others|right] [--over SLOT|ROLE|ID] [--focus kitty|browser|none]
-  claude-browser move [--mode ...] [--ratio ...] [--area ...] [--over ...] [--focus ...]
+  claude-browser open URL [--mode self|show] [--ratio R] [--area pane|others|right] [--over SLOT|ROLE|ID] [--focus kitty|browser|none] [--no-above]
+  claude-browser move [--mode ...] [--ratio ...] [--area ...] [--over ...] [--focus ...] [--no-above]
   claude-browser shot FILE        前面タブのスクリーンショット（CDP）
   claude-browser url              前面タブの URL
   claude-browser close
@@ -255,8 +255,12 @@ for (const w of workspace.windowList()) if (w.resourceClass === {json.dumps(cls)
     return [json.loads(l) for l in out]
 
 
-def place_browser(cls, browser_id, kitty_id, rect, focus):
+def place_browser(cls, browser_id, kitty_id, rect, focus, above=True):
     """ブラウザの主ウィンドウだけを配置する（OAuth のポップアップや DevTools は動かさない）。
+
+    above が False（--no-above）なら keepAbove を外す（前に付けたものも外す。ユーザーがゲームなどの窓に戻ったとき、
+    その上に Chrome が残らないように）。代わりに raiseWindow で積み順だけ上げる（前の show のあと別の窓の下に
+    回っていても、置いた時点では見えるように）。
 
     実際の矩形 (x, y, w, h) を返す（窓が無ければ None）。最大化の解除は、最大化しているときだけにする
     （解除すると前の大きさに戻す処理が後から走り、指定した大きさを上書きすることがある）。
@@ -270,7 +274,10 @@ if (b) {{
     if (k) b.desktops = k.desktops;
     b.minimized = false;
     if (b.maximizeMode !== 0) b.setMaximize(false, false);
-    b.keepAbove = true;
+    b.keepAbove = {json.dumps(bool(above))};
+    // 最前面にしないときも、置いた時点では見えるよう積み順だけ上げる（入力先は動かさない。
+    // ユーザーが別の窓をクリックすれば、その窓が上に来る）
+    if (!{json.dumps(bool(above))}) workspace.raiseWindow(b);
     b.frameGeometry = {{x: {x}, y: {y}, width: {w}, height: {h}}};
     if ({json.dumps(focus)} === "kitty" && k) workspace.activeWindow = k;
     else if ({json.dumps(focus)} === "browser") workspace.activeWindow = b;
@@ -364,6 +371,7 @@ def mac_placement(st, opts, kitty_win, tab, pane):
 def prepare(args, st, move=False):
     """起動の前に配置先を確定させる（失敗してから Chrome が残らないように）。"""
     opts = resolve_place_opts({k: getattr(args, k, None) for k in PLACE_KEYS}, st, move=move)
+    opts["above"] = not getattr(args, "no_above", False)  # focus と同じく一回ごと（state に残さない）
     if opts["over"] == "self":
         opts["over"] = None
     target_rect((0, 0, 1, 1), (0, 0, 1, 1), opts["mode"], float(opts["ratio"]))  # 値の検証だけ
@@ -436,7 +444,8 @@ def placement(st, opts, kitty_win, tab, pane, settle=SETTLE):
         die(str(e))
     rect = target_rect(client, frac, opts["mode"], float(opts["ratio"]))
     bid = main_browser_window(st)
-    got = place_browser(st["class"], bid, kitty_id, rect, opts["focus"]) if bid else None
+    above = opts.get("above", True)
+    got = place_browser(st["class"], bid, kitty_id, rect, opts["focus"], above) if bid else None
     if got is None:
         die("ブラウザのウィンドウが見つからない")
     # 指定と実際がずれたら、落ち着いてから直す。1 度目は同じ矩形を置き直す（最大化の解除などで Chrome が後から
@@ -450,12 +459,12 @@ def placement(st, opts, kitty_win, tab, pane, settle=SETTLE):
         if fix is None:
             break  # 大きなずれ: 打ち消すと極端に小さくなりうるので、指定のままにして知らせる
         before = got
-        got = place_browser(st["class"], bid, kitty_id, fix, "none") or got
+        got = place_browser(st["class"], bid, kitty_id, fix, "none", above) or got
         if attempt == 1:
             time.sleep(settle)
             got = browser_rect(bid) or got
             if _off(rect, got) > _off(rect, before):  # 打ち消して悪くなったら、指定の矩形に戻す
-                got = place_browser(st["class"], bid, kitty_id, rect, "none") or got
+                got = place_browser(st["class"], bid, kitty_id, rect, "none", above) or got
     st.update(kwin_id=bid, mode=opts["mode"], ratio=float(opts["ratio"]),
               over=opts["over"], focus=opts["focus"], area=opts["area"])
     if _off(rect, got) > 8:
@@ -623,6 +632,9 @@ def main(argv=None):
                             "right: 左の列を除いた kitty の右側全体")
         p.add_argument("--focus", choices=["kitty", "browser", "none"],
                        help="配置後の入力先。none は何も変えない（全画面のアプリを使っている最中など）")
+        p.add_argument("--no-above", action="store_true",
+                       help="常に最前面（keepAbove）にしない（前に付いていれば外す）。ユーザーが別のアプリ（ゲームなど）を"
+                            "操作している最中に見せるとき。macOS は元から最前面にしない")
 
     p = sub.add_parser("open"); p.add_argument("url"); place_opts(p)
     p = sub.add_parser("move"); place_opts(p)
