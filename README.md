@@ -244,7 +244,7 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確認できないときも同じ）。
 - 設定 `view.playtest_guard` に claude-guard のガードの名前（例 `{"view": {"playtest_guard": "tf3-running"}}`）があれば、そのガードの `process`（ゲームなど）が動いている間は、人がテストプレイ中かを見る。既定は無し（今までどおり）。
   - 人がプレイ中なら、前面かどうかに関わらず何も開かないで exit 2（結果は `"skipped": "ゲームをテストプレイ中"`、`playtest` に理由、`retry` に「テストプレイが終わってから呼び直す」）。
-  - 見分けは、ガードの `commands` の `allow_owner` の起動の記録（`file`、例 `$XDG_RUNTIME_DIR/tf3ctl/launched.json`）。記録が無い・記録の pid が動いていないか別のプロセス・owner が役割（`claude-roster` の名簿か `claude-state` の記録の role）でない、のどれかなら人がプレイ中。記録が生きていて、共同作業の印が無く（期限切れも含む）、owner が役割なら担当の e2e で、今までどおり（前面のときだけ断る）。記録の読み方と pid の照合は claude-guard の `allow_owner` と同じ。
+  - 見分けは、ガードの `commands` の `allow_owner` の起動の記録（`file`、例 `$XDG_RUNTIME_DIR/tf3ctl/launched.json`）。記録が無い・記録の pid が動いていないか別のプロセス・owner が役割（`claude-roster` の名簿か `claude-state` の記録の role）でない、のどれかなら人がプレイ中。記録が生きていて、共同作業の印（`coop` のキー）が無く、owner が役割なら担当の e2e で、今までどおり（前面のときだけ断る）。期限切れ・形の誤りの印が残っていれば、ユーザーがいる扱いで誰が呼んでも断る。記録の読み方と pid の照合は claude-guard の `allow_owner` と同じ。
   - 記録に共同作業の印（`coop`、[docs/guard-hook.md](docs/guard-hook.md#共同作業coop)）があり、このペインの役割が `coop.with` にあれば、ユーザーと一緒に操作しているので開く（結果の `coop` に印の説明）。ゲームの窓が前面なら断る（exit 2、`"skipped": "ゲームの窓が前面にある"`）。共同作業の HTML は `--no-above` も付けて開く（ユーザーがゲームに戻ったとき Chrome を上に残さない）。印が効いている間、`coop.with` に無い担当は、owner が担当（`launch --coop`）でも人がプレイ中として断る。
   - プロセスが動いていない（`pgrep` を呼べないときも、claude-guard と同じく動いていないと数える）ときは今までどおり。ガードが無い・無効（`enabled: false`）・`process` が無いときも開くが、保護が効いていないので結果の `warnings` に知らせを入れる。`view.playtest_guard` の値が文字列でなければ、開かない側に倒して exit 2。
   - 担当が起動したゲーム（記録の owner が役割）を、そのまま人に渡して遊んでもらうと、e2e と見分けられず開いてしまう。テストプレイ用に渡すときは、人の名前など役割でない owner で起動し直す。

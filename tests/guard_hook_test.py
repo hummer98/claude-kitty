@@ -1079,15 +1079,89 @@ class Coop(Base):
             self.assertIsNotNone(self.bash("svcctl --owner probe quit"), c)
 
     def test_nan_or_infinite_until(self):
-        # json は NaN・Infinity を読む。印とみなさず（hook で期限切れにならないのを防ぐ）、status も落ちない
+        # json は NaN・Infinity を読む。形の誤りの印 = ユーザーがいる扱い（owner も止める）で、status も落ちない
         self.role("s-probe", "probe")
+        self.role("s-m", "m")
         for v in ("NaN", "Infinity", "-Infinity"):
             self.rec.write_text('{"v": 1, "owner": "m", "pid": 4242, "coop": {"with": "probe", "until": %s, "since": NaN}}' % v)
             self.assertIsNotNone(self.bash("svcctl --owner probe quit"), v)
-            self.assertNotIn("共同作業", self.status(), v)
+            r = self.bash("svcctl --owner m quit", session="s-m")
+            self.assertIn("共同作業の印の形が正しくない", r or "", v)
+            self.assertIn("共同作業: 印の形が正しくない。ユーザーがいる扱いで、担当の命令は止める", self.status(), v)
         self.rec.write_text('{"v": 1, "owner": "m", "pid": 4242, "coop": {"with": "probe", "until": %d, "since": NaN}}'
                             % (self.NOW + 60))
         self.assertIn("共同作業: probe", self.status())                     # since が NaN でも表示だけの欄
+
+    # ---- 期限切れ・形の誤りの印: ユーザーがいる扱い（owner も with も止める） ----
+
+    EXPIRED_TEXT = "共同作業の期限（16:59 JST）が切れた。続けるなら coop start で延ばす。終えるなら coop end"
+
+    def test_expired_coop_blocks_owner(self):
+        self.launched(owner="master", coop=self.coop(until=self.NOW - 60))
+        self.role("s-master", "master")
+        r = self.bash("svcctl --owner master quit", session="s-master")
+        self.assertIsNotNone(r)
+        self.assertIn(self.EXPIRED_TEXT, r)
+
+    def test_expired_coop_blocks_with_member(self):
+        self.launched(owner="master", coop=self.coop(until=self.NOW - 60))
+        self.role("s-probe", "probe")
+        for c in ("svcctl --owner probe quit", "SVCCTL_OWNER=probe svcctl deploy"):
+            r = self.bash(c)
+            self.assertIsNotNone(r, c)
+            self.assertIn(self.EXPIRED_TEXT, r, c)
+        self.launched(owner=None, coop=self.coop(until=self.NOW))            # 期限ちょうども切れ
+        self.assertIn("共同作業の期限（17:00 JST）が切れた", self.bash("svcctl --owner probe quit") or "")
+
+    def test_expired_coop_with_other_pid_is_unchanged(self):
+        # ゲームが終わって pid が違えば記録ごと無効: 今までどおり止める（期限切れの文は付けない）
+        self.role("s-master", "master")
+        self.launched(owner="master", pid=999, coop=self.coop(until=self.NOW - 60))
+        r = self.bash("svcctl --owner master quit", session="s-master")
+        self.assertIsNotNone(r)
+        self.assertNotIn("共同作業", r)
+        self.launched(owner="master", coop=self.coop(until=self.NOW - 60))
+        self.assertIsNotNone(self.bash("svcctl --owner master quit", session="s-master"))
+        self.launched(owner="master")                                       # 新しい起動の記録（印なし）: owner は通る
+        self.assertIsNone(self.bash("svcctl --owner master quit", session="s-master"))
+
+    def test_coop_end_leftover_is_unchanged(self):
+        # coop end のあと（coop のキーが消えて coopChanges だけ）は印でない: owner は通り、with だった担当は止まる
+        self.launched(owner="master", coopChanges=3)
+        self.role("s-master", "master")
+        self.role("s-probe", "probe")
+        self.assertIsNone(self.bash("svcctl --owner master quit", session="s-master"))
+        r = self.bash("svcctl --owner probe quit")
+        self.assertIsNotNone(r)
+        self.assertNotIn("共同作業", r)
+        self.launched(owner="master", coop=None)
+        self.rec.write_text(json.dumps({"v": 1, "owner": "master", "pid": 4242, "coop": None}))   # null も印なし
+        self.assertIsNone(self.bash("svcctl --owner master quit", session="s-master"))
+
+    def test_broken_coop_blocks_owner(self):
+        self.role("s-master", "master")
+        self.role("s-probe", "probe")
+        for c in (self.coop(until=self.NOW + 8 * 24 * 3600), self.coop(until=1e20), self.coop(until="later"),
+                  self.coop(until=True), self.coop(until=0), self.coop(until=-5), self.coop(who=""), self.coop(who=[]),
+                  self.coop(who=["probe", 3]), {"with": "probe"}, "probe", ["probe"]):
+            self.launched(owner="master", coop=c)
+            r = self.bash("svcctl --owner master quit", session="s-master")
+            self.assertIn("共同作業の印の形が正しくない", r or "", c)
+            self.assertIsNotNone(self.bash("svcctl --owner probe quit"), c)
+            self.assertIn("共同作業: 印の形が正しくない", self.status(), c)
+        for c in ("probe", ["probe"], self.coop(until=1e20)):              # owner の無い記録の形の誤りの印も同じ
+            self.launched(owner=None, coop=c)
+            self.assertIn("共同作業の印の形が正しくない", self.bash("svcctl --owner probe quit") or "", c)
+            self.assertIn("共同作業: 印の形が正しくない", self.status(), c)
+
+    def test_stale_coop_under_flag_keeps_flag_wording(self):
+        # 旗の間は例外をもともと使わない: 断りの文に期限切れの文は足さない
+        self.launched(owner="master", coop=self.coop(until=self.NOW - 60))
+        self.role("s-master", "master")
+        gh.write_state(self.env, "app-running", "on", 10, "maintenance", now=self.NOW)
+        r = self.bash("svcctl --owner master quit", session="s-master")
+        self.assertIsNotNone(r)
+        self.assertNotIn("共同作業の期限", r)
 
     def test_pid_dead_or_other_process_blocked(self):
         self.role("s-probe", "probe")
@@ -1152,10 +1226,19 @@ class Coop(Base):
         line = self.status()
         self.assertIn("owner なし、pid 4242 が動いている", line)
         self.assertIn("共同作業: ui, probe、18:00（JST）まで", line)
-        self.launched(coop=self.coop(until=self.NOW - 1))
-        self.assertNotIn("共同作業", self.status())
+        self.launched(coop=self.coop(until=self.NOW - 60))
+        line = self.status()
+        self.assertIn("共同作業: 期限切れ（16:59）。ユーザーがいる扱いで、担当の命令は止める", line)
+        self.assertIn("owner aom-master、pid 4242 が動いている → 共同作業の印が期限切れなので誰も通さない", line)
+        self.assertNotIn("aom-master は通す", line)
         self.launched(pid=999, coop=self.coop())
         self.assertNotIn("共同作業", self.status())
+        self.launched(pid=999, coop=self.coop(until=self.NOW - 60))          # ゲームが終わった: 印は無効
+        self.assertNotIn("共同作業", self.status())
+        self.launched(coopChanges=3)                                        # coop end のあと
+        line = self.status()
+        self.assertNotIn("共同作業", line)
+        self.assertIn("aom-master は通す", line)
 
     def test_status_save_changes(self):
         self.launched(coop=self.coop(modified=True, changes=3))
