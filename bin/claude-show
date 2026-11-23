@@ -16,6 +16,9 @@
   担当の e2e なら今までどおり（前面のときだけ断る）。
   起動の記録に共同作業の印（coop）があり、このペインの役割が coop.with にあれば、ユーザーと一緒に操作しているので
   開く（見せるのが目的）。ただしゲームの窓（ガードの process）が前面なら断る（exit 2。ゲームに重ねない・入力先を動かさない）。
+  印が効いている間は、このペインの役割が with に無ければ、owner が担当（launch --coop）でも人がプレイ中として断る。
+  共同作業の HTML は claude-browser に --no-above も付ける（常に最前面にしない。ユーザーがゲームの窓に戻ったとき、
+  Chrome がゲームの上に残らないように）。
 - kitty の外では xdg-open（macOS は open）に渡す。
 - 設定の browser.enabled が false なら、kitty の中でも HTML・画像・URL（ほかの種類も kitty の外と同じく）を xdg-open（macOS は open）に渡す
   （結果の shown がそのコマンド、via が "browser.enabled: false"）。
@@ -171,7 +174,7 @@ def show(target, env, ratio, run=subprocess.run, active_pid=None):
         # 一緒に操作していても、ゲームの窓に重ねたり入力先を動かしたりはしない
         return 2, {"skipped": "ゲームの窓が前面にある", "coop": why, "target": str(val),
                    "retry": "ゲームの窓が前面でなくなってから呼び直す"}
-    code, out = _show(kind, val, env, ratio, run, active_pid)
+    code, out = _show(kind, val, env, ratio, run, active_pid, coop=bool(coop))
     if coop:
         out["coop"] = why
     if warn:  # ガードが見つからないなど: 開くが、テストプレイの保護が効いていないことを呼び手に知らせる
@@ -179,7 +182,7 @@ def show(target, env, ratio, run=subprocess.run, active_pid=None):
     return code, out
 
 
-def _show(kind, val, env, ratio, run, active_pid):
+def _show(kind, val, env, ratio, run, active_pid, coop=False):
     """テストプレイの判定のあと: 保護する窓 → kitty の外・browser.enabled → claude-browser / overlay。"""
     guarded, why = is_guarded(env, run=run, active_pid=active_pid)
     if guarded:
@@ -194,6 +197,8 @@ def _show(kind, val, env, ratio, run, active_pid):
         cmd = [str(BROWSER), "open", url, "--area", "others", "--mode", "show", "--focus", "none"]
         if ratio is not None:
             cmd += ["--ratio", str(ratio)]
+        if coop:  # ユーザーがゲームを操作している: ゲームの窓の上に Chrome を残さない
+            cmd += ["--no-above"]
         r = run(cmd, capture_output=True, text=True)
         out = {"shown": "browser", "target": url}
         # サンドボックスの Chrome から見えない場所なので、claude-browser が表示用のコピーを開いた。

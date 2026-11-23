@@ -27,6 +27,7 @@
   - `claude-guard`: 起動の記録に `"coop": {"with": 担当かそのリスト, "reason", "since", "until"}` があり、期限内で記録の pid が今のプロセスなら、`with` の担当も `allow_owner` と同じ照合（`option`・`env`・`same_role`）で通す。旗・ロックの間は使わない。保護したパスへの書き込みと git は共同作業でも止める。`owner` の無い記録も `coop` があれば読む（人が `--owner` なしで起動した形）。
   - `claude-guard status`: 「共同作業: <担当>、HH:MM（JST）まで（理由）」。`coop.modified` / `coop.changes` があれば「プレイ用のセーブを N 回変えた」を添える（判定には使わない）。
   - `claude-show`（`view.playtest_guard`）: 呼んだペインの役割が `coop.with` にあれば、人がいても開く（見せるのが目的）。ゲームの窓が前面なら断る（exit 2）。
+  - `claude-show`: 印を owner より先に見る（`launch --coop` の最中に、`with` に無い担当まで担当の e2e として開いていた）。印が効いていれば `with` の担当だけが開け、ほかは owner が役割でも断る。共同作業の HTML は `claude-browser --no-above`（新設。keepAbove を付けない・外す）と `--focus none` で開く（ユーザーがゲームに戻ったとき Chrome を上に残さない）。
 
 ## [0.7.6] - 2026-11-23
 

@@ -133,7 +133,7 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
 - 起動する Chrome は設定の `browser.command`、無ければ自動で探す: プロファイルの置き場が既にあるもの > ネイティブの Chrome（`google-chrome-stable`・`google-chrome`）> Flatpak の Chrome（`com.google.Chrome`）> ネイティブの Chromium（`chromium`・`chromium-browser`）> Flatpak の Chromium。どれを使うかは `status` と `claude-kitty doctor` に出る（[docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)）。
 - プロファイルと台帳 `ledger.json`（`profiles` で表示、`note TEXT` でメモ）の置き場: Flatpak なら `~/.var/app/<アプリ ID>/claude-profiles`、それ以外は `~/.local/share/claude-kitty/browser-profiles`（`browser.profile_root` で変える）。
 - 既存の Chrome はプロセスの引数（`--user-data-dir` と `--remote-debugging-port`）から見つけるので、state が消えても引き継ぎ・close できる。
-- `open URL [--mode self|show] [--ratio R] [--area pane|others|right] [--over SLOT|ID] [--focus kitty|browser|none]`
+- `open URL [--mode self|show] [--ratio R] [--area pane|others|right] [--over SLOT|ID] [--focus kitty|browser|none] [--no-above]`
   - self（既定）: 自分だけで確認するとき。自分のペイン全体を覆う（他のペインの邪魔をしない）。既定の area は `pane`
   - show: ユーザーに見せるとき。既定の area は `others` で、自分以外のペインの場所に縦 100% で開く（自分の会話は見せたまま）
   - `--area others`（show の既定）: 左の列（`view.left` の役割のペイン。いなければ分割の根の左側。左右に分かれていなければタブ全体）を除いた右側のうち、自分のペインの横の範囲を除いた左右の隙間の広い方を、右側の全高で使う。広い方でも右側の幅の 30% 未満なら（自分が右側をほぼ横断している）、右側を左右半分に分けて自分の中心が無い方を使う。自分が左の列にいれば右側全体。避けるのは常に呼び出した自分のペインで、`--over` の先ではない
@@ -142,6 +142,7 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
   - `--ratio`: show のとき、範囲の上から何割を覆うか（0.1〜1.0）。省いたときは others なら 1.0（全高）、pane・right なら 0.65
   - `--over`: 別のペイン（slot 名 left/right-top/right-bottom か window id）に重ねる。`--over` を指定して area を省くと `pane`（show でもその先のペインの上）
   - `--focus none`: 入力先を変えない（全画面のアプリを使っている最中など）
+  - `--no-above`: 常に最前面（KWin の keepAbove）にしない（前に付いていれば外す）。一回ごとの指定。ユーザーがゲームなどを操作している最中に見せるとき（claude-show の共同作業）
 - `open` を呼び直しても、未指定の mode/over は前回の値を引き継ぐ（ペインの上の show のあとの open で、会話を隠す self に戻らないように）。ただし前回が他のペインの場所（`others`・`right`。claude-show の HTML など）なら mode は引き継がず self に戻す（そのあとの自分の作業用の `open` が他のペインを覆わないように）。focus と area は一回ごとの指定で、引き継がない（area は mode の既定に戻る）。ratio は前回と同じ area になったときだけ引き継ぐ（area が違えば「上から何割」の基準が違う）。
 - 前回の over を引き継ぐのは、area が `pane` になったときだけ（`others`・`right` は自分のペインと左の列で決まり、前回の over は使わない）。引き継いだ over の先が見えていないタブに移った・もう無いときは、止めずに自分のペインに重ね、stderr に 1 行で知らせる（以後の状態も自分のペイン）。`--over` を明示したときは、先が見えないタブにあればエラーで止まる。
 - `move` で mode も area も省けば、前回の area と ratio のまま置き直す。`--mode` を指定したときの area はその mode の既定。
@@ -243,8 +244,8 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - 保護する窓（`view.guard`）が前面なら何もしないで exit 2（前面の窓を確認できないときも同じ）。
 - 設定 `view.playtest_guard` に claude-guard のガードの名前（例 `{"view": {"playtest_guard": "tf3-running"}}`）があれば、そのガードの `process`（ゲームなど）が動いている間は、人がテストプレイ中かを見る。既定は無し（今までどおり）。
   - 人がプレイ中なら、前面かどうかに関わらず何も開かないで exit 2（結果は `"skipped": "ゲームをテストプレイ中"`、`playtest` に理由、`retry` に「テストプレイが終わってから呼び直す」）。
-  - 見分けは、ガードの `commands` の `allow_owner` の起動の記録（`file`、例 `$XDG_RUNTIME_DIR/tf3ctl/launched.json`）。記録が無い・記録の pid が動いていないか別のプロセス・owner が役割（`claude-roster` の名簿か `claude-state` の記録の role）でない、のどれかなら人がプレイ中。記録が生きていて owner が役割なら担当の e2e で、今までどおり（前面のときだけ断る）。記録の読み方と pid の照合は claude-guard の `allow_owner` と同じ。
-  - 記録に共同作業の印（`coop`、[docs/guard-hook.md](docs/guard-hook.md#共同作業coop)）があり、このペインの役割が `coop.with` にあれば、ユーザーと一緒に操作しているので開く（結果の `coop` に印の説明）。ゲームの窓が前面なら断る（exit 2、`"skipped": "ゲームの窓が前面にある"`）。
+  - 見分けは、ガードの `commands` の `allow_owner` の起動の記録（`file`、例 `$XDG_RUNTIME_DIR/tf3ctl/launched.json`）。記録が無い・記録の pid が動いていないか別のプロセス・owner が役割（`claude-roster` の名簿か `claude-state` の記録の role）でない、のどれかなら人がプレイ中。記録が生きていて、共同作業の印が無く（期限切れも含む）、owner が役割なら担当の e2e で、今までどおり（前面のときだけ断る）。記録の読み方と pid の照合は claude-guard の `allow_owner` と同じ。
+  - 記録に共同作業の印（`coop`、[docs/guard-hook.md](docs/guard-hook.md#共同作業coop)）があり、このペインの役割が `coop.with` にあれば、ユーザーと一緒に操作しているので開く（結果の `coop` に印の説明）。ゲームの窓が前面なら断る（exit 2、`"skipped": "ゲームの窓が前面にある"`）。共同作業の HTML は `--no-above` も付けて開く（ユーザーがゲームに戻ったとき Chrome を上に残さない）。印が効いている間、`coop.with` に無い担当は、owner が担当（`launch --coop`）でも人がプレイ中として断る。
   - プロセスが動いていない（`pgrep` を呼べないときも、claude-guard と同じく動いていないと数える）ときは今までどおり。ガードが無い・無効（`enabled: false`）・`process` が無いときも開くが、保護が効いていないので結果の `warnings` に知らせを入れる。`view.playtest_guard` の値が文字列でなければ、開かない側に倒して exit 2。
   - 担当が起動したゲーム（記録の owner が役割）を、そのまま人に渡して遊んでもらうと、e2e と見分けられず開いてしまう。テストプレイ用に渡すときは、人の名前など役割でない owner で起動し直す。
 - kitty の外では `xdg-open`（macOS は `open`）に渡す。

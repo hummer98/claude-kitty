@@ -67,14 +67,15 @@ class BrowserPlacement(unittest.TestCase):
         loader = m.SourceFileLoader("claude_browser", str(path))
         self.b = u.module_from_spec(u.spec_from_loader("claude_browser", loader))
         loader.exec_module(self.b)
-        self.placed = []
+        self.placed, self.above = [], []
         self.b.main_browser_window = lambda st: "B"
         self.b.left_window_id = lambda tab: 1
         self.b.is_mac = lambda: False  # KWin の経路を試す（macOS で回しても mac_placement に分かれない）
 
     def run_(self, results, opts=None):
         seq = list(results)
-        self.b.place_browser = lambda cls, bid, kid, rect, focus: (self.placed.append((rect, focus)), seq.pop(0))[1]
+        self.b.place_browser = lambda cls, bid, kid, rect, focus, above=True: (
+            self.placed.append((rect, focus)), self.above.append(above), seq.pop(0))[2]
         self.b.browser_rect = lambda bid: seq.pop(0)
         o = {"mode": "show", "ratio": 0.6, "over": None, "area": "right", "focus": "none"}
         o.update(opts or {})
@@ -85,6 +86,31 @@ class BrowserPlacement(unittest.TestCase):
     def test_fits_first_time(self):
         rect, st = self.run_([(1000, 40, 3000, 1200), (1000, 40, 3000, 1200)])
         self.assertEqual((rect, len(self.placed), st["area"]), ((1000, 40, 3000, 1200), 1, "right"))
+
+    def test_no_above_reaches_every_place(self):
+        # --no-above（opts の above: False）は、置き直しも含めたすべての配置で keepAbove を付けない
+        off = (1000, 40, 3000, 1240)
+        self.run_([off, off, off, off, (1000, 40, 3000, 1200), (1000, 40, 3000, 1200)], {"above": False})
+        self.assertEqual(self.above, [False] * 3)
+        self.above.clear()
+        self.run_([(1000, 40, 3000, 1200), (1000, 40, 3000, 1200)])   # 指定なしは今までどおり最前面
+        self.assertEqual(self.above, [True])
+
+    def test_place_browser_script_keep_above(self):
+        # KWin のスクリプトの keepAbove: 既定は true、above=False なら false（前に付けたものも外す）。
+        # focus none では activeWindow に触れない
+        scripts = []
+        self.b.kwin = lambda js: (scripts.append(js), ["[1,2,3,4]"])[1]
+        self.b.place_browser("c", "B", "K", (1, 2, 3, 4), "none")
+        self.b.place_browser("c", "B", "K", (1, 2, 3, 4), "none", above=False)
+        self.assertIn("b.keepAbove = true;", scripts[0])
+        self.assertIn("b.keepAbove = false;", scripts[1])
+        self.assertNotIn("keepAbove = true", scripts[1])
+        # 最前面にしないときは積み順だけ上げる（前の show のあと別の窓の下に回っていても見える）
+        self.assertIn("if (!false) workspace.raiseWindow(b);", scripts[1])
+        self.assertIn("if (!true) workspace.raiseWindow(b);", scripts[0])
+        self.assertNotIn("activeWindow = b", scripts[1].replace('"browser") workspace.activeWindow = b', ""))
+        self.assertIn('if ("none" === "kitty" && k)', scripts[1])
 
     def test_size_restored_by_chrome_is_placed_again(self):
         full = (1000, 40, 3000, 2000)  # 最大化の解除などで前の大きさに戻された
@@ -134,7 +160,8 @@ class BrowserPlacement(unittest.TestCase):
         self.b.own_window_id = lambda: 23
         self.b.left_window_id = lambda tab: 10
         seq = [(800, 40, 2133, 2000)] * 2
-        self.b.place_browser = lambda cls, bid, kid, rect, focus: (self.placed.append((rect, focus)), seq.pop(0))[1]
+        self.b.place_browser = lambda cls, bid, kid, rect, focus, above=True: (
+            self.placed.append((rect, focus)), self.above.append(above), seq.pop(0))[2]
         self.b.browser_rect = lambda bid: seq.pop(0)
         st = {"class": "c"}
         o = {"mode": "show", "ratio": 1.0, "over": "31", "area": "others", "focus": "none"}
@@ -193,6 +220,28 @@ class BrowserStaleOver(unittest.TestCase):
             opts, pane, err = self.prep(st, mode="show", area="others", focus="none")
             self.assertEqual((opts["area"], opts["over"], pane["id"], err), ("others", None, 2, ""), st)
 
+    def test_no_above_is_per_call(self):
+        opts, _, _ = self.prep({}, mode="show", area="others", focus="none", no_above=True)
+        self.assertIs(opts["above"], False)
+        opts, _, _ = self.prep({"mode": "show", "area": "others"}, mode="show", area="others", focus="none")
+        self.assertIs(opts["above"], True)        # 前回の --no-above を引き継がない（state に残さない）
+        self.assertIs(self.prep({})[0]["above"], True)   # 引数に no_above が無い（古い呼び方）も最前面
+
+    def test_no_above_option_parses(self):
+        import contextlib
+        import io
+        got = {}
+        self.b.browser_enabled = lambda: True
+        self.b.setup_browser = lambda strict=False: None
+        self.b.own_window_id = lambda: None
+        self.b.cmd_open = lambda args, key: got.update(no_above=args.no_above, focus=args.focus)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.b.main(["--key", "k", "open", "file:///x.html", "--focus", "none", "--no-above"])
+        self.assertEqual(got, {"no_above": True, "focus": "none"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.b.main(["--key", "k", "open", "file:///x.html"])
+        self.assertEqual(got["no_above"], False)
+
     def test_area_others_open_ignores_previous_over(self):
         opts, pane, err = self.prep({"mode": "self", "area": "pane", "over": "aom-text"}, area="others")
         self.assertEqual((opts["area"], opts["over"], pane["id"], err), ("others", None, 2, ""))
@@ -213,7 +262,7 @@ class BrowserStaleOver(unittest.TestCase):
         st = {"class": "c", "mode": "self", "ratio": 0.65, "area": "pane", "over": "aom-text"}
         opts, pane, _ = self.prep(st)
         self.b.main_browser_window = lambda st: "B"
-        self.b.place_browser = lambda cls, bid, kid, rect, focus: rect
+        self.b.place_browser = lambda cls, bid, kid, rect, focus, above=True: rect
         self.b.browser_rect = lambda bid: None
         self.b.placement(st, opts, ("K", (0, 40, 4000, 2000)), BrowserArea.TAB, pane, settle=0)
         self.assertIsNone(st["over"])  # 次の open で同じ見えない先を探しに行かない
@@ -3152,7 +3201,8 @@ class ClaudeShowPlaytest(unittest.TestCase):
 
     def coop_launched(self, who="aom-probe", owner=None, pid=GAME_PID, until=None):
         import time
-        rec = {"v": 1, "pid": pid, "started_at": 1, "cmd": "launch",
+        # 人が起動した形（owner なし）は tf3ctl では cmd が "coop"、owner がある形（launch --coop）は "launch"
+        rec = {"v": 1, "pid": pid, "started_at": 1, "cmd": "launch" if owner else "coop",
                "coop": {"with": who, "reason": "一緒に操作", "since": time.time() - 60,
                         "until": time.time() + 3600 if until is None else until}}
         if owner:
@@ -3174,6 +3224,89 @@ class ClaudeShowPlaytest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertTrue(self.opened()[0][0].endswith("claude-browser"))
         self.assertIn("共同作業: aom-probe", out["coop"])
+
+    def test_coop_html_is_not_kept_above(self):
+        # 共同作業の HTML は --focus none に加えて --no-above（ゲームの窓の上に Chrome を残さない）
+        self.coop_launched()
+        self.my_pane("aom-probe")
+        self.assertEqual(self.coop_show()[0], 0)
+        argv = self.opened()[0]
+        self.assertEqual(argv[1:], ["open", self.html.as_uri(), "--area", "others", "--mode", "show", "--focus", "none",
+                                    "--no-above"])
+        self.runs.clear()
+        self.coop_show(target=self.img)          # 画像は今までどおり overlay（--keep-focus）
+        launch = [c for c in read_calls(self.calls) if "launch" in c][0]
+        self.assertIn("--keep-focus", launch)
+
+    def test_e2e_html_is_still_kept_above(self):
+        self.launched("aom-probe")
+        self.role_in_state("aom-probe")
+        self.assertEqual(self.show.show(str(self.html), self.env, None, run=self.run_)[0], 0)
+        self.assertNotIn("--no-above", self.opened()[0])
+
+    def test_coop_owner_role_member_opens(self):
+        # launch --coop: owner が担当で印もある。呼び手が with にあれば coop（e2e ではない）
+        self.coop_launched(owner="aom-master")
+        self.role_in_roster("aom-master")
+        self.my_pane("aom-probe")
+        code, out = self.coop_show()
+        self.assertEqual(code, 0, out)
+        self.assertIn("共同作業: aom-probe", out["coop"])
+        self.assertIn("--no-above", self.opened()[0])
+
+    def test_coop_owner_role_non_member_refused(self):
+        # launch --coop の最中、with に無い担当は、owner が役割でも人がプレイ中として断る（前は e2e で開いていた）
+        self.coop_launched(owner="aom-master")
+        self.role_in_roster("aom-master")
+        self.my_pane("aom-ui")
+        out = self.refused()
+        self.assertIn("共同作業の担当（aom-probe）は呼んだペインの役割（aom-ui）でない", out["playtest"])
+        self.my_pane("aom-master", window=4)     # owner 自身のペインでも、with に無ければ断る
+        (self.run_dir / "claude-state" / "pane-aom-ui-4.json").unlink()
+        self.refused()
+        self.refused(self.img)                   # 画像も出さない
+
+    def test_coop_expired_owner_role_is_e2e(self):
+        import time
+        self.coop_launched(owner="aom-master", until=time.time() - 1)
+        self.role_in_roster("aom-master")
+        self.my_pane("aom-ui")
+        code, out = self.coop_show()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("coop", out)
+        self.assertNotIn("--no-above", self.opened()[0])
+
+    def test_coop_in_any_record_blocks_e2e(self):
+        # 記録のファイルが 2 つあり、片方に印（with は aom-probe）、もう片方の owner が担当: 印が効いている間は e2e にしない
+        other = self.run_dir / "svc" / "launched.json"; other.parent.mkdir()
+        conf = json.loads(self.conf.read_text())
+        conf["guard_hook"]["guards"]["tf3-running"]["commands"].append(
+            {"program": "^svcctl$", "block": ["launch"],
+             "allow_owner": {"file": "$XDG_RUNTIME_DIR/svc/launched.json", "option": "--owner"}})
+        self.conf.write_text(json.dumps(conf))
+        self.coop_launched()
+        other.write_text(json.dumps({"v": 1, "owner": "aom-master", "pid": self.GAME_PID, "started_at": 1,
+                                     "cmd": "launch"}))
+        self.role_in_roster("aom-master")
+        self.my_pane("aom-ui")
+        self.assertIn("共同作業の担当", self.refused()["playtest"])
+        self.rec.unlink()                        # 印の記録が無ければ、もう片方の owner で e2e
+        self.assertEqual(self.coop_show()[0], 0)
+
+    def test_coop_changes_leftover_is_not_coop(self):
+        # coop end のあとの記録（coop が消えて coopChanges だけ）は印でない: owner が役割なら e2e、無ければ人
+        self.rec.write_text(json.dumps({"v": 1, "owner": "aom-master", "pid": self.GAME_PID, "started_at": 1,
+                                        "cmd": "launch", "coopChanges": 3}))
+        self.role_in_roster("aom-master")
+        self.my_pane("aom-probe")
+        code, out = self.coop_show()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("coop", out)
+        self.assertNotIn("--no-above", self.opened()[0])
+        self.runs.clear()
+        self.rec.write_text(json.dumps({"v": 1, "pid": self.GAME_PID, "started_at": 1, "cmd": "coop",
+                                        "coopChanges": 3}))
+        self.refused()
 
     def test_coop_with_list_and_owner(self):
         self.coop_launched(who=["aom-ui", "aom-probe"], owner="someone")
