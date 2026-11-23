@@ -1101,7 +1101,7 @@ def coop_of(rec, now=None):
 def coop_stale_text(kind, val):
     """期限切れ・形の誤りの印で止める・断るときの理由の文。"""
     if kind == "expired":
-        return f"共同作業の期限（{jst_hhmm(val)} JST）が切れた。続けるなら coop start で延ばす。終えるなら coop end"
+        return f"共同作業の期限（{jst_hhmm(val)} JST）が切れた。続けるならユーザーと決めてから coop start で延ばす（サブエージェントには打たせない）。終えるなら coop end"
     return "共同作業の印の形が正しくない"
 
 

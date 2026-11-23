@@ -1094,7 +1094,7 @@ class Coop(Base):
 
     # ---- 期限切れ・形の誤りの印: ユーザーがいる扱い（owner も with も止める） ----
 
-    EXPIRED_TEXT = "共同作業の期限（16:59 JST）が切れた。続けるなら coop start で延ばす。終えるなら coop end"
+    EXPIRED_TEXT = "共同作業の期限（16:59 JST）が切れた。続けるならユーザーと決めてから coop start で延ばす（サブエージェントには打たせない）。終えるなら coop end"
 
     def test_expired_coop_blocks_owner(self):
         self.launched(owner="master", coop=self.coop(until=self.NOW - 60))

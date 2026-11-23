@@ -3274,7 +3274,7 @@ class ClaudeShowPlaytest(unittest.TestCase):
         self.my_pane("aom-master")
         out = self.refused()
         self.assertRegex(out["playtest"],
-                         r"共同作業の期限（\d\d:\d\d JST）が切れた。続けるなら coop start で延ばす。終えるなら coop end")
+                         r"共同作業の期限（\d\d:\d\d JST）が切れた。続けるならユーザーと決めてから coop start で延ばす（サブエージェントには打たせない）。終えるなら coop end")
         self.refused(self.img)
 
     def test_coop_expired_member_refused(self):

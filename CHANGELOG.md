@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### 変更
+
+- claude-guard / claude-show: 共同作業の期限切れの断りの文を「続けるならユーザーと決めてから coop start で延ばす（サブエージェントには打たせない）」にした。担当が自分だけで延ばさないため（統括の決定）。
+
 ### 追加
 
 - `claude-roster`: プロジェクトごとに `CLAUDE_CONFIG_DIR` で設定の置き場を分けている（direnv の `.envrc` など）ときに、名簿と復元が効くようにした（[docs/roster.md](docs/roster.md#プロジェクトごとの設定の置き場と包み)）。
