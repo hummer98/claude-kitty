@@ -27,6 +27,7 @@
   - `claude-guard`: 起動の記録に `"coop": {"with": 担当かそのリスト, "reason", "since", "until"}` があり、期限内で記録の pid が今のプロセスなら、`with` の担当も `allow_owner` と同じ照合（`option`・`env`・`same_role`）で通す。旗・ロックの間は使わない。保護したパスへの書き込みと git は共同作業でも止める。`owner` の無い記録も `coop` があれば読む（人が `--owner` なしで起動した形）。
   - `claude-guard status`: 「共同作業: <担当>、HH:MM（JST）まで（理由）」。`coop.modified` / `coop.changes` があれば「プレイ用のセーブを N 回変えた」を添える（判定には使わない）。
   - `claude-show`（`view.playtest_guard`）: 呼んだペインの役割が `coop.with` にあれば、人がいても開く（見せるのが目的）。ゲームの窓が前面なら断る（exit 2）。
+  - 期限が切れた印（`until` を過ぎた `coop` のキーが残っている記録）と形の誤りの印（`until` が NaN・Infinity・7 日より先など）は「ユーザーがいる」扱いにした（前は印が無いのと同じで、owner の担当が通り、`claude-show` も e2e で開いていた）。期限が切れても人がまだ操作しているかもしれず、誤った印で例外が開かないようにするため。`claude-guard` は owner の担当も `with` の担当も `allow_owner` の例外を使えず、断りの文に「共同作業の期限（HH:MM JST）が切れた。続けるなら coop start で延ばす。終えるなら coop end」（形の誤りは「共同作業の印の形が正しくない」）を添える。`claude-show` は誰が呼んでも断る。`claude-guard status` は「共同作業: 期限切れ（HH:MM）。ユーザーがいる扱いで、担当の命令は止める」。`coop end`（キーが消える。`coopChanges` だけの記録は印でない）かゲームの終わり（pid 違い）で元の判定に戻る。
   - `claude-show`: 印を owner より先に見る（`launch --coop` の最中に、`with` に無い担当まで担当の e2e として開いていた）。印が効いていれば `with` の担当だけが開け、ほかは owner が役割でも断る。共同作業の HTML は `claude-browser --no-above`（新設。keepAbove を付けない・外す）と `--focus none` で開く（ユーザーがゲームに戻ったとき Chrome を上に残さない）。
 
 ## [0.7.6] - 2026-11-23

@@ -3266,15 +3266,46 @@ class ClaudeShowPlaytest(unittest.TestCase):
         self.refused()
         self.refused(self.img)                   # 画像も出さない
 
-    def test_coop_expired_owner_role_is_e2e(self):
+    def test_coop_expired_owner_role_refused(self):
+        # 期限切れの印が残っている間は、ユーザーがいる扱い: owner が役割でも、誰が呼んでも断る（前は e2e で開いていた）
         import time
         self.coop_launched(owner="aom-master", until=time.time() - 1)
         self.role_in_roster("aom-master")
-        self.my_pane("aom-ui")
-        code, out = self.coop_show()
-        self.assertEqual(code, 0, out)
-        self.assertNotIn("coop", out)
-        self.assertNotIn("--no-above", self.opened()[0])
+        self.my_pane("aom-master")
+        out = self.refused()
+        self.assertRegex(out["playtest"],
+                         r"共同作業の期限（\d\d:\d\d JST）が切れた。続けるなら coop start で延ばす。終えるなら coop end")
+        self.refused(self.img)
+
+    def test_coop_expired_member_refused(self):
+        import time
+        self.coop_launched(until=time.time() - 1)
+        self.my_pane("aom-probe")                # with の担当でも断る
+        self.assertIn("共同作業の期限", self.refused()["playtest"])
+
+    def test_coop_expired_other_pid_is_unchanged(self):
+        # ゲームが終わって pid が違えば印は無効: 今までどおり（記録が生きていないので人がプレイ中、期限の文は出さない）
+        import time
+        self.coop_launched(owner="aom-master", pid=self.GAME_PID + 1, until=time.time() - 1)
+        self.role_in_roster("aom-master")
+        self.my_pane("aom-master")
+        self.assertNotIn("共同作業の期限", self.refused()["playtest"])
+
+    def test_coop_broken_mark_refused(self):
+        # 形の誤りの印（7 日より先・Infinity）も厳しい側: owner が役割でも、with の担当でも断る
+        import time
+        self.role_in_roster("aom-master")
+        for until in (time.time() + 8 * 24 * 3600, float("inf")):
+            self.coop_launched(owner="aom-master", until=until)
+            for role in ("aom-master", "aom-probe"):
+                self.my_pane(role)
+                self.assertIn("共同作業の印の形が正しくない", self.refused()["playtest"], (until, role))
+                (self.run_dir / "claude-state" / f"pane-{role}-4.json").unlink()
+
+    def test_coop_live_still_opens_with_member(self):
+        self.coop_launched(owner="aom-master")
+        self.my_pane("aom-probe")
+        self.assertEqual(self.coop_show()[0], 0)
 
     def test_coop_in_any_record_blocks_e2e(self):
         # 記録のファイルが 2 つあり、片方に印（with は aom-probe）、もう片方の owner が担当: 印が効いている間は e2e にしない
@@ -3291,6 +3322,23 @@ class ClaudeShowPlaytest(unittest.TestCase):
         self.my_pane("aom-ui")
         self.assertIn("共同作業の担当", self.refused()["playtest"])
         self.rec.unlink()                        # 印の記録が無ければ、もう片方の owner で e2e
+        self.assertEqual(self.coop_show()[0], 0)
+
+    def test_stale_coop_in_any_record_beats_member(self):
+        # 記録が 2 つあり、片方は期限内で呼び手が with、もう片方は期限切れの印: 厳しい側（人がいる）で断る
+        import time
+        other = self.run_dir / "svc" / "launched.json"; other.parent.mkdir()
+        conf = json.loads(self.conf.read_text())
+        conf["guard_hook"]["guards"]["tf3-running"]["commands"].append(
+            {"program": "^svcctl$", "block": ["launch"],
+             "allow_owner": {"file": "$XDG_RUNTIME_DIR/svc/launched.json", "option": "--owner"}})
+        self.conf.write_text(json.dumps(conf))
+        self.coop_launched()
+        other.write_text(json.dumps({"v": 1, "pid": self.GAME_PID, "started_at": 1, "cmd": "coop",
+                                     "coop": {"with": "aom-probe", "until": time.time() - 1}}))
+        self.my_pane("aom-probe")
+        self.assertIn("共同作業の期限", self.refused()["playtest"])
+        other.unlink()                           # 期限切れの記録が無ければ、期限内の印で開く
         self.assertEqual(self.coop_show()[0], 0)
 
     def test_coop_changes_leftover_is_not_coop(self):

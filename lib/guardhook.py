@@ -31,7 +31,8 @@ PreToolUse hook（Bash / Edit / Write / NotebookEdit）から呼ぶ。判定は 
     同じで、記録の pid がそのガードの process に当たるプロセスとして動いていて、セッションの役割も X なら、その項目では止めない
   - 共同作業（記録の coop: {"with": 担当かそのリスト, "reason", "since", "until"}）: 期限内で記録の pid が生きていれば、
     with の担当も owner と同じ照合（option / env / same_role）で通す。ユーザーと AI が同じゲームを一緒に動かすため。
-    旗・ロックの間は使わない。paths（書き込み・git）は共同作業でも止める
+    旗・ロックの間は使わない。paths（書き込み・git）は共同作業でも止める。期限が切れた・形の誤りの印が残っている間は
+    「ユーザーがいる」扱いで、owner も with も通さない（coop end でキーが消えるか、ゲームが終わって pid が違えば元に戻る）
 """
 import json
 import os
@@ -1012,7 +1013,7 @@ def read_launch_record(path, patterns):
 
     通すのは: 自分の普通のファイルで、{"v": 1, "owner": 空でない文字列, "pid": 正の整数} の形で、その pid が動いていて、
     引数（pgrep -f と同じく空白でつないだもの）が patterns のどれかに当たるときだけ（pid の使い回し・古い記録を効かせない）。
-    owner が無い（か null）記録は、coop（オブジェクト）があるときだけ読む（人が --owner なしで起動して共同作業にした形）。
+    owner が無い（か null）記録は、coop（null でない値）があるときだけ読む（人が --owner なしで起動して共同作業にした形）。
     そのとき owner は None で、owner としては誰とも合わない。"""
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
@@ -1037,7 +1038,8 @@ def read_launch_record(path, patterns):
     if not isinstance(data, dict) or data.get("v") != 1:
         return None, "記録のファイルの形が違う"
     owner, pid = data.get("owner"), data.get("pid")
-    owner_ok = (isinstance(owner, str) and owner) or (owner is None and isinstance(data.get("coop"), dict))
+    # coop が dict でない（形の誤りの印）ときも読む: 「印の形が正しくない」として止める・断る理由を出すため
+    owner_ok = (isinstance(owner, str) and owner) or (owner is None and data.get("coop") is not None)
     if not owner_ok or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return None, "記録のファイルの形が違う"
     import proc
@@ -1052,32 +1054,55 @@ def read_launch_record(path, patterns):
     return data, None
 
 
-def coop_of(rec, now=None):
-    """記録の共同作業の印を読む。{"with": [担当], "reason", "since", "until", "changes"} か None。
+def coop_mark(rec, now=None):
+    """記録の共同作業の印を読む。(種類, 中身) を返す。
 
-    None は: coop が無い・形が違う・until を過ぎた（pid の照合は read_launch_record の側）。changes は
+    種類は None（coop のキーが無いか null = 印なし。coop end のあとの coopChanges だけの記録もこれ）、
+    "live"（期限内の正しい印。中身は {"with": [担当], "reason", "since", "until", "changes"}）、
+    "expired"（with は正しく、until を過ぎた。中身は until）、
+    "bad"（形の誤り: dict でない・with が違う・until が数でない・NaN・Infinity・7 日より先。中身は None）。
+    expired / bad は「ユーザーがいる」扱い（いちばん厳しい側）にする: 期限が切れても人がまだ操作しているかもしれず、
+    誤った印で allow_owner の例外が開かないようにするため。pid の照合は read_launch_record の側。changes は
     プレイ用のセーブを変えた回数（表示だけに使う。modified / changes が無い・形が違えば None）。"""
     c = rec.get("coop") if isinstance(rec, dict) else None
+    if c is None:
+        return None, None
     if not isinstance(c, dict):
-        return None
+        return "bad", None
     w = c.get("with")
     names = [w] if isinstance(w, str) else w
     if not isinstance(names, list) or not names or not all(isinstance(x, str) and x for x in names):
-        return None
+        return "bad", None
     until = c.get("until")
     if isinstance(until, bool) or not isinstance(until, (int, float)) or until != until:
-        return None
+        return "bad", None
     now = time.time() if now is None else now
-    # NaN・Infinity（json は読む）や桁外れの期限は、書き手の誤りで共同作業が終わらなくなるので印とみなさない。
+    # NaN・Infinity（json は読む）や桁外れの期限は、書き手の誤りで共同作業が終わらなくなるので正しい印とみなさない。
     # 上限は旗と同じ 7 日
-    if not now < until <= now + MAX_MINUTES * 60:
-        return None
+    if until > now + MAX_MINUTES * 60:
+        return "bad", None
+    if until <= now:
+        # 0 以下（-Infinity など）は書き手の誤り（時刻として表せない）
+        return ("expired", until) if until > 0 else ("bad", None)
     reason = c.get("reason") if isinstance(c.get("reason"), str) else ""
     since = c.get("since")
     since = since if isinstance(since, (int, float)) and not isinstance(since, bool) and since == since else None
     n = c.get("changes")
     changes = n if c.get("modified") is True and isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
-    return {"with": names, "reason": reason, "since": since, "until": until, "changes": changes}
+    return "live", {"with": names, "reason": reason, "since": since, "until": until, "changes": changes}
+
+
+def coop_of(rec, now=None):
+    """期限内の正しい共同作業の印（coop_mark の "live" の中身）か None。"""
+    kind, val = coop_mark(rec, now)
+    return val if kind == "live" else None
+
+
+def coop_stale_text(kind, val):
+    """期限切れ・形の誤りの印で止める・断るときの理由の文。"""
+    if kind == "expired":
+        return f"共同作業の期限（{jst_hhmm(val)} JST）が切れた。続けるなら coop start で延ばす。終えるなら coop end"
+    return "共同作業の印の形が正しくない"
 
 
 def jst_hhmm(t):
@@ -1174,8 +1199,9 @@ def playtest_state(env, name, running=None, path=None, role=None, now=None):
     None（プロセスが動いていない → 今までどおり）、
     "coop"（記録が生きていて共同作業の印が効いていて、呼んだペインの役割 role が with にある = ユーザーと一緒に
     操作中。見せるのが目的なので開いてよい。ゲームの窓が前面かは呼び手が見る）、
-    "e2e"（記録が生きていて共同作業の印が無く（期限切れも含む）、owner が役割 = 担当の e2e）、
-    "human"（それ以外 = 人がプレイ中。印が効いていて role が with に無ければ、owner が役割でもこれ）。
+    "e2e"（記録が生きていて共同作業の印（coop のキー）が無く、owner が役割 = 担当の e2e）、
+    "human"（それ以外 = 人がプレイ中。印が効いていて role が with に無ければ、owner が役割でもこれ。
+    期限切れ・形の誤りの印がどれかの記録にあれば、誰が呼んでもこれ）。
     記録・pid の照合は allow_owner と同じ read_launch_record。running は patterns → True / False / None（pgrep）。"""
     guards, _ = load_guard_config(env, path)
     g = next((x for x in guards if x["name"] == name), None)
@@ -1192,7 +1218,7 @@ def playtest_state(env, name, running=None, path=None, role=None, now=None):
             files.append(launch_file(o["file"], env))
     if not files:
         return "human", "起動の記録（allow_owner の file）が設定に無い"
-    roles, whys, e2e, coop_seen = None, [], None, False
+    roles, whys, e2e, coop_seen, joined, stale = None, [], None, False, None, None
     for f in files:
         rec, why = read_launch_record(f, g["process"])
         if why:
@@ -1201,10 +1227,16 @@ def playtest_state(env, name, running=None, path=None, role=None, now=None):
         # 共同作業の印を owner より先に見る。launch --coop は owner が担当でも人がゲームを操作しているので、
         # owner の判定（e2e）に進むと誰が呼んでも開いてしまう。印が効いている間は with の担当だけが開ける
         # （どれかの記録に印があれば、ほかの記録の owner でも e2e にしない）
-        coop = coop_of(rec, now)
-        if coop:
+        kind, coop = coop_mark(rec, now)
+        if kind in ("expired", "bad"):
+            # 期限切れ・形の誤りの印は、人がまだ操作しているかもしれないので誰が呼んでも断る（coop end か
+            # ゲームの終わり（pid 違い）で印が消えるまで）
+            stale = stale or coop_stale_text(kind, coop)
+            continue
+        if kind == "live":
             if role and role in coop["with"]:
-                return "coop", coop_text(coop)
+                joined = joined or coop_text(coop)
+                continue
             coop_seen = True
             whys.append(f"共同作業の担当（{', '.join(coop['with'])}）は呼んだペインの役割（{role or '不明'}）でない")
             continue
@@ -1213,6 +1245,10 @@ def playtest_state(env, name, running=None, path=None, role=None, now=None):
             e2e = e2e or f"{rec['owner']} が起動した（pid {rec['pid']}）"
             continue
         whys.append(f"記録の owner {rec['owner']} は役割でない" if rec.get("owner") else "記録に owner が無い")
+    if stale:
+        return "human", stale
+    if joined:
+        return "coop", joined
     if e2e and not coop_seen:
         return "e2e", e2e
     return "human", "、".join(whys)
@@ -1449,8 +1485,11 @@ class Analyzer:
                 return
         for e in self.guard["commands"]:
             hit = match_entry(e, words)
-            if hit and hit not in self._cmds and not self.owner_passes(e, words, assigns):
-                self._cmds.append(hit)
+            if hit and not self.owner_passes(e, words, assigns):
+                note = self.stale_coop(e)
+                hit = f"{hit}（{note}）" if note else hit
+                if hit not in self._cmds:
+                    self._cmds.append(hit)
         if self.roots.forms:
             self.writes(name, args, assigns)
 
@@ -1466,6 +1505,9 @@ class Analyzer:
         rec, why = self.ctx.launch(self.guard, o)
         if why or not rec:
             return False
+        if coop_mark(rec, self.ctx.now)[0] in ("expired", "bad"):
+            # 期限切れ・形の誤りの印は「ユーザーがいる」扱い: owner も with も通さない（coop end かゲームの終わりまで）
+            return False
         if rec.get("owner") != claimed:
             # 共同作業の印の担当も、owner と同じ照合で通す（旗・ロックの間は上の owner_ok で使わない）
             coop = coop_of(rec, self.ctx.now)
@@ -1474,6 +1516,18 @@ class Analyzer:
         if o["same_role"]:
             return self.ctx.role() == claimed     # 役割が分からないセッションは通さない（今までどおり止める）
         return True
+
+    def stale_coop(self, entry):
+        """止めた項目の起動の記録に、期限切れ・形の誤りの共同作業の印があれば、その理由の文（断りの文に足す）。"""
+        kind, spec = entry
+        o = spec.get("allow_owner") if kind == "program" else None
+        if not o or not self.ctx.owner_ok:
+            return None
+        rec, why = self.ctx.launch(self.guard, o)
+        if why or not rec:
+            return None
+        mark, val = coop_mark(rec, self.ctx.now)
+        return coop_stale_text(mark, val) if mark in ("expired", "bad") else None
 
     def writes(self, name, args, assigns):
         if name == "git":
@@ -1967,9 +2021,13 @@ def owner_status(guard, env, now=None):
             continue
         seen.add(path)
         rec, why = ctx.launch(guard, o)
+        mark, coop = coop_mark(rec, now) if rec and not why else (None, None)
         head = f"起動した担当の例外（{path}）: "
         if flagged:
             out.append(head + "旗（ロック）の間は使わない（全員を止める）")
+        elif mark in ("expired", "bad"):
+            out.append(head + f"owner {rec.get('owner') or 'なし'}、pid {rec['pid']} が動いている → 共同作業の印が"
+                       + ("期限切れ" if mark == "expired" else "正しくない") + "なので誰も通さない")
         elif rec and not why:
             if rec.get("owner"):
                 out.append(head + f"owner {rec['owner']}、pid {rec['pid']} が動いている → {rec['owner']} は通す"
@@ -1980,9 +2038,12 @@ def owner_status(guard, env, now=None):
             out.append(head + f"owner {rec.get('owner') or 'なし'}、{why} → 例外にならない")
         else:
             out.append(head + f"{why} → 例外にならない")
-        coop = coop_of(rec, now) if rec and not why else None
-        if coop:
+        if mark == "live":
             out.append(coop_text(coop) + ("（旗（ロック）の間は使わない）" if flagged else ""))
+        elif mark == "expired":
+            out.append(f"共同作業: 期限切れ（{jst_hhmm(coop)}）。ユーザーがいる扱いで、担当の命令は止める")
+        elif mark == "bad":
+            out.append("共同作業: 印の形が正しくない。ユーザーがいる扱いで、担当の命令は止める")
     return out
 
 
