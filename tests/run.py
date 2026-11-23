@@ -2978,6 +2978,193 @@ class ClaudeShow(unittest.TestCase):
         self.assertFalse([c for c in read_calls(self.calls) if "launch" in c])
 
 
+class ClaudeShowPlaytest(unittest.TestCase):
+    """view.playtest_guard: ゲームを人がテストプレイ中なら開かない。担当の e2e（起動の記録が生きていて owner が役割）なら開く。"""
+    GAME_PID = 4242
+
+    def setUp(self):
+        from unittest import mock
+        self.show = load_show()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        self.kitten, self.calls = fake_kitten(self.d)
+        self.run_dir = self.d / "run"; (self.run_dir / "tf3ctl").mkdir(parents=True)
+        self.rec = self.run_dir / "tf3ctl" / "launched.json"
+        self.roster_dir = self.d / "roster"; self.roster_dir.mkdir()
+        self.conf = self.d / "c.json"
+        self.write_conf()
+        self.html = self.d / "r.html"; self.html.write_text("<p>x")
+        self.img = self.d / "a.png"; self.img.write_bytes(b"\x89PNG")
+        self.env = {"CLAUDE_KITTY_KITTEN": str(self.kitten), "CLAUDE_KITTY_CONFIG": str(self.conf),
+                    "KITTY_WINDOW_ID": "4", "KITTY_LISTEN_ON": "unix:/fake/kitty-1",
+                    "XDG_RUNTIME_DIR": str(self.run_dir), "CLAUDE_ROSTER_DIR": str(self.roster_dir)}
+        self.game_running = True
+        self.runs = []
+        # 記録の pid の照合（read_launch_record）は proc.argv で読む。偽のゲームのプロセスを置く
+        self.argv = {self.GAME_PID: ["./TransportFever3", "-x"]}
+        for name, fn in (("argv", lambda pid: self.argv.get(pid)), ("alive", lambda pid: pid in self.argv)):
+            pt = mock.patch(f"proc.{name}", side_effect=fn)
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_conf(self, view=None, guard=True):
+        view = {"guard": [], "playtest_guard": "tf3-running"} if view is None else view
+        data = {"view": view}
+        if guard:
+            data["guard_hook"] = {"guards": {"tf3-running": {
+                "process": "^\\./TransportFever3",
+                "commands": [{"program": "^tf3ctl(\\.py)?$", "value_options": ["--owner"], "block": ["launch"],
+                              "allow_owner": {"file": "$XDG_RUNTIME_DIR/tf3ctl/launched.json", "option": "--owner"}}]}}}
+        self.conf.write_text(json.dumps(data))
+
+    def launched(self, owner="aom-probe", pid=GAME_PID):
+        self.rec.write_text(json.dumps({"v": 1, "owner": owner, "pid": pid, "started_at": 1, "cmd": "launch"}))
+
+    def role_in_state(self, role):
+        d = self.run_dir / "claude-state"; d.mkdir(exist_ok=True)
+        (d / f"s-{role}.json").write_text(json.dumps({"session_id": f"s-{role}", "role": role}))
+
+    def role_in_roster(self, role):
+        (self.roster_dir / "roster.json").write_text(json.dumps({"sessions": {role: {"session_id": "x"}}}))
+
+    def run_(self, argv, **kw):
+        self.runs.append(argv)
+        if argv[0] == "pgrep":  # 偽の pgrep: ゲームが動いているかだけを返す
+            return SimpleNamespace(returncode=0 if self.game_running else 1,
+                                   stdout="77\n" if self.game_running else "", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def opened(self):
+        return [a for a in self.runs if a[0] != "pgrep"] or [c for c in read_calls(self.calls) if "launch" in c]
+
+    def refused(self, target=None):
+        code, out = self.show.show(str(target or self.html), self.env, None, run=self.run_)
+        self.assertEqual(code, 2, out)
+        self.assertEqual(out["skipped"], "ゲームをテストプレイ中")
+        self.assertEqual(self.opened(), [])
+        return out
+
+    def test_no_record_refuses(self):
+        out = self.refused()
+        self.assertIn("記録のファイルが無い", out["playtest"])
+        self.refused(self.img)  # 画像の overlay も出さない
+        self.assertIn(["pgrep", "-f", "^\\./TransportFever3"], self.runs)
+
+    def test_owner_is_role_opens(self):
+        self.launched("aom-probe")
+        self.role_in_state("aom-probe")
+        code, out = self.show.show(str(self.html), self.env, None, run=self.run_)
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.opened()[0][0].endswith("claude-browser"))
+
+    def test_owner_in_roster_opens(self):
+        self.launched("aom-ui")
+        self.role_in_roster("aom-ui")
+        self.assertEqual(self.show.show(str(self.html), self.env, None, run=self.run_)[0], 0)
+
+    def test_e2e_still_refused_when_guarded_window_in_front(self):
+        # e2e のときは今までどおり: 保護する窓が前面なら断る（理由はテストプレイではない）
+        self.write_conf({"guard": ["^\\./TransportFever3"], "playtest_guard": "tf3-running"})
+        self.launched("aom-probe")
+        self.role_in_state("aom-probe")
+        code, out = self.show.show(str(self.html), self.env, None, run=self.run_, active_pid=lambda: 77)
+        self.assertEqual(code, 2)
+        self.assertNotIn("playtest", out)
+
+    def test_owner_not_role_refuses(self):
+        self.launched("someone")
+        self.role_in_state("aom-probe")
+        self.assertIn("someone は役割でない", self.refused()["playtest"])
+
+    def test_stale_record_refuses(self):
+        self.role_in_state("aom-probe")
+        self.launched("aom-probe", pid=999)                 # 動いていない pid（前の起動の記録）
+        self.assertIn("動いていない", self.refused()["playtest"])
+        self.argv[999] = ["/usr/bin/python3", "x"]           # pid が使い回され、別のプロセスになった
+        self.assertIn("別のプロセス", self.refused()["playtest"])
+
+    def test_no_setting_is_unchanged(self):
+        for view, guard in (({"guard": []}, True), ({"guard": [], "playtest_guard": None}, True),
+                            ({"guard": [], "playtest_guard": "tf3-running"}, False)):
+            self.write_conf(view, guard)
+            self.runs.clear()
+            code, out = self.show.show(str(self.html), self.env, None, run=self.run_)
+            self.assertEqual(code, 0, (view, guard, out))
+            self.assertFalse([a for a in self.runs if a[0] == "pgrep"])
+            self.assertEqual("warnings" in out, not guard, out)  # ガードが無いときだけ知らせる
+
+    def test_missing_or_disabled_guard_opens_with_warning(self):
+        guard = {"process": "^\\./TransportFever3", "paths": ["/x"]}
+        for g in ({"other": guard}, {"tf3-running": dict(guard, enabled=False)},
+                  {"tf3-running": {"paths": ["/x"]}}):
+            self.conf.write_text(json.dumps({"view": {"guard": [], "playtest_guard": "tf3-running"},
+                                             "guard_hook": {"guards": g}}))
+            code, out = self.show.show(str(self.html), self.env, None, run=self.run_)
+            self.assertEqual(code, 0, (g, out))
+            self.assertTrue(any("tf3-running" in w for w in out["warnings"]), out)
+
+    def test_guard_without_allow_owner_refuses(self):
+        # 起動の記録が無い（設定に file が無い）ので、担当の e2e と見分けられない: 人がプレイ中とみなす
+        self.conf.write_text(json.dumps({"view": {"guard": [], "playtest_guard": "tf3-running"}, "guard_hook": {
+            "guards": {"tf3-running": {"process": "^\\./TransportFever3", "paths": ["/x"]}}}}))
+        self.assertIn("allow_owner", self.refused()["playtest"])
+
+    def test_pgrep_unusable_counts_as_not_running(self):
+        def run(argv, **kw):
+            if argv[0] == "pgrep":
+                raise OSError("no pgrep")
+            return self.run_(argv, **kw)
+        self.assertEqual(self.show.show(str(self.html), self.env, None, run=run)[0], 0)
+
+    def test_broken_roster_is_no_role(self):
+        self.launched("aom-ui")
+        (self.roster_dir / "roster.json").write_text("{")
+        self.assertIn("役割でない", self.refused()["playtest"])
+
+    def test_playtest_reason_comes_before_guarded_front(self):
+        self.write_conf({"guard": ["^\\./TransportFever3"], "playtest_guard": "tf3-running"})
+        code, out = self.show.show(str(self.html), self.env, None, run=self.run_, active_pid=lambda: 77)
+        self.assertEqual((code, out["skipped"]), (2, "ゲームをテストプレイ中"))
+
+    def test_broken_config_file_is_not_called_playtest(self):
+        # 壊れた設定ファイルは view.guard 側の誤りとして断る（来ないテストプレイの終わりを待たせない）
+        self.conf.write_text("{")
+        code, out = self.show.show(str(self.html), self.env, None, run=self.run_)
+        self.assertEqual(code, 2)
+        self.assertNotIn("playtest", out)
+        self.assertIn("JSON", out["skipped"])
+
+    def test_game_not_running_is_unchanged(self):
+        self.game_running = False
+        code, out = self.show.show(str(self.html), self.env, None, run=self.run_)
+        self.assertEqual(code, 0, out)
+
+    def test_bad_setting_refuses(self):
+        self.write_conf({"guard": [], "playtest_guard": 3})
+        code, out = self.show.show(str(self.html), self.env, None, run=self.run_)
+        self.assertEqual(code, 2)
+        self.assertIn("playtest_guard", out["playtest"])
+
+    def test_main_prints_reason(self):
+        import contextlib
+        import io
+        err, outbuf = io.StringIO(), io.StringIO()
+        with mock_env(self.env), contextlib.redirect_stderr(err), contextlib.redirect_stdout(outbuf):
+            orig = self.show.show
+            self.show.show = lambda t, env, ratio: orig(t, env, ratio, run=self.run_)
+            code = self.show.main([str(self.html)])
+        self.assertEqual(code, 2)
+        self.assertIn("ゲームをテストプレイ中なので開かない。終わってから", err.getvalue())
+
+
+def mock_env(env):
+    from unittest import mock
+    return mock.patch.dict(os.environ, env, clear=False)
+
+
 import fcntl  # noqa: E402
 import socket  # noqa: E402
 from statewatch import RcError, Watch, done_info, find_sockets, focused_pane, rc_background, rc_ls  # noqa: E402
