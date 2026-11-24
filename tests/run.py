@@ -3889,6 +3889,7 @@ SIDE_TESTS = {
     "presence_test": "Presence",
     "disk_watch_test": "Disk",
     "active_test": "Active",
+    "waitfor_test": "WaitFor",
 }
 
 

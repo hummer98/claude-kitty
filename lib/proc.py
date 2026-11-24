@@ -7,6 +7,7 @@ Linux は /proc、macOS は libSystem の sysctl(KERN_PROCARGS2) と proc_pidinf
 - start_time(pid): 起動時刻の文字列。同じ OS・同じ方法で読んだもの同士でだけ比べる（pid の再利用を見分ける）。
   Linux は /proc/<pid>/stat の 22 番目（Claude Code の ~/.claude/sessions/<pid>.json の procStart と同じ値）、
   macOS は「秒.マイクロ秒」（ps に倒したときは ps -o lstart= の文字列）。
+- age(pid): 起動してからの秒（claude-roster status・doctor が長く続く背景のシェルを出すため）。
 - proc_start_matches(recorded, start): procStart と start_time を比べてよいのは Linux だけ（macOS で Claude Code が
   何を書くかは分からないので、比べずに「同じ」とみなす。待つ側・止めない側に倒れる）。
 
@@ -283,6 +284,33 @@ def start_time(pid):
         if got is not None:
             return got[1]
         return _ps(pid, "lstart")
+    return None
+
+
+def age(pid, now=None):
+    """起動してからの秒（float）。分からなければ None。
+
+    Linux は /proc/<pid>/stat の起動時刻（起動からのクロック数）と /proc/uptime から。macOS は proc_pidinfo の
+    起動時刻（epoch）から（ctypes が使えず ps に倒したときは読まない）。"""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if is_linux():
+        st = start_time(pid)
+        try:
+            with open(f"{PROC}/uptime") as f:
+                up = float(f.read().split()[0])
+            return max(0.0, up - int(st) / os.sysconf("SC_CLK_TCK"))
+        except (OSError, ValueError, TypeError, IndexError):
+            return None
+    if is_darwin():
+        got = parse_bsdinfo(_darwin.bsdinfo(pid) or b"")
+        if got is None:
+            return None
+        import time
+        try:
+            return max(0.0, (time.time() if now is None else now) - float(got[1]))
+        except ValueError:
+            return None
     return None
 
 

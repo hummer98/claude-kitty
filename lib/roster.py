@@ -613,7 +613,8 @@ def restart_refusal(role, pane, session_json, state_word, guard_running, waiter,
         return f"{role} のセッションの記録（~/.claude/sessions）が見つからない"
     status = session_json.get("status")
     if status != "idle":
-        return f"{role} は idle でない（status={status}）"
+        hint = "。背景のシェルが残っているかもしれない（claude-roster status で見る）" if status == "shell" else ""
+        return f"{role} は idle でない（status={status}）{hint}"
     if state_word and state_word not in ("idle", "done"):
         return f"{role} は idle でない（claude-state={state_word}）"
     if not waiter or not pane.get("waiter_pid") or waiter.get("pid") != pane["waiter_pid"]:
@@ -879,4 +880,28 @@ def diff_lines(saved, now_roster):
     for role in cur:
         if role not in saved["sessions"]:
             out.append(f"{role}: 名簿に無い（save で足す）")
+    return out
+
+
+def session_pids(saved, now_roster, live):
+    """[(役割, claude の pid)]。いまの名簿の pid を先に、無ければ名簿の session_id で生きているセッションから引く。"""
+    by_sid = {s.get("sessionId"): s.get("pid") for s in live if isinstance(s, dict)}
+    cur = now_roster["sessions"] if now_roster else {}
+    out = []
+    for role in list(saved["sessions"]) + [r for r in cur if r not in saved["sessions"]]:
+        c = cur.get(role) or {}
+        pid = c.get("pid") if c.get("state") == "running" else None
+        if not isinstance(pid, int):
+            pid = by_sid.get(c.get("session_id") or (saved["sessions"].get(role) or {}).get("session_id"))
+        if isinstance(pid, int) and pid > 0 and (role, pid) not in out:
+            out.append((role, pid))
+    return out
+
+
+def shell_lines(role_pids, long_fn, line_fn):
+    """各役割の claude の子の、長く続いている背景のシェルを 1 行ずつ（restart が status=shell で断る元）。"""
+    out = []
+    for role, pid in role_pids:
+        for t in long_fn(pid):
+            out.append(f"{role}: {line_fn(*t)}")
     return out

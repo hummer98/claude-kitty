@@ -405,5 +405,58 @@ class ConfigExample(unittest.TestCase):
         self.assertEqual(default_of("left", "view"), f"`{json.dumps(DEFAULT_VIEW['left'])}`")
 
 
+class BgShells(unittest.TestCase):
+    """doctor の「背景のシェル」: セッションの claude の子のシェルで、2 時間を超えて続くもの。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.w = FakeWorld(self.tmp.name)
+        sd = self.w.home / ".claude/sessions"
+        sd.mkdir()
+        import proc
+        me = os.getpid()
+        (sd / f"{me}.json").write_text(json.dumps({"pid": me, "sessionId": "s-1", "name": "dev-a",
+                                                   "procStart": proc.start_time(me)}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def procs(self, table):
+        class P:
+            pids = staticmethod(lambda: list(table))
+            ppid = staticmethod(lambda p: table[p][0])
+            argv = staticmethod(lambda p: table[p][1])
+            age = staticmethod(lambda p: table[p][2])
+        return P
+
+    def ctx(self, table):
+        c = self.w.ctx()
+        c.procs = self.procs(table)
+        return c
+
+    def test_long_shell_is_a_warning(self):
+        me = os.getpid()
+        table = {me: (1, ["claude"], 9e4), 50: (me, ["/bin/bash", "-c", "until ! pgrep -f x; do sleep 2; done"], 3 * 3600),
+                 51: (me, ["/bin/bash", "-c", "sleep 1"], 30)}
+        items = [i for i in D.run_checks(self.ctx(table)).items if i["name"].startswith("背景のシェル")]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "warn")
+        self.assertEqual(items[0]["name"], f"背景のシェル: dev-a（claude pid {me}）")
+        self.assertEqual(items[0]["detail"], "pid 50（3時間0分）: until ! pgrep -f x; do sleep 2; done")
+        self.assertIn("kill 50", items[0]["fix"])
+
+    def test_none_is_ok(self):
+        me = os.getpid()
+        item = {i["name"]: i for i in D.run_checks(self.ctx({me: (1, ["claude"], 9e4)})).items}["背景のシェル"]
+        self.assertEqual(item["status"], "ok")
+        self.assertIn("セッション 1 件", item["detail"])
+
+    def test_no_sessions_is_skipped(self):
+        for f in (self.w.home / ".claude/sessions").iterdir():
+            f.unlink()
+        item = {i["name"]: i for i in D.run_checks(self.ctx({})).items}["背景のシェル"]
+        self.assertEqual(item["status"], "skip")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

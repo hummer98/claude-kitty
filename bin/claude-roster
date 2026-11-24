@@ -844,6 +844,15 @@ def cmd_status(args, view, conf):
     lines = R.diff_lines(rost, now_r)
     for line in lines or ["差なし"]:
         print(line)
+    # 終わらない待ちのループが背景に残ると status が "shell" のままになり、restart が断る。その元を見せる（止めない）
+    try:
+        import bgshell
+        kids = bgshell.child_map()
+        for line in R.shell_lines(R.session_pids(rost, now_r, live_sessions()),
+                                  lambda pid: bgshell.long_shells(pid, kids=kids), bgshell.line):
+            print(line)
+    except Exception as e:  # noqa: BLE001  見せるだけの行なので、読めなくても status は出す
+        print(f"背景のシェル: 調べられなかった（{type(e).__name__}: {e}）")
     return 0
 
 

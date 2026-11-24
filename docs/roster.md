@@ -5,7 +5,7 @@ kitty を起動し直したり落ちたりしても、1 つのコマンドで元
 
 ```sh
 claude-roster save                 # いまの名簿を保存して表示する（ふつうはタイマーが 5 分ごとに --auto で行う）
-claude-roster status               # 名簿といまの差（いない役割・ID が変わった役割・別のフォルダにいる役割）
+claude-roster status               # 名簿といまの差（いない役割・ID が変わった役割・別のフォルダにいる役割）と、2 時間を超えて続く背景のシェル
 claude-roster restore              # 名簿の役割のうち、いないものを開いて並べ直す（kitty が無ければ kitty ごと）
 claude-roster restore dev-a        # その役割だけ開く
 claude-roster restart dev-a --model sonnet   # 1 人を、同じペインで開き直す（idle のときだけ）
@@ -100,6 +100,9 @@ systemctl --user daemon-reload && systemctl --user enable --now claude-roster-sa
 
 1. 設定の `view.guard` のプロセス（全画面のアプリなど）が動いていれば、前面かどうかにかかわらず止めない（exit 2）。
 2. そのペインの claude が idle であること: `~/.claude/sessions` の `status` が `idle`、かつ `claude-state get` が空・idle・done（exit 3）。
+   背景のシェル（終わらない待ちのループなど）が残っていると `status` は `shell` のままになる。そのときは断りの文に
+   「claude-roster status で見る」を添える（`status` は 2 時間を超えて続く背景のシェルを pid・経過時間・コマンドの先頭で出す。
+   [waitfor.md](waitfor.md#長く続く背景のシェルを見る)）。
 3. その claude が、続きの指示に対応した claude-wait（`$XDG_RUNTIME_DIR/claude-wait/<ID>.waiter` の pid と、claude の親の pid が一致）から
    開かれていること。そうでなければ止めない（止めてもシェルに戻るだけなので）。
 4. `$XDG_RUNTIME_DIR/claude-wait/<ID>.next` に cwd・モデル・claude-wait の pid・時刻を書き、止める直前にもう一度 idle と保護するプロセスを確認してから

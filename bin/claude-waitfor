@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""上限時間付きで待つ。Claude Code の背景のシェルで until/while のループを書く代わりに使う。
+
+  claude-waitfor proc <パターン> [--timeout 30m] [--interval 2]
+      パターンに一致するプロセスが無くなるまで待つ。一致は pgrep -f と同じ（引数を空白でつないだ完全なコマンド行に
+      正規表現として re.search）。自分・自分の祖先（呼び出したシェル）・祖先から fork しただけの子は数えない
+      （until ! pgrep -f '…' の形は、待つシェル自身に一致して終わらない）。ほかの claude-waitfor とそれを呼んだ
+      シェルも数えない（同じものを待つ 2 つが待ち合わないように）。
+  claude-waitfor file <path> <文字列> [--timeout 30m] [--interval 2]
+      ファイルに文字列が現れるまで待つ（ファイルがまだ無くてもよい。正規表現ではなくそのままの文字列）。
+
+  --timeout   上限（既定 30m。90s・2h・秒の数。24h まで。0 = 無制限は受けない）
+  --interval  調べる間隔の秒（既定 2、0.1〜60）
+
+終了コード: 0 = 待ち終えた、124 = 時間切れ、2 = 引数の誤り。どれも 1 行の文を出す（0 は stdout、ほかは stderr）。
+詳しくは docs/waitfor.md。
+"""
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--version"]:
+        from version import handle_version
+        handle_version(argv, "claude-waitfor")
+        return 0
+    import waitfor as W
+
+    class Parser(argparse.ArgumentParser):
+        def error(self, message):  # 引数の誤りも 1 行で、終了コード 2
+            print(f"claude-waitfor: {message}（claude-waitfor --help）", file=sys.stderr)
+            sys.exit(W.EXIT_USAGE)
+
+    ap = Parser(prog="claude-waitfor", description="上限時間付きで待つ（プロセスの終わり・ファイルの文字列）")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--timeout", default="30m", help="上限（既定 30m。90s・2h・秒の数。24h まで）")
+    common.add_argument("--interval", type=float, default=W.DEFAULT_INTERVAL, help="調べる間隔の秒（既定 2）")
+    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=Parser)
+    p = sub.add_parser("proc", parents=[common], help="一致するプロセスが無くなるまで待つ")
+    p.add_argument("pattern")
+    f = sub.add_parser("file", parents=[common], help="ファイルに文字列が現れるまで待つ")
+    f.add_argument("path")
+    f.add_argument("text")
+    a = ap.parse_args(argv)
+    try:
+        timeout = W.parse_duration(a.timeout)
+        if not (0.1 <= a.interval <= 60):
+            raise ValueError("--interval は 0.1〜60 秒")
+        if a.cmd == "proc":
+            code, msg = W.wait_proc(a.pattern, timeout, a.interval)
+        else:
+            code, msg = W.wait_file(a.path, a.text, timeout, a.interval)
+    except ValueError as e:
+        print(f"claude-waitfor: {e}", file=sys.stderr)
+        return W.EXIT_USAGE
+    except KeyboardInterrupt:
+        return 130
+    print(f"claude-waitfor: {msg}", file=sys.stdout if code == W.EXIT_DONE else sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

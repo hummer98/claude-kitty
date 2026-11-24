@@ -542,6 +542,9 @@ class Restart(unittest.TestCase):
         self.assertIn("保護するプロセス", R.restart_refusal("a", self.pane(), sj, "idle", True, w))
         self.assertIn("idle でない", R.restart_refusal("a", self.pane(), dict(sj, status="busy"), "idle", False, w))
         self.assertIn("idle でない", R.restart_refusal("a", self.pane(), dict(sj, status=None), "idle", False, w))
+        # status=shell は背景のシェルが残っている形。status で元を見られると添える
+        self.assertIn("claude-roster status", R.restart_refusal("a", self.pane(), dict(sj, status="shell"), "idle", False, w))
+        self.assertNotIn("claude-roster status", R.restart_refusal("a", self.pane(), dict(sj, status="busy"), "idle", False, w))
         self.assertIn("claude-state=working", R.restart_refusal("a", self.pane(), sj, "working", False, w))
         self.assertIn("claude-state=waiting", R.restart_refusal("a", self.pane(), sj, "waiting", False, w))
         self.assertIn("claude-wait", R.restart_refusal("a", self.pane(), sj, "idle", False, None))
@@ -1533,6 +1536,28 @@ json.dump(roster.exit_payload(pid, {SID_A!r}, time.time()), open({str(self.d / '
         self.assertIn("slot=s2", la)
         self.assertNotIn("並べ直す", out)
         self.assertNotIn("sleeping", self.saved()["sessions"]["b"])
+
+
+class StatusShells(unittest.TestCase):
+    """claude-roster status の「背景のシェル」の行（長く続く子のシェル）。"""
+
+    def test_session_pids(self):
+        saved = {"sessions": {"a": {"session_id": SID_A}, "b": {"session_id": SID_B}, "c": {"session_id": SID_C},
+                              "z": {"session_id": SID_D, "sleeping": True}}}
+        now = {"sessions": {"a": {"pid": 11, "state": "running", "session_id": SID_A},
+                            "b": {"pid": None, "state": "waiting", "session_id": SID_B},
+                            "n": {"pid": 15, "state": "running", "session_id": SID_L}}}
+        live = [{"sessionId": SID_B, "pid": 12}, {"sessionId": SID_C, "pid": 13}, "x"]
+        self.assertEqual(R.session_pids(saved, now, live), [("a", 11), ("b", 12), ("c", 13), ("n", 15)])
+        # kitty が見つからない（いまの名簿が無い）ときは、名簿の session_id で生きているセッションから引く
+        self.assertEqual(R.session_pids(saved, None, live), [("b", 12), ("c", 13)])
+        self.assertEqual(R.session_pids({"sessions": {}}, None, []), [])
+
+    def test_shell_lines(self):
+        long = {11: [(901, 7300, "until ! pgrep -f x; do sleep 2; done")], 12: []}
+        lines = R.shell_lines([("a", 11), ("b", 12)], lambda pid: long.get(pid, []),
+                              lambda pid, age, cmd: f"背景のシェル pid {pid}: {cmd}")
+        self.assertEqual(lines, ["a: 背景のシェル pid 901: until ! pgrep -f x; do sleep 2; done"])
 
 
 if __name__ == "__main__":

@@ -32,9 +32,10 @@ HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-c
 class Ctx:
     """調べる環境。テストでは run / which / os_name / env を差し替える。"""
 
-    def __init__(self, env=None, os_name=None, run=None, which=None, repo=REPO, python=None, statvfs=None):
+    def __init__(self, env=None, os_name=None, run=None, which=None, repo=REPO, python=None, statvfs=None, procs=None):
         self.env = dict(os.environ if env is None else env)
         self.statvfs = statvfs or os.statvfs
+        self.procs = procs  # lib/bgshell.py の Sys の代わり（テスト用）
         self.home = Path(self.env.get("HOME") or os.path.expanduser("~"))
         self.os_name = os_name or os.uname().sysname
         self._run = run
@@ -713,8 +714,36 @@ def check_disk(ctx, rep):
             rep.warn(name, detail, f"{path} の中の要らないもの（テストの一時フォルダの残りなど）を確認して消す")
 
 
+def check_bg_shells(ctx, rep):
+    """各セッション（claude の pid）の子の背景のシェルのうち、2 時間を超えて続いているものを 1 行ずつ（読むだけ）。
+
+    終わらない待ちのループ（until ! pgrep -f … など）が残ると、セッションの status が "shell" のままになり、
+    claude-roster restart が断る。止めるかは人か担当が決める（ここでは止めない）。"""
+    import active
+    import bgshell
+    dirs = []
+    for d in (ctx.env.get("CLAUDE_CONFIG_DIR"), str(ctx.home / ".claude")):
+        if d and d not in dirs:
+            dirs.append(d)
+    sessions = active.live_sessions([Path(d) / "sessions" for d in dirs])
+    if not sessions:
+        rep.skip("背景のシェル", "動いているセッションが無い")
+        return
+    sys_ = ctx.procs or bgshell.Sys
+    kids = bgshell.child_map(sys_)
+    found = 0
+    for s in sessions:
+        who = s.get("name") or str(s.get("sessionId", ""))[:8]
+        for t in bgshell.long_shells(s["pid"], sys_=sys_, kids=kids):
+            found += 1
+            rep.warn(f"背景のシェル: {who}（claude pid {s['pid']}）", bgshell.brief(*t),
+                     f"要らない待ちなら kill {t[0]}（終わらない待ちは claude-waitfor に書き換える）")
+    if not found:
+        rep.ok("背景のシェル", f"{bgshell.LONG_SECONDS // 3600} 時間を超えて続くものは無い（セッション {len(sessions)} 件）")
+
+
 CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_systemd, check_config, check_desktop,
-          check_relay, check_model_policy, check_disk]
+          check_relay, check_model_policy, check_disk, check_bg_shells]
 MARK = {"ok": "OK  ", "ng": "NG  ", "warn": "注意", "skip": "--  "}
 
 

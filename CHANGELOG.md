@@ -13,6 +13,10 @@
 
 ### 追加
 
+- `claude-waitfor`（新しい道具）: 上限時間付きで待つ。`proc <パターン>` は一致するプロセスが無くなるまで、`file <path> <文字列>` はファイルに文字列が現れるまで（ファイルがまだ無くてもよい）。Claude Code のセッションが `until ! pgrep -f "luajit tests/run.lua"; do sleep 2; done` で待ち、pgrep が待つシェル自身（`bash -c '…'` のコマンド行）に一致して 15〜19 時間残ったため。`until grep -q … $F` で目印が出ずに 24 時間残ったこともあった（[docs/waitfor.md](docs/waitfor.md)）。
+  - 一致は `pgrep -f` と同じ（完全なコマンド行に正規表現）。自分・祖先（呼んだシェル）・祖先から fork しただけの子（パイプやサブシェル）と、ほかの claude-waitfor とそれを呼んだシェル（同じものを待つ 2 つが待ち合わないように）は数えない。
+  - 既定の上限 30 分（`--timeout 90s` / `2h`、24 時間まで。0 = 無制限は受けない）、間隔 2 秒（`--interval`）。時間切れは終了コード 124 と 1 行の文、引数の誤りは 2。
+- `claude-roster status`・`claude-kitty doctor`: 各セッション（claude の pid）の子の背景のシェルのうち、2 時間を超えて続くものを 1 行ずつ出す（pid・経過時間・コマンドの先頭。止めない）。背景のシェルが残るとセッションの status が `shell` のままになり、`claude-roster restart` が断るため。`restart` の断りの文（status=shell のとき）にも `claude-roster status` で見るよう添えた。
 - `claude-roster`: プロジェクトごとに `CLAUDE_CONFIG_DIR` で設定の置き場を分けている（direnv の `.envrc` など）ときに、名簿と復元が効くようにした（[docs/roster.md](docs/roster.md#プロジェクトごとの設定の置き場と包み)）。
   - `save` はペインの claude の `CLAUDE_CONFIG_DIR` を読み、既定でなければ役割に `config_dir` を残す。セッションの記録・モデルもその置き場から読む。
   - `restore` は `config_dir` のある役割を `env CLAUDE_CONFIG_DIR=… claude-wait …` で開く（同じ置き場でないと resume で会話が見つからない）。
