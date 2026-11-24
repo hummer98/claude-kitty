@@ -4,6 +4,8 @@
 
 **第 1 段**は、送る・受け取る・hook でセッションに渡す・ペインの色で知らせる。**第 2 段の 1 つ目**として、止まっている（入力待ちの）受け取りのセッションを、Claude Code の cross-session messaging の socket で起こす（[止まっているセッションを起こす](#止まっているセッションを起こすsocket)）。これで、別の端末のセッション同士が人を介さずにやりとりできる。相手を自動で見つけること（mDNS）、統括以外の役割への直接の配達は、まだ作っていない（[第 2 段の残り](#まだ無いもの第-2-段の残り)）。外出先からのやりとり（LAN の外）は扱わない（Claude の iPhone アプリの Remote Control などに任せる）。
 
+同じ端末の中で、別の claude.ai アカウント（別の `CLAUDE_CONFIG_DIR`）で動くセッションとも、宛先 `local/<役割>` で同じように話せる（ssh は通さない。[同じ端末の別のセッションへ](#同じ端末の別のセッションへlocal)）。
+
 ## 全体の形
 
 ```
@@ -75,6 +77,27 @@ ssh -F /dev/null -o GlobalKnownHostsFile=/dev/null -o ControlMaster=no -o Contro
 | `拒否: <理由>` | 1 | 相手が断った（役割・大きさ・通数・止めている など） |
 | `届かない: mac-a: <ssh の最後の行>` | 1 | ssh が通らない（sshd が止まっている・host key が違う・相手が trust していない） |
 | `claude-relay: …` | 2 | 引数・設定の誤り（登録していない相手、空の本文 など） |
+
+## 同じ端末の別のセッションへ（local）
+
+Claude Code 自身のセッション間の連絡は、同じアカウント（同じ設定の置き場）の中に限られる。同じ端末で、別の claude.ai アカウントを `CLAUDE_CONFIG_DIR` で分けて動かしているセッション（どちらも claude-kitty の hook を入れたもの）とは、宛先 `local` で話す:
+
+```sh
+claude-relay send local/main "テストが通りました"
+echo "長い本文" | claude-relay send local/main -
+claude-relay send local "…"                 # 役割を省くと relay.receivers の最初の役割へ
+claude-relay send desk/main "…"             # 設定の relay.name（ここでは desk）も同じ端末とみなす
+claude-relay ping local
+```
+
+- ssh・専用の鍵・`pair`・`trust` は要らない。同じ OS ユーザーのプロセスは受信箱に直接書けるので、登録で守るものが無い。
+- 受け取りの検査は recv と同じ処理を通す（コードを分けない）: `relay.enabled`、宛先の役割が `relay.receivers` にあるか、大きさ（`relay.max_bytes`、既定 16 KB）、通数の上限、ログ、拒否の理由。受信箱に置いたあとのペインの色と、止まっているセッションを起こすのも同じ。結果の 1 行・終了コードも ssh のときと同じ（`配達済み: local/main`・`受信箱に置いた: local/main`・`拒否: …`）。
+- 送り元の名前は `local` に決まる（受信箱のファイル名・ログの `from`・通数の上限も `local` で数える。同じ端末のセッションは全部で 1 つの送り元）。枠の `from` は `local/<送ったセッションの役割>` で、返事は枠の `reply` のとおり `claude-relay send local/<役割> --reply-to <id> -`。知らせと枠の 1 行目は「この端末の別のセッションから N 通」、ステータス行は「この端末から N 通」。
+- **自分宛ては送らない**: 宛先の役割（省けば `relay.receivers` の最初）が、送ったセッションの役割（claude-state の記録）と同じなら、終了コード 2 で止める（自分を起こすと、作業中の自分のターンに自分の知らせが割り込み、起こす回数の上限も自分で使い切るため）。`ping local` は自分にもできる（受信箱に置かず、起こさない）。役割は kitty のペインごとに別にしておく。
+- `local` と、設定の `relay.name` は相手の名前に使えない（`trust` が断る。`pair --name local` も断る）。
+- 置き場は `CLAUDE_CONFIG_DIR` に依らない: 受信箱・ログ・起こすための socket の記録は `$XDG_STATE_HOME/claude-kitty/relay/`、受け手のペインと役割は claude-state の記録（`$XDG_RUNTIME_DIR/claude-state/`）、設定は `~/.config/claude-kitty/config.json`。受け手のセッションを `~/.claude/sessions` で探すことはしないので、置き場が別でも見つかる。
+- 受け手のアカウントの置き場にも hook が要る: `CLAUDE_CONFIG_DIR=<その置き場> tools/install.sh --hooks=state,relay` で、その置き場の `settings.json` に claude-state と claude-relay の hook を入れる（`claude-kitty doctor` も同じく `CLAUDE_CONFIG_DIR` を付けて確かめる）。止まっているセッションを、まだ 1 ターンもしていないうちから起こせるよう SessionStart の hook が socket を記録するのは、受け取りの登録（authorized_keys）があるか、設定に `relay` の節があるときだけ（同じ端末だけで使うなら `"relay": {}` を書いておく。無くても、最初のターンのあとからは起こせる）。
+- `XDG_STATE_HOME`・`XDG_RUNTIME_DIR`・`CLAUDE_KITTY_CONFIG` をアカウントごとに変えていると、受信箱や記録が別になって届かない（同じ値にしておく）。
 
 ## 受け取る（recv）
 
@@ -178,7 +201,7 @@ printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 | `claude-relay pair [--name N] [--host H] [--port P]` | 専用の鍵を作り（無ければ）、相手に渡す 1 行を出す |
 | `claude-relay trust NAME HOST USER 'PUBKEY' [--port P] [--yes] [--no-keyscan] [--replace-host-key]` | 相手を登録する（authorized_keys・relay.peers・host key） |
 | `claude-relay untrust NAME [--yes]` | 相手の登録を外す |
-| `claude-relay send PEER[/ROLE] TEXT\|- [--reply-to ID]` | 送る |
+| `claude-relay send PEER[/ROLE] TEXT\|- [--reply-to ID]` | 送る（PEER が `local` か `relay.name` なら同じ端末の別のセッションへ。ssh を通さない） |
 | `claude-relay ping PEER[/ROLE]` | 届くかの確認（本文なし） |
 | `claude-relay peers [--json]` | 相手の一覧（送れるか = relay.peers と host key、受け取るか = authorized_keys の行） |
 | `claude-relay inbox [--role R] [--deliver] [--json]` | 受信箱を見る（`--deliver` は渡す文を出して delivered/ へ移す） |
@@ -224,6 +247,7 @@ claude-kitty が作るフォルダは 0700 で作る（無い親も、`~/.local`
 - **人がいなくても動く**（第 2 段）: 起こす知らせで、相手の端末のメッセージだけでターンが始まる。本文でセッションを動かそうとする文（プロンプトインジェクション）が人の目を通らずに読まれ、セッション同士が返事を続けてトークンを使い続けることもありうる。歯止めは、枠の注意書き（指示として扱わない・返事の要らないものには返さない）、送り元ごとの通数の上限、起こす回数の上限（役割ごとに 10 分に 20 回）。人がいない間に動かしたくなければ、受け手の `crossSessionInbound` を `hold` にする（知らせが人の承認待ちになる）か、`relay.enabled: false` にする。知らせの文には本文を入れない（本文は枠と注意書き付きで hook が渡す）。
 - **socket の token**: `wake/<役割>/<セッション id>.json`（0600）に入る。同じユーザーのプロセスならそのセッションにメッセージを送れる値なので、ほかの置き場と同じく他人に読ませない。
 - **上限とログ**: 大きさ・通数の上限、全件のログ（`claude-relay log`）。
+- **同じ端末（local）**: 同じ OS ユーザーのプロセスなら誰でも `local/` で送れる（受信箱・socket・settings.json にもともと届く相手なので、新しく開く入口ではない）。受け取りの役割・上限・枠の注意書きは別の端末からのものと同じ。
 - **取り消し**: `untrust` で即座に。`relay.enabled: false` で全部止める（recv が拒否し、hook も渡さない）。
 - **LAN の外**: 扱わない。sshd をインターネットに出さない。
 - 専用の鍵はパスフレーズなし（hook や統括から人の手なしで送るため）。この鍵が漏れると、相手の受信箱に（上限の範囲で）書けてしまう。気づいたら相手に untrust してもらい、`claude-relay pair` の前に鍵を消して作り直す。

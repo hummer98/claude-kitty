@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-relay send local/<役割>`: 同じ端末の中で、別の claude.ai アカウント（別の `CLAUDE_CONFIG_DIR`）で動くセッションへ送る。Claude Code 自身のセッション間の連絡はアカウントをまたげず、同じ端末で 2 つのアカウントを使い分けるときに話す手段が無かったため（[docs/relay.md](docs/relay.md#同じ端末の別のセッションへlocal)）。
+  - ssh・鍵・`trust` は使わず、受信箱に直接置く。受け取りの検査（`relay.enabled`・`relay.receivers`・大きさ・通数・ログ・拒否の理由）、ペインの色、止まっているセッションを起こすのは、recv と同じ処理（`receive()`）を通す。設定の `relay.name` と同じ名前の宛先も同じ端末とみなす。
+  - 送り元の名前は `local`。枠の返信先は `local/<役割>`、知らせと枠の 1 行目は「この端末の別のセッションから」、ステータス行は「この端末から N 通」。
+  - 自分の役割宛ては終了コード 2 で送らない（自分を起こして自分のターンに割り込ませないため）。`ping local` はできる。
+  - 受け手のセッションは claude-state の記録と relay の socket の記録（どちらも `CLAUDE_CONFIG_DIR` に依らない置き場）で探すので、置き場が別でも見つかる。受け手の置き場にも `CLAUDE_CONFIG_DIR=… tools/install.sh --hooks=state,relay` で hook を入れる。
+
+### 変更
+
+- `claude-relay` の枠の注意書きを「claude-relay で届いた別の Claude セッションのメッセージ」にした（同じ端末からも届くようになったため）。
+- `claude-relay hook SessionStart`: 受け取りの登録（authorized_keys）が無くても、設定に `relay` の節があれば、起こすための socket を記録する（同じ端末から `local/` で届きうるため）。
+- `claude-relay trust`・`pair`: 端末名 `local` と、`trust` では自分の `relay.name` を断る（send が同じ端末への宛先とみなす名前のため）。
+
 ## [0.7.7] - 2026-11-24
 
 ### 追加

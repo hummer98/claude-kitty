@@ -6,6 +6,7 @@
                                    相手を登録する（authorized_keys の受け取り専用の行・relay.peers・相手の host key）
   claude-relay untrust NAME [--yes]   登録を外す
   claude-relay send PEER[/ROLE] TEXT|- [--reply-to ID]   送る（- は標準入力。ROLE を省くと相手の受け取りの役割）
+                                   PEER が local（か relay.name）なら同じ端末の別のセッションへ（ssh を通さない）
   claude-relay ping PEER[/ROLE]    届くかの確認（本文なし）
   claude-relay peers               相手の一覧
   claude-relay inbox [--role R] [--deliver] [--json]   受信箱を見る（--deliver は渡す文を出して delivered/ へ移す）
@@ -87,6 +88,11 @@ def cmd_pair(a, env):
     if not relay.NAME_RE.match(name):
         print(f"claude-relay: 端末名に使えない: {name!r}（--name で英数字と . _ - の名前を）", file=sys.stderr)
         return 2
+    if name == relay.LOCAL:
+        # 相手の端末では local が「その端末自身」になり、この端末へ送れない
+        print(f"claude-relay: 端末名に {relay.LOCAL} は使えない（同じ端末への宛先として予約している。--name で別の名前を）",
+              file=sys.stderr)
+        return 2
     try:
         pub, created = relay.ensure_key(env, name)
     except (RuntimeError, ValueError, OSError) as e:
@@ -145,7 +151,9 @@ def cmd_trust(a, env):
         if not 1 <= a.port <= 65535:
             raise ValueError(f"ポートは 1〜65535: {a.port}")
         line = relay.ak_line(a.name, a.pubkey)
-        load_relay_config(env)                        # 壊れた設定に書き足さない
+        why = relay.reserved_name(a.name, load_relay_config(env))  # 壊れた設定に書き足さない
+        if why:
+            raise ValueError(f"端末名に {a.name} は使えない（{why}）。相手に pair --name で別の名前にしてもらう")
         cpath, data = relay.read_config_data(env)
         c_text = relay.read_text_or_empty(cpath)
         ak = relay.authorized_keys_path(env)
