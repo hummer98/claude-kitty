@@ -26,7 +26,7 @@ UNITS = ["claude-state-watch.service", "claude-roster-save.timer", "claude-sessi
 AGENTS = ["claude-kitty.state-watch", "claude-kitty.roster-save", "claude-kitty.session-stats"]
 MIN_PYTHON = (3, 9)  # macOS の Command Line Tools の /usr/bin/python3 が 3.9
 HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-check", "guard": "claude-guard", "relay": "claude-relay",
-               "model": "claude-presence（モデルの切り替え）"}
+               "model": "claude-presence（モデルの切り替え）", "suffix": "claude-prompt-suffix（文の最後の略号）"}
 
 
 class Ctx:
@@ -313,6 +313,9 @@ def check_hooks(ctx, rep):
         if part in ("relay", "model"):
             continue  # 使う人だけのもの。relay は check_relay、model は check_model_policy が調べる
         name = f"hook: {HOOK_LABELS[part]}"
+        if state == "none" and part == "suffix":
+            rep.ok(name, "入っていない（任意。使うなら tools/install.sh --hooks=suffix。docs/prompt-suffix.md）")
+            continue
         if state == "none":
             rep.warn(name, "入っていない", f"使うなら tools/install.sh --hooks={part}")
             continue
@@ -474,6 +477,8 @@ def check_config(ctx, rep):
     lenient("lang", lambda: load_lang_config(ctx.env, path))
     from guardhook import load_guard_config
     lenient("guard_hook", lambda: load_guard_config(ctx.env, path))
+    from promptsuffix import load_config as load_prompt_suffix_config
+    lenient("prompt_suffix", lambda: load_prompt_suffix_config(ctx.env, path))
     from sessionstats import load_settings
     strict("session_stats", lambda: load_settings(ctx.env, path))
     strict("roster", lambda: load_roster_config(ctx.env, path))

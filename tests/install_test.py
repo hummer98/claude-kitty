@@ -106,7 +106,7 @@ class MergeHooks(unittest.TestCase):
         self.assertEqual(again, new)
         self.assertTrue(all(line.startswith("= ") for line in lines2))
         self.assertEqual(M.status(new), dict({p: ("all", []) for p in M.PARTS}, relay=("none", ["UserPromptSubmit", "Stop", "SessionStart"]),
-                                             model=("none", ["PreToolUse"])))
+                                             model=("none", ["PreToolUse"]), suffix=("none", ["UserPromptSubmit"])))
 
     def test_parts_are_selectable(self):
         _lines, new = M.install({}, "/r", ["guard"])
@@ -353,6 +353,22 @@ class Install(unittest.TestCase):
         self.assertEqual(self.run_install("--hooks=", "--yes").returncode, 2)       # 空の指定は誤り
         self.run_install("--all", "--uninstall", "--yes")                 # 外すときの --all は lang も外す
         self.assertEqual(json.loads(self.settings.read_text()), {})
+
+    def test_suffix_only_when_named(self):
+        # suffix（文の最後の略号）は statusline と同じく、--hooks=suffix と明示したときだけ。--all には入らない
+        r = self.run_install("--all", "--yes")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(M.status(json.loads(self.settings.read_text()))["suffix"][0], "none")
+        self.assertNotIn(": claude-prompt-suffix", r.stdout)            # hook の行に出ない（リンクの行だけ）
+        r = self.run_install("--hooks=suffix", "--yes")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        data = json.loads(self.settings.read_text())
+        self.assertEqual(M.status(data)["suffix"], ("all", []))
+        cmds = [h["command"] for g in data["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
+        self.assertIn(f"{REPO}/bin/claude-prompt-suffix", cmds)
+        self.assertEqual(M.status(data)["state"][0], "all")           # --all で入れたものは残る
+        self.run_install("--all", "--uninstall", "--yes")               # 外すときの --all は suffix も外す
+        self.assertNotIn("claude-prompt-suffix", self.settings.read_text())
 
     def test_model_only_when_named(self):
         # model（離席中のモデルの切り替え）は relay と同じく --hooks=model と明示したときだけ。--all には入らない

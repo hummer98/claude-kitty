@@ -34,7 +34,7 @@ claude-kitty doctor                        # 足りないものと直し方
 | 部品 | 行うこと | 外す（`--uninstall`） |
 |---|---|---|
 | `--links` | `bin/` の全コマンドを `~/.local/bin`（`$CLAUDE_KITTY_BIN_DIR`）にリンク。既にある別のファイルは上書きしない | このリポジトリを指すリンクだけ消す |
-| `--hooks[=state,lang,guard,relay]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。`relay`（claude-relay。7.）も `--hooks=relay` と明示したときだけ。既存のキーと hook は残し、同じ道具・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じ道具の hook を外す（手で入れたものも）。`--all --uninstall` は lang と relay も外す |
+| `--hooks[=state,lang,guard,relay,suffix]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。`relay`（claude-relay。7.）と `suffix`（claude-prompt-suffix。5. の終わり）も `--hooks=relay` などと明示したときだけ。既存のキーと hook は残し、同じ道具・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じ道具の hook を外す（手で入れたものも）。`--all --uninstall` は lang・relay・suffix も外す |
 | `--kitty` | kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）を足し（末尾なので、自分の `listen_on`・`enabled_layouts`・`allow_remote_control`・`filter_notification` は上書きされる。あれば先に「!」で見せる）、`claude_state_watcher.py` と `claude3.session` のリンクを張る。kitty.conf がこのリポジトリの `kitty/kitty.conf` へのリンクなら触らない | 足した行とリンクだけ外す |
 | `--systemd` | `contrib/systemd/` のユニットを `~/.config/systemd/user/` に、パスを置き換えて写し、`daemon-reload` と `enable --now`（Linux だけ）。手で入れた中身の違うユニットは上書きしない | 自分が入れたユニットを止めて消す |
 | `--launchd` | `contrib/launchd/` の LaunchAgent を `~/Library/LaunchAgents/`（`$CLAUDE_KITTY_LAUNCH_AGENTS`）に、パス・PATH・HOME を置き換えて写し、`launchctl bootstrap gui/<uid>`（macOS だけ）。中身が変わったら `bootout` してから読み込み直す。手で入れた中身の違うものは上書きしない | 自分が入れたものを `launchctl bootout` して消す |
@@ -207,6 +207,14 @@ printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 - `tools/install.sh --statusline` でも入れられる（見せてから確認を取る。別の `statusLine` があれば置き換えない）。外すのは `tools/install.sh --uninstall --statusline`。
 - 週の使用量を出す役割は設定 `statusline.weekly_roles`（既定は `view.left` の統括だけ。`["*"]` で全員）。しきい値と色も同じ節（[docs/config.md](docs/config.md#statuslineclaude-statusline-ステータス行)）。
 
+### 文の最後の略号を効かせる claude-prompt-suffix（任意）
+
+指示の文の最後に `wdt`（意見だけ）・`opt`（案を出す）・`pre`（見せる）・`desc 2`（2 番を解説）・`next`（決めることだけ）・`ss`（最新のスクリーンショットを見る）を付けると、その意味を UserPromptSubmit hook がモデルに渡し、画面に「略号 wdt を適用」と出します。CLAUDE.md に書いてモデルに任せるより確実に効きます。
+
+- 入れる: `tools/install.sh --hooks=suffix`（`--all` には入らない）。手で入れるなら `hooks.UserPromptSubmit` に `{"type": "command", "command": "/path/to/claude-kitty/bin/claude-prompt-suffix", "timeout": 10}`。
+- 拾うのは最後の行の最後の単独の語だけ（貼り付けた文・コードブロック・`$ ` や `--` のあるコマンドの行・引用は見ない）。略号の足し方・変え方・消し方、スクリーンショットの置き場は [docs/prompt-suffix.md](docs/prompt-suffix.md)。
+- `desc 2` で指せるよう、一覧に番号を振らせるなら CLAUDE.md に「案・判断・指摘の一覧には番号を振る」と 1 行書く（設定 `prompt_suffix.number_lists: true` でも足せるが、毎ターン増える）。
+
 ## 6. 守るべき決まり
 
 - **close と send-text を使わない。** `kitten @ close-window` などのペインやタブを閉じる操作と、`kitten @ send-text` は、中で動いている Claude Code の作業や入力を壊す。`claude-view` も使わない（テストで確認している）。並べ替えは `detach-window`・`focus-window`・`layout_action` だけで行う。例外は `claude-roster sleep` の `close-window` だけで、そのペインの claude（と claude-wait）が終わり、前面にシェルしか残っていないのを確かめてから閉じる。
@@ -323,7 +331,7 @@ claude-relay log                                # 送受信の記録
 | `claude-browser` の open・shot・url・close・profiles | 使える | Chrome は `/Applications`（か `~/Applications`）の `Google Chrome.app` を直接起動する（`open -a` は使わない）。プロファイルは `~/Library/Application Support/claude-kitty/browser-profiles` |
 | `claude-browser` の重ね置き（ペインの上に Chrome） | 試験的 | kitty の窓の位置を CoreGraphics（`CGWindowListCopyWindowInfo`。画面収録の許可は要らない）で読み、タイトルバー（28 ポイント。`hide_window_decorations titlebar-only` なら 0、`$CLAUDE_BROWSER_MAC_TITLEBAR` で変えられる）を除いて、Chrome の窓を CDP の `Browser.setWindowBounds` で置く。**「常に最前面」は無い**: Chrome を前に出す（入力先も Chrome に移る）のは `--focus browser` のときだけ。既定（`kitty`）と `none` は入力先を動かさないので、Chrome が kitty の後ろに隠れることがある。新しく起動した Chrome は、macOS がアプリを前に出して入力先が移ることがある（確認してほしいことの 9.）。位置が読めない・置けないときは、止めずに普通の窓のまま開く |
 | `claude-show` | HTML は試験的（上の重ね置き）・画像は使える | 画像は kitty の overlay（`kitten icat`）。kitty の外では `open` で開く |
-| `claude-guard`・`claude-lang-check`・`claude-session-stats` | 使える | OS に依存しない（`claude-guard` の働く条件は `pgrep -f`。macOS の pgrep でも同じ書き方） |
+| `claude-guard`・`claude-lang-check`・`claude-prompt-suffix`・`claude-session-stats` | 使える | OS に依存しない（`claude-guard` の働く条件は `pgrep -f`。macOS の pgrep でも同じ書き方） |
 | `claude-kitty` の起動 | 使える | `--detach` の代わりに `nohup`。設定の `kitty.maximize`・`kitty.desktop` は使わない（あれば注意を出して飛ばす） |
 | `claude-kitty doctor` | 使える | systemd の代わりに launchd、KWin の代わりに `lsappinfo` の行を出す。Chrome は `claude-browser` と同じ探し方 |
 | 仮想デスクトップ（Space）への移動・最大化・窓の「常に最前面」 | 使えない | KWin（KDE Plasma）専用。macOS に許可の要らない公式の方法が無い |

@@ -14,6 +14,12 @@
   - しきい値と色は設定 `statusline`（[docs/config.md](docs/config.md)）。失敗しても何かしら 1 行を出す（設定の誤りは既定で出して末尾に知らせる）。
 - `tools/install.sh --statusline`: `settings.json` の `statusLine` に claude-statusline を入れる（`--all` には入らない。別の `statusLine` があれば置き換えない）。`--uninstall` は claude-statusline のものだけ外す。
 - `claude-kitty doctor`: 「設定: statusline」と「statusLine」（claude-statusline か・別のものか・無しか。読むだけ）の行。
+- `claude-prompt-suffix`（新しい道具。任意）: UserPromptSubmit hook。指示の文の最後の略号の意味をモデルに渡し（`additionalContext`）、画面に「略号 wdt を適用」の 1 行を出す（`systemMessage`）。略号を CLAUDE.md に書いてモデルに任せるだけでは効いたり効かなかったりし、ほかの人も同じ使い方ができるようにするため（[docs/prompt-suffix.md](docs/prompt-suffix.md)）。
+  - 既定の略号: `wdt`（意見だけ。作業しない）・`opt`（案を 2〜4 つ、推奨度と信頼度付き）・`pre`（生成物を開いて見せる）・`desc [番号]`（解説だけ。番号付きなら直前の返答のその項目）・`next`（ユーザーが決めることだけを、1 行目に数を書いて並べる）・`ss`（最新のスクリーンショットを見てから答える。hook がパスと時刻を添える）。並べると全部効く（`opt wdt`）。大文字小文字は区別しない。
+  - 混同を防ぐため、拾うのは最後の行の最後の単独の語だけ（前が空白か改行、後ろに句読点も無い）。貼り付けた文（Claude Code が `<pasted_content>` で包む範囲）、閉じていないコードブロックの中、`$ `・`% ` で始まる行、`--` を含む行、引用の行、スラッシュコマンドは見ない。サブエージェントへの指示も対象外。足す文は「略号とみなした。明らかに文の一部なら無視してよい」と断る。
+  - 設定 `prompt_suffix`（[docs/config.md](docs/config.md#prompt_suffixclaude-prompt-suffix-文の最後の略号)）: `suffixes` で足す・置き換える・`null` で消す（番号を取るものは `{"text", "with_number"}`）、`language`（`ja`・`en`）、`number_lists`（略号の無い文にも「一覧には番号を振る」を足す。既定 `false`。毎ターン増やさないため）、`notice`、`screenshot_dir`（既定は OS の普通の場所: Linux は `XDG_PICTURES_DIR` の `Screenshots` など、macOS は保存先の設定か `~/Desktop`）。`CLAUDE_PROMPT_SUFFIX=off` で止める。
+- `tools/install.sh --hooks=suffix`: claude-prompt-suffix の hook を入れる（`--all` には入らない。`--statusline` と同じく使う人が選ぶもの）。`--all --uninstall` は外す。
+- `claude-kitty doctor`: 「hook: claude-prompt-suffix（文の最後の略号）」（入っていなくても任意なので OK）と「設定: prompt_suffix」の行。
 
 ### 変更
 
@@ -51,8 +57,9 @@
 
 ### 上げるときに手で行うこと
 
-- `tools/install.sh --links`（新しい `claude-waitfor` と `claude-statusline` を `~/.local/bin` にリンクする。`git pull` だけではリンクされない）。
+- `tools/install.sh --links`（新しい `claude-waitfor`・`claude-statusline`・`claude-prompt-suffix` を `~/.local/bin` にリンクする。`git pull` だけではリンクされない）。
 - `claude-statusline` を使うときだけ: `tools/install.sh --statusline`（または `settings.json` の `statusLine` を手で。[docs/statusline.md](docs/statusline.md)）。使わないなら何もしなくてよい。
+- `claude-prompt-suffix` を使うときだけ: `tools/install.sh --hooks=suffix`（または `settings.json` の `hooks.UserPromptSubmit` に手で。[docs/prompt-suffix.md](docs/prompt-suffix.md)）。CLAUDE.md に同じ略号の説明を書いているなら、入れたあと消してよい。使わないなら何もしなくてよい。
 
 ## [0.7.6] - 2026-11-23
 

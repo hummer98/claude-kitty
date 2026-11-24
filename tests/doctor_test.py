@@ -162,6 +162,27 @@ class Doctor(unittest.TestCase):
         items = self.by_name(self.w.ctx(CLAUDE_LANG_CHECK_LANGUAGE=None))
         self.assertEqual(items["hook: claude-lang-check の言語"]["status"], "warn")
 
+    def test_prompt_suffix_rows(self):
+        # suffix は任意: 入っていなくても OK（注意も出さない）。入っていて道具が無ければ NG。設定の誤りは NG
+        name = "hook: claude-prompt-suffix（文の最後の略号）"
+        settings = self.w.home / ".claude/settings.json"
+        items = self.by_name(self.w.ctx())                       # FakeWorld は全部入れる
+        self.assertEqual((items[name]["status"], items[name]["detail"]), ("ok", "入っている"))
+        (self.w.root / "config.json").write_text('{"prompt_suffix": {"suffixes": {"tldr": "要約する。"}}}')
+        self.assertEqual(self.by_name(self.w.ctx())["設定: prompt_suffix"]["status"], "ok")
+        _l, data = M.install({}, str(ROOT), ["state", "guard"])
+        settings.write_text(json.dumps(data))
+        items = self.by_name(self.w.ctx())
+        self.assertEqual(items[name]["status"], "ok")
+        self.assertIn("--hooks=suffix", items[name]["detail"])
+        data["hooks"]["UserPromptSubmit"].append({"hooks": [{"type": "command", "command": "/nonexistent/claude-prompt-suffix"}]})
+        settings.write_text(json.dumps(data))
+        self.assertEqual(self.by_name(self.w.ctx())[name]["status"], "ng")
+        (self.w.root / "config.json").write_text('{"prompt_suffix": {"suffixes": {"wdt": 3}}}')
+        items = self.by_name(self.w.ctx())
+        self.assertEqual(items["設定: prompt_suffix"]["status"], "ng")
+        self.assertIn("suffixes.wdt", items["設定: prompt_suffix"]["detail"])
+
     def test_model_policy_rows(self):
         name = "モデルの切り替え"
         cfg = self.w.root / "config.json"
@@ -341,7 +362,7 @@ class ConfigExample(unittest.TestCase):
 
     def test_every_section_present(self):
         self.assertEqual(set(self.data), {"view", "kitty", "browser", "state", "lang", "guard_hook", "session_stats", "roster",
-                                          "relay", "model_policy", "disk_watch", "statusline"})
+                                          "relay", "model_policy", "disk_watch", "statusline", "prompt_suffix"})
 
     def test_loaders_read_example(self):
         from config import load_roster_config, load_state_config, load_view_config
@@ -388,6 +409,9 @@ class ConfigExample(unittest.TestCase):
         from config import DEFAULT_STATUSLINE, load_statusline_config
         self.assertEqual(self.data["statusline"], DEFAULT_STATUSLINE)  # 写しても既定と同じ動き
         self.assertEqual(load_statusline_config(self.env, self.PATH)["weekly_roles"], ["main"])  # "left" は view.left
+        from promptsuffix import DEFAULTS as PS, load_config as load_ps
+        self.assertEqual(self.data["prompt_suffix"], PS)                # 写しても既定と同じ動き
+        self.assertEqual(load_ps(self.env, self.PATH)[1], [])
 
     def test_example_guard_blocks_nothing_when_copied(self):
         import guardhook as gh
@@ -435,6 +459,9 @@ class ConfigExample(unittest.TestCase):
         from config import DEFAULT_STATUSLINE
         for k, v in DEFAULT_STATUSLINE.items():
             self.assertEqual(default_of(k, "statusline"), f"`{json.dumps(v)}`", k)
+        from promptsuffix import DEFAULTS as PS
+        for k, v in PS.items():
+            self.assertEqual(default_of(k, "prompt_suffix"), f"`{json.dumps(v)}`", k)
         self.assertEqual(default_of("left", "view"), f"`{json.dumps(DEFAULT_VIEW['left'])}`")
 
 

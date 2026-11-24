@@ -37,7 +37,7 @@ git clone https://github.com/hummer98/claude-kitty ~/claude-kitty
 claude-kitty doctor                       # 足りないものと直し方を 1 行ずつ出す（NG が無ければ終了コード 0）
 ```
 
-- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-guard`。返答の言語を調べる `claude-lang-check` は `--hooks=lang` と明示したときだけ）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）の 1 行を足す、常駐を入れる（Linux は systemd のユーザーユニット、macOS は launchd の LaunchAgent）。部品ごとに `--links` `--hooks[=state,lang,guard]` `--kitty` `--systemd` `--launchd` で選べる。hook の command はリポジトリの `bin/` の絶対パスで書く（PATH に頼らない）。
+- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-guard`。返答の言語を調べる `claude-lang-check` は `--hooks=lang`、文の最後の略号を効かせる `claude-prompt-suffix` は `--hooks=suffix` と明示したときだけ）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）の 1 行を足す、常駐を入れる（Linux は systemd のユーザーユニット、macOS は launchd の LaunchAgent）。部品ごとに `--links` `--hooks[=state,lang,guard,suffix]` `--kitty` `--systemd` `--launchd` で選べる。hook の command はリポジトリの `bin/` の絶対パスで書く（PATH に頼らない）。
 - 既にあるものは壊さない: 別のファイルは上書きせず、既存の hook とキーは残し、同じ hook は二重に足さない。書き換える設定は `<名前>.bak-<日時>` に残す。何度流しても同じで、`--uninstall` で同じ部品を外せる。
 - kitty の設定（リモート操作とソケット）は kitty を起動し直してから効く。そのあと `claude-kitty` で kitty を開き、`claude-kitty doctor` をもう一度。
 - 役割名などの設定は `~/.config/claude-kitty/config.json`（無くても既定値で動く）。全項目の例は [config.example.json](config.example.json)、意味と既定値は [docs/config.md](docs/config.md)。
@@ -58,6 +58,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | `bin/claude-active` | どれかの役割のセッションで人が打った最後の発話からの分数と役割を 1 行で返す（読むだけ。既定 20 分以内なら 0、超えたら 1、分からなければ 2。[docs/active.md](docs/active.md)） | なし |
 | `bin/claude-presence` | 最後に人が打ってからの時間で在席・離席を見せ、離席中は実装のサブエージェントの model を軽いもの（既定 haiku）に変える（設定 `model_policy`。既定は無効。[下の節](#claude-presence離席中のモデル)） | なし |
 | `bin/claude-waitfor` | 上限時間付きで待つ: 一致するプロセスが無くなるまで（自分と呼んだシェルには一致しない）・ファイルに文字列が現れるまで。until / while のループで `pgrep -f` を待つと自分に一致して終わらないので、その代わりに使う（既定 30 分、時間切れは終了コード 124。[docs/waitfor.md](docs/waitfor.md)） | プロセスの情報（`lib/proc.py`） |
+| `bin/claude-prompt-suffix` | 任意。UserPromptSubmit hook で、指示の文の最後の略号（`wdt` = 意見だけ、`opt` = 案を出す、`pre` = 見せる、`desc 2` = 2 番を解説、`next` = 決めることだけ、`ss` = 最新のスクリーンショットを見る）の意味をモデルに渡し、画面に「略号 wdt を適用」と出す。貼り付けた文・コードブロック・コマンドの行は見ない。略号は設定で足す・変える・消す。`tools/install.sh --hooks=suffix`（[docs/prompt-suffix.md](docs/prompt-suffix.md)） | なし |
 | `bin/claude-statusline` | 任意。Claude Code のステータス行の 1 行: 名前（claude-state の色）・モデル・いまの会話の長さ（`ctx 380k`、20 万・40 万で色）・`sub: N`・統括だけ週の使用量（残り時間と %、85 % 超で橙・95 % 超で赤）。`settings.json` の `statusLine` に自分で入れるか `tools/install.sh --statusline`（[docs/statusline.md](docs/statusline.md)） | なし |
 | `bin/claude-roster` | kitty の中のセッションの名簿を保ち、kitty を起動し直したあとに元の配置・フォルダ・モデル・会話へ戻す。役目を終えた担当は `sleep` で止めてペインを閉じ、名簿に残しておいて `wake` で会話ごと戻す。`status` は 2 時間を超えて続く背景のシェルも出す（`claude-kitty doctor` も同じ）（[docs/roster.md](docs/roster.md)） | プロセスの情報（`lib/proc.py`）、保護する窓の確認だけ KWin |
 

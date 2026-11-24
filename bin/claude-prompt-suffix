@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""UserPromptSubmit hook: ユーザーの文の最後の略号（wdt・opt・pre・desc [番号]・next・ss）の意味をモデルに渡す。
+
+  claude-prompt-suffix              hook 用。stdin に UserPromptSubmit の JSON。略号を拾ったときだけ stdout に
+                                    {"systemMessage": "略号 … を適用", "hookSpecificOutput": {…, "additionalContext": …}}
+                                    を出す。何が起きても exit 0（入力を止めない）
+  claude-prompt-suffix check [FILE] 文（FILE か stdin）を調べ、拾った略号と足す文を出す（試す用。
+                                    exit 0 = 拾った、1 = 拾わない、2 = 読めない）
+  claude-prompt-suffix list         使える略号と意味（既定と設定を重ねたもの）を出す
+
+略号は設定の prompt_suffix.suffixes で足す・変える・消す（null で消す）。詳しくは docs/prompt-suffix.md。
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+
+def main(argv):
+    if argv[1:] == ["--version"]:  # 版の表示だけは設定を読まずに返す
+        from version import handle_version
+        handle_version(argv[1:], "claude-prompt-suffix")
+        return 0
+    if argv[1:2] in (["check"], ["list"]):
+        from promptsuffix import find, load_config, render
+        cfg, problems = load_config(os.environ)
+        for p in problems:
+            print(f"claude-prompt-suffix: {p}", file=sys.stderr)
+        if argv[1] == "list":
+            for name, entry in sorted(cfg["table"].items()):
+                print(f"{name}: {entry['text']}")
+                if "with_number" in entry:
+                    print(f"{name} <番号>: {entry['with_number']}")
+            return 0
+        try:
+            text = Path(argv[2]).read_text() if len(argv) > 2 else sys.stdin.read()
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"claude-prompt-suffix: 読めない: {e}", file=sys.stderr)
+            return 2
+        found = find(text, cfg["table"]) if cfg["enabled"] else []
+        context, notice = render(found, cfg, os.environ)
+        if not found:
+            print("拾わない" + ("（prompt_suffix.enabled が false か CLAUDE_PROMPT_SUFFIX=off）" if not cfg["enabled"] else ""))
+            if context:
+                print(context)
+            return 1
+        if notice:
+            print(notice)
+        print(context)
+        return 0
+    try:
+        from promptsuffix import decide
+        out = decide(sys.stdin.read(), os.environ)
+    except Exception as e:  # noqa: BLE001  hook が壊れてもユーザーの入力は止めない
+        out = None
+        try:
+            from promptsuffix import log_error
+            log_error(os.environ, f"{type(e).__name__}: {e}")
+        except Exception:  # noqa: BLE001
+            pass
+    if out:
+        sys.stdout.write(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

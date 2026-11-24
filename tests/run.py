@@ -3891,6 +3891,7 @@ SIDE_TESTS = {
     "active_test": "Active",
     "waitfor_test": "WaitFor",
     "statusline_test": "Statusline",
+    "prompt_suffix_test": "PromptSuffix",
 }
 
 

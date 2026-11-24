@@ -1,6 +1,6 @@
 # 設定ファイル（config.json）
 
-claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`・`disk_watch`・`statusline`）から読みます。
+claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`・`disk_watch`・`statusline`・`prompt_suffix`）から読みます。
 **どの節も、どの項目も省けます。** ファイルが無ければ、すべて下の表の既定値で動きます。
 
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
@@ -227,6 +227,21 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 
 - 設定が壊れていれば、既定で出したうえで、行の末尾に「設定の誤り（claude-kitty doctor）」と出す（`claude-kitty doctor` の「設定: statusline」が NG）。`state` が壊れていても同じ（名前の色は既定に戻す）。
 - 名前の色は `state.colors.<状態>.name`、`sub: N` の色は `state.subagent_colors.running`（claude-state と同じ設定）。
+
+## prompt_suffix（claude-prompt-suffix: 文の最後の略号）
+
+任意の `bin/claude-prompt-suffix`（`tools/install.sh --hooks=suffix` で入れたときだけ使う。[prompt-suffix.md](prompt-suffix.md)）の略号と文を変える。
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `enabled` | `true` | `false` で何も足さない |
+| `language` | `"ja"` | 既定の略号の文と断りの文の言語（`ja`・`en`） |
+| `suffixes` | `{}` | 既定の略号（`wdt`・`opt`・`pre`・`desc`・`next`・`ss`）に重ねる略号。名前 → 文字列（足す・置き換える）か `null`（消す）か `{"text": …, "with_number": …}`（`desc 2` のように番号を取る略号。`{n}` が番号）。文に `{screenshot}` を書くと最新のスクリーンショットのパスと時刻になる |
+| `number_lists` | `false` | `true` で、略号の無い文にも毎回「案・判断・指摘の一覧には番号を振る」を足す（`desc 2` で指せるように。毎ターン 40 トークンほど増えるので、CLAUDE.md に書く方を勧める） |
+| `notice` | `true` | 拾ったときに画面に「略号 wdt を適用」の 1 行を出す |
+| `screenshot_dir` | `null` | `ss` が見るスクリーンショットの置き場（文字列か、そのリスト）。`null` は OS の普通の場所（Linux は `<ピクチャ>/Screenshots` など、macOS は保存先の設定か `~/Desktop`） |
+
+- 正しくない項目はその項目だけ既定に戻し、正しくない略号は使わない（`claude-kitty doctor` の「設定: prompt_suffix」が NG）。止めるのは環境変数 `CLAUDE_PROMPT_SUFFIX=off`。
 
 ## 設定ファイルの外のもの
 

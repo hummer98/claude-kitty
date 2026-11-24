@@ -106,5 +106,13 @@
     "weekly_roles": ["left"],
     "weekly_thresholds": [85, 95],
     "weekly_colors": [208, 196]
+  },
+  "prompt_suffix": {
+    "enabled": true,
+    "language": "ja",
+    "suffixes": {},
+    "number_lists": false,
+    "notice": true,
+    "screenshot_dir": null
   }
 }
