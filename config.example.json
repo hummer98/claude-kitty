@@ -98,5 +98,13 @@
     "thresholds": [70, 85],
     "notify_role": null,
     "interval_sec": 60
+  },
+  "statusline": {
+    "context": true,
+    "context_thresholds": [200000, 400000],
+    "context_colors": [186, 173],
+    "weekly_roles": ["left"],
+    "weekly_thresholds": [85, 95],
+    "weekly_colors": [208, 196]
   }
 }

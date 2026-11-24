@@ -15,7 +15,10 @@
 #                      watcher と claude3.session のリンクを ~/.config/kitty に張る
 #   --systemd          contrib/systemd のユニットを ~/.config/systemd/user に写して enable --now（Linux だけ）
 #   --launchd          contrib/launchd の LaunchAgent を ~/Library/LaunchAgents に写して launchctl bootstrap（macOS だけ）
-#   --all              上の全部（常駐は OS に合う方だけ: Linux は --systemd、macOS は --launchd）
+#   --statusline       ~/.claude/settings.json の statusLine に bin/claude-statusline を入れる（任意。--all には入らず、
+#                      明示したときだけ。別の statusLine があれば置き換えない。docs/statusline.md）
+#   --all              上の全部（--statusline を除く。常駐は OS に合う方だけ: Linux は --systemd、macOS は --launchd）。
+#                      --all --uninstall は claude-statusline の statusLine も外す
 #
 # まず何をするかを見せ、変えるものがあれば確認してから行う（--yes で確認を省く。端末でなければ --yes が要る）。
 # --dry-run は見せるだけ。何度流しても同じ結果になり、--uninstall で同じ部品を外せる。
@@ -29,7 +32,7 @@
 # ~/Library/LaunchAgents）。
 
 usage() {
-	sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
@@ -51,12 +54,13 @@ AGENT_MARK="<!-- claude-kitty: tools/install.sh が contrib/launchd から作っ
 
 # --all の常駐は OS に合う方だけ（Linux で launchd の、macOS で systemd の「飛ばす」を毎回出さないように）
 case "$OS" in Darwin) all_systemd=0 all_launchd=1 ;; *) all_systemd=1 all_launchd=0 ;; esac
-do_links=0 do_hooks=0 do_kitty=0 do_systemd=0 do_launchd=0 any=0
+do_links=0 do_hooks=0 do_kitty=0 do_systemd=0 do_launchd=0 do_statusline=0 all=0 any=0
 hook_parts="" hooks_named=0
 yes=0 dry=0 uninstall=0
 for a in "$@"; do
 	case "$a" in
-	--all) do_links=1 do_hooks=1 do_kitty=1 do_systemd=$all_systemd do_launchd=$all_launchd any=1 ;;
+	--all) do_links=1 do_hooks=1 do_kitty=1 do_systemd=$all_systemd do_launchd=$all_launchd all=1 any=1 ;;
+	--statusline) do_statusline=1 any=1 ;;
 	--links) do_links=1 any=1 ;;
 	--hooks) do_hooks=1 any=1 ;;
 	--hooks=*) do_hooks=1 any=1 hook_parts=${a#--hooks=} hooks_named=1 ;;
@@ -70,7 +74,9 @@ for a in "$@"; do
 	*) echo "install.sh: 知らない引数: $a" >&2; usage 2 ;;
 	esac
 done
-[ "$any" = 1 ] || { do_links=1 do_hooks=1 do_kitty=1 do_systemd=$all_systemd do_launchd=$all_launchd; }
+[ "$any" = 1 ] || { do_links=1 do_hooks=1 do_kitty=1 do_systemd=$all_systemd do_launchd=$all_launchd all=1; }
+# ステータス行は 1 つしか持てず、使う人が選ぶもの。入れるのは --statusline のときだけで、外すのは --all でも行う
+[ "$all" = 1 ] && [ "$uninstall" = 1 ] && do_statusline=1
 # lang（返答の言語の検査）・relay（端末をまたぐ連絡）・model（モデルの切り替え）は使う人だけが --hooks=lang などで入れる。
 # 外すときは、--all で全部の hook を外す
 if [ -z "$hook_parts" ] && [ "$hooks_named" = 0 ]; then
@@ -177,6 +183,22 @@ step_hooks() {
 			note "! 設定の lang.language が無いので、claude-lang-check は何もしない（ja などを書く。docs/config.md）"
 		fi ;;
 	esac
+}
+
+# ---- statusline -------------------------------------------------------------
+
+step_statusline() {
+	echo "## Claude Code のステータス行（$SETTINGS: statusLine）"
+	set -- --settings "$SETTINGS" --repo "$REPO"
+	[ "$uninstall" = 1 ] && set -- "$@" --uninstall
+	[ "$DRY" = 1 ] && set -- "$@" --dry-run
+	out=$(python3 "$REPO/tools/merge_statusline.py" "$@")
+	rc=$?
+	[ "$DRY" = 0 ] && out=$(printf '%s\n' "$out" | grep -v '^[=!] ')
+	[ -n "$out" ] && printf '%s\n' "$out"
+	n=$(printf '%s\n' "$out" | grep -c '^[-+~] ')
+	CHANGES=$((CHANGES + n))
+	[ "$rc" = 0 ] || { FAILED=1; echo "! settings.json を直してから流し直す（何も書いていない）"; }
 }
 
 # ---- kitty ------------------------------------------------------------------
@@ -447,6 +469,7 @@ steps() {
 	CHANGES=0
 	[ "$do_links" = 1 ] && step_links
 	[ "$do_hooks" = 1 ] && step_hooks
+	[ "$do_statusline" = 1 ] && step_statusline
 	[ "$do_kitty" = 1 ] && step_kitty
 	[ "$do_systemd" = 1 ] && step_systemd
 	[ "$do_launchd" = 1 ] && step_launchd

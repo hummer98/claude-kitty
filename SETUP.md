@@ -38,6 +38,7 @@ claude-kitty doctor                        # 足りないものと直し方
 | `--kitty` | kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）を足し（末尾なので、自分の `listen_on`・`enabled_layouts`・`allow_remote_control`・`filter_notification` は上書きされる。あれば先に「!」で見せる）、`claude_state_watcher.py` と `claude3.session` のリンクを張る。kitty.conf がこのリポジトリの `kitty/kitty.conf` へのリンクなら触らない | 足した行とリンクだけ外す |
 | `--systemd` | `contrib/systemd/` のユニットを `~/.config/systemd/user/` に、パスを置き換えて写し、`daemon-reload` と `enable --now`（Linux だけ）。手で入れた中身の違うユニットは上書きしない | 自分が入れたユニットを止めて消す |
 | `--launchd` | `contrib/launchd/` の LaunchAgent を `~/Library/LaunchAgents/`（`$CLAUDE_KITTY_LAUNCH_AGENTS`）に、パス・PATH・HOME を置き換えて写し、`launchctl bootstrap gui/<uid>`（macOS だけ）。中身が変わったら `bootout` してから読み込み直す。手で入れた中身の違うものは上書きしない | 自分が入れたものを `launchctl bootout` して消す |
+| `--statusline` | 任意（`--all` には入らない）。`~/.claude/settings.json` の `statusLine` に `bin/claude-statusline` を入れる（5. の終わり、[docs/statusline.md](docs/statusline.md)）。`statusLine` が無いときだけで、別のものがあれば置き換えずに知らせる | claude-statusline の `statusLine` だけ外す（`--all --uninstall` でも） |
 
 - 引数なしは `--all` と同じで、変えるものがあれば確認を取る（端末でなければ `--yes` が要る）。`--all` の常駐は OS に合う方だけ（Linux は `--systemd`、macOS は `--launchd`）。
 - python3 が 3.9 より古ければ、何もせずに止まる（macOS は `brew install python` を案内する）。
@@ -189,6 +190,22 @@ subs=$(command -v claude-state >/dev/null 2>&1 && [ -n "$sid" ] && claude-state 
 relay=$(command -v claude-relay >/dev/null 2>&1 && [ -n "$sid" ] && claude-relay status "$sid")
 printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 ```
+
+### ステータス行に claude-statusline を使う（任意）
+
+上の例を自分で書く代わりに、同梱の `bin/claude-statusline`（python3 だけ。jq は要らない）を使えます。名前（状態の色）・モデル・いまの会話の長さ（`ctx 380k`）・`sub: N`・統括だけ週の使用量（残り時間と %）を 1 行で出します。中身・色・設定は [docs/statusline.md](docs/statusline.md)。
+
+`~/.claude/settings.json` に足す（`command` は絶対パス）:
+
+```json
+{
+  "statusLine": {"type": "command", "command": "/path/to/claude-kitty/bin/claude-statusline", "refreshInterval": 30}
+}
+```
+
+- **`statusLine` は 1 つだけ。** 既に自分の `statusLine` があるなら、上書きする前にその `command` と中身を控える（戻せるように）。自分の項目を残したいなら、自分のスクリプトから `claude-statusline` を呼んで後ろに足す形でもよい（stdin をそのまま渡す）。
+- `tools/install.sh --statusline` でも入れられる（見せてから確認を取る。別の `statusLine` があれば置き換えない）。外すのは `tools/install.sh --uninstall --statusline`。
+- 週の使用量を出す役割は設定 `statusline.weekly_roles`（既定は `view.left` の統括だけ。`["*"]` で全員）。しきい値と色も同じ節（[docs/config.md](docs/config.md#statuslineclaude-statusline-ステータス行)）。
 
 ## 6. 守るべき決まり
 

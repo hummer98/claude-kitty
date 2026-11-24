@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-statusline`（新しい道具。任意）: Claude Code のステータス行の 1 行を出す。名前（claude-state の状態の色）・モデル・いまの会話の長さ（`ctx 380k`）・`sub: N`・週の使用量（`rate_limits.seven_day` の残り時間と %）。手元の sh + jq のスクリプトでしていたことを、python3 だけで同梱するため（[docs/statusline.md](docs/statusline.md)）。
+  - 会話の長さは stdin の `context_window.current_usage`（input + cache_creation + cache_read）から読み、`context_window` の無い古い Claude Code では会話の記録の最後の `usage` から読む。会話が長いと応答が重く、圧縮の前に気づけるよう、既定で 20 万以上は淡い黄、40 万以上はくすんだ橙（週の使用量の橙 208・赤 196 と見分ける色）。
+  - 週の使用量は設定 `statusline.weekly_roles` の役割だけ（既定 `["left"]` = 統括。`["*"]` で全員）。85 % 超で橙、95 % 超で赤。
+  - しきい値と色は設定 `statusline`（[docs/config.md](docs/config.md)）。失敗しても何かしら 1 行を出す（設定の誤りは既定で出して末尾に知らせる）。
+- `tools/install.sh --statusline`: `settings.json` の `statusLine` に claude-statusline を入れる（`--all` には入らない。別の `statusLine` があれば置き換えない）。`--uninstall` は claude-statusline のものだけ外す。
+- `claude-kitty doctor`: 「設定: statusline」の行。
+
 ### 変更
 
 - `claude-state subagents`: ステータス行の区切りを「サブ: 動作 N ／ 終了済み M（最古 X日）」から、動いている数だけの `sub: N`（0 なら空）にした。終了済みは Claude Code の一覧から消えたことを知る hook が無く、数が実物と合わずに増え続けるだけで、見てもやることが無いため（ユーザーの指示）。終わった背景のサブエージェントの記録は今までどおり残す（続きで動かしたときに背景のものと分かるように）。設定 `state.subagent_colors.ended` は使わなくなった（書いてあっても読み捨てる。消さなくてよい）。

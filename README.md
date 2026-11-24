@@ -58,6 +58,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | `bin/claude-active` | どれかの役割のセッションで人が打った最後の発話からの分数と役割を 1 行で返す（読むだけ。既定 20 分以内なら 0、超えたら 1、分からなければ 2。[docs/active.md](docs/active.md)） | なし |
 | `bin/claude-presence` | 最後に人が打ってからの時間で在席・離席を見せ、離席中は実装のサブエージェントの model を軽いもの（既定 haiku）に変える（設定 `model_policy`。既定は無効。[下の節](#claude-presence離席中のモデル)） | なし |
 | `bin/claude-waitfor` | 上限時間付きで待つ: 一致するプロセスが無くなるまで（自分と呼んだシェルには一致しない）・ファイルに文字列が現れるまで。until / while のループで `pgrep -f` を待つと自分に一致して終わらないので、その代わりに使う（既定 30 分、時間切れは終了コード 124。[docs/waitfor.md](docs/waitfor.md)） | プロセスの情報（`lib/proc.py`） |
+| `bin/claude-statusline` | 任意。Claude Code のステータス行の 1 行: 名前（claude-state の色）・モデル・いまの会話の長さ（`ctx 380k`、20 万・40 万で色）・`sub: N`・統括だけ週の使用量（残り時間と %、85 % 超で橙・95 % 超で赤）。`settings.json` の `statusLine` に自分で入れるか `tools/install.sh --statusline`（[docs/statusline.md](docs/statusline.md)） | なし |
 | `bin/claude-roster` | kitty の中のセッションの名簿を保ち、kitty を起動し直したあとに元の配置・フォルダ・モデル・会話へ戻す。役目を終えた担当は `sleep` で止めてペインを閉じ、名簿に残しておいて `wake` で会話ごと戻す。`status` は 2 時間を超えて続く背景のシェルも出す（`claude-kitty doctor` も同じ）（[docs/roster.md](docs/roster.md)） | プロセスの情報（`lib/proc.py`）、保護する窓の確認だけ KWin |
 
 テスト: `python3 tests/run.py`（これ 1 つで全部。標準ライブラリだけで、kitty や Chrome は使わない。GitHub Actions も同じものを回す）

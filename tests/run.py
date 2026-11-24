@@ -3890,6 +3890,7 @@ SIDE_TESTS = {
     "disk_watch_test": "Disk",
     "active_test": "Active",
     "waitfor_test": "WaitFor",
+    "statusline_test": "Statusline",
 }
 
 

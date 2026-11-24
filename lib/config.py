@@ -415,6 +415,64 @@ def load_disk_watch_config(env, path=None):
     return out
 
 
+# 会話の長さは淡い黄・くすんだ橙にして、週の使用量（鮮やかな橙 208・赤 196）や待受中の名前（208）と見分ける
+DEFAULT_STATUSLINE = {"context": True, "context_thresholds": [200000, 400000], "context_colors": [186, 173],
+                      "weekly_roles": ["left"], "weekly_thresholds": [85, 95], "weekly_colors": [208, 196]}
+
+
+def _color_steps(sl, key, lo, hi, path):
+    """しきい値（小さい順・重なり無し）と色（0〜255、同じ数）の組。形が違えば ValueError。"""
+    ts, cs = sl.get(f"{key}_thresholds", DEFAULT_STATUSLINE[f"{key}_thresholds"]), sl.get(f"{key}_colors", DEFAULT_STATUSLINE[f"{key}_colors"])
+    if not (isinstance(ts, list) and all(isinstance(x, (int, float)) and not isinstance(x, bool) and lo <= x <= hi for x in ts)
+            and all(a < b for a, b in zip(ts, ts[1:]))):
+        raise ValueError(f"{path} の statusline.{key}_thresholds は {lo}〜{hi} の数の、小さい順のリスト: {ts!r}")
+    if not (isinstance(cs, list) and all(isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 255 for x in cs)):
+        raise ValueError(f"{path} の statusline.{key}_colors は 0〜255 の数のリスト: {cs!r}")
+    if len(cs) != len(ts):  # 数が違うと、どのしきい値の色か決まらない
+        raise ValueError(f"{path} の statusline.{key}_colors は {key}_thresholds と同じ数: {len(cs)} と {len(ts)}")
+    return list(ts), list(cs)
+
+
+def load_statusline_config(env, path=None):
+    """claude-statusline の設定 {"context", "context_thresholds", "context_colors", "weekly_roles",
+    "weekly_thresholds", "weekly_colors"} を返す（weekly_roles の "left" は view.left に置き換える）。
+
+      {"statusline": {"weekly_roles": ["left", "ops"], "context_thresholds": [150000, 300000]}}
+
+    weekly_roles は週の使用量を出す役割（セッション名か claude-state の記録の role）。"*" は全員、[] は誰にも出さない。
+    壊れていれば ValueError（claude-statusline は既定で出し、行の末尾に「設定の誤り」と添える）。"""
+    path = Path(path) if path else config_path(env)
+    out = json.loads(json.dumps(DEFAULT_STATUSLINE))
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    sl = data.get("statusline", {}) if isinstance(data, dict) else {}
+    if sl is None:
+        sl = {}
+    if not isinstance(sl, dict):
+        raise ValueError(f"{path} の statusline がオブジェクトでない")
+    unknown = sorted(set(sl) - set(DEFAULT_STATUSLINE))
+    if unknown:  # "weekly_role" などの書き間違いで、黙って既定のまま動かない
+        raise ValueError(f"{path} の statusline に知らない項目: {', '.join(unknown)}")
+    c = sl.get("context", True)
+    if not isinstance(c, bool):
+        raise ValueError(f"{path} の statusline.context は true / false: {c!r}")
+    roles = sl.get("weekly_roles", DEFAULT_STATUSLINE["weekly_roles"])
+    if not (isinstance(roles, list) and all(isinstance(x, str) and x for x in roles)):
+        raise ValueError(f"{path} の statusline.weekly_roles は役割名のリスト（\"*\" は全員、[] は出さない）: {roles!r}")
+    ct, cc = _color_steps(sl, "context", 1, 10 ** 9, path)
+    wt, wc = _color_steps(sl, "weekly", 0, 100, path)
+    view = data.get("view") if isinstance(data, dict) else None
+    left = env.get("CLAUDE_VIEW_LEFT") or (view.get("left") if isinstance(view, dict) and isinstance(view.get("left"), str)
+                                           and view.get("left") else DEFAULT_VIEW["left"])
+    out.update(context=c, context_thresholds=ct, context_colors=cc, weekly_thresholds=wt, weekly_colors=wc,
+               weekly_roles=list(dict.fromkeys(left if x == "left" else x for x in roles)))
+    return out
+
+
 MODEL_NAME = r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}$"
 
 

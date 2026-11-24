@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Claude Code のステータス行（settings.json の statusLine の command）。stdin に Claude Code の JSON を受け、1 行を出す。
+
+  名前 | モデル | ctx 380k | sub: 2 | 2d4h 41.2%
+
+  名前      session_name を claude-state の状態の色で（待受中は橙など。claude-state paint と同じ）
+  ctx       いまの会話の長さ（文脈のトークン数）。既定 20 万以上は淡い黄、40 万以上はくすんだ橙
+  sub: N    動いているサブエージェントの数（claude-state subagents と同じ。0 なら省く）
+  週の使用量  rate_limits.seven_day の残り時間と %（設定 statusline.weekly_roles の役割だけ。既定は view.left）。
+            85 % 超は橙 208、95 % 超は赤 196
+
+設定は config.json の statusline（docs/config.md）、入れ方は docs/statusline.md。失敗しても何かしら 1 行を出し、
+いつも終了コード 0（ステータス行が空になると、何が起きたか分からないため）。
+"""
+import os
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERE / "lib"))
+
+
+def state_info(env, sid):
+    """claude-state の記録と色。記録が無い・claude が動いていない・読めなければ記録は None。(info, 設定の誤り)"""
+    from config import load_state_config
+    from kstate import alive, load, state_dir, state_file
+    from state import merge_colors, merge_subagent_colors, valid_session_id
+    bad = False
+    try:
+        c = load_state_config(env)
+        colors, subc = c["colors"], c["subagent_colors"]
+    except ValueError:
+        colors, subc, bad = merge_colors(None), merge_subagent_colors(None), True
+    rec = None
+    if valid_session_id(sid):
+        e = load(state_file(state_dir(env), sid))
+        rec = e if e and alive(e) else None
+    return {"record": rec, "colors": colors, "subagent_colors": subc}, bad
+
+
+def run(text, env, now):
+    from config import DEFAULT_STATUSLINE, load_statusline_config
+    from statusline import build, parse_input
+    data = parse_input(text)
+    bad = False
+    try:
+        conf = load_statusline_config(env)
+    except ValueError:
+        import json
+        conf, bad = json.loads(json.dumps(DEFAULT_STATUSLINE)), True
+        conf["weekly_roles"] = [(env.get("CLAUDE_VIEW_LEFT") or "main") if x == "left" else x for x in conf["weekly_roles"]]
+    try:
+        state, bad_state = state_info(env, data.get("session_id"))
+    except Exception:  # noqa: BLE001 — 記録が読めなくても、色と sub を省いて出す
+        state, bad_state = None, False
+    return build(data, env, now, conf, state, config_error=bad or bad_state)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv == ["--version"]:
+        from version import handle_version
+        handle_version(argv, "claude-statusline")
+        return 0
+    try:
+        text = sys.stdin.buffer.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        text = ""
+    try:
+        line = run(text, os.environ, time.time())
+    except Exception as e:  # noqa: BLE001 — 例外で空の行にしない
+        line = f"claude-statusline: {type(e).__name__}"
+    sys.stdout.write(line or "?")
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,6 +1,6 @@
 # 設定ファイル（config.json）
 
-claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`）から読みます。
+claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`・`disk_watch`・`statusline`）から読みます。
 **どの節も、どの項目も省けます。** ファイルが無ければ、すべて下の表の既定値で動きます。
 
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
@@ -211,6 +211,22 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 - 送れずデスクトップの通知も出せなかった知らせは送り直さない（印は付くので、次は 10 ポイント下がってから超えたとき）。
 - `claude-kitty doctor` の「ディスク: <path>」の行に、使用率と、閾値を超えているか（超えていれば注意）を出す。設定が壊れていれば「設定: disk_watch」が NG になり、watch は見張りだけを止めて（色の見張りは続ける）errors.log に残す。
 - 設定を変えたら `systemctl --user restart claude-state-watch.service`（watch は起動したときに設定を読む）。
+
+## statusline（claude-statusline: ステータス行）
+
+任意の `bin/claude-statusline`（Claude Code の `statusLine` に入れたときだけ使う。[statusline.md](statusline.md)）の表示を変える。
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `context` | `true` | `false` でいまの会話の長さ（`ctx 380k`）を出さない |
+| `context_thresholds` | `[200000, 400000]` | 会話の長さの色を変えるトークン数（小さい順・重なり無し。1〜10 億）。この数**以上**で、同じ位置の色にする（既定: 20 万未満は色なし、20 万以上は淡い黄、40 万以上はくすんだ橙）。`[]` なら色を付けない |
+| `context_colors` | `[186, 173]` | `context_thresholds` の各段の色（256 色の番号 0〜255。しきい値と同じ数）。週の使用量（`208`・`196`）と待受中の名前（`208`）と見分けられるよう、淡い色にしてある |
+| `weekly_roles` | `["left"]` | 週の使用量（`rate_limits.seven_day` の残り時間と %）を出す役割のリスト。セッションの名前（`session_name`）か、claude-state の記録の役割（kitty の `role`）が当たれば出す。`"left"` は `view.left`（環境変数 `CLAUDE_VIEW_LEFT` が優先）、`"*"` は全員、`[]` は誰にも出さない。週の使用量はアカウントで 1 つなので、既定は統括だけ |
+| `weekly_thresholds` | `[85, 95]` | 週の使用量の色を変える %（0〜100、小さい順）。% の整数部がこの数を**超え**たら、同じ位置の色にする（既定: 86 % から橙、96 % から赤） |
+| `weekly_colors` | `[208, 196]` | `weekly_thresholds` の各段の色（0〜255。しきい値と同じ数） |
+
+- 設定が壊れていれば、既定で出したうえで、行の末尾に「設定の誤り（claude-kitty doctor）」と出す（`claude-kitty doctor` の「設定: statusline」が NG）。`state` が壊れていても同じ（名前の色は既定に戻す）。
+- 名前の色は `state.colors.<状態>.name`、`sub: N` の色は `state.subagent_colors.running`（claude-state と同じ設定）。
 
 ## 設定ファイルの外のもの
 

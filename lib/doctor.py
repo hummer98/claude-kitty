@@ -460,6 +460,8 @@ def check_config(ctx, rep):
     strict("model_policy", lambda: load_model_policy(ctx.env, path))
     from config import load_disk_watch_config
     strict("disk_watch", lambda: load_disk_watch_config(ctx.env, path))
+    from config import load_statusline_config
+    strict("statusline", lambda: load_statusline_config(ctx.env, path))
 
 
 # ---- デスクトップ・Chrome ------------------------------------------------------

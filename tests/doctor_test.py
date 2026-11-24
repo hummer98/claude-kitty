@@ -315,7 +315,7 @@ class ConfigExample(unittest.TestCase):
 
     def test_every_section_present(self):
         self.assertEqual(set(self.data), {"view", "kitty", "browser", "state", "lang", "guard_hook", "session_stats", "roster",
-                                          "relay", "model_policy", "disk_watch"})
+                                          "relay", "model_policy", "disk_watch", "statusline"})
 
     def test_loaders_read_example(self):
         from config import load_roster_config, load_state_config, load_view_config
@@ -359,6 +359,9 @@ class ConfigExample(unittest.TestCase):
         from config import DEFAULT_DISK_WATCH, load_disk_watch_config
         self.assertEqual(load_disk_watch_config(self.env, self.PATH), self.data["disk_watch"])
         self.assertEqual(self.data["disk_watch"], DEFAULT_DISK_WATCH)  # 写しただけでは送らない（既定と同じ）
+        from config import DEFAULT_STATUSLINE, load_statusline_config
+        self.assertEqual(self.data["statusline"], DEFAULT_STATUSLINE)  # 写しても既定と同じ動き
+        self.assertEqual(load_statusline_config(self.env, self.PATH)["weekly_roles"], ["main"])  # "left" は view.left
 
     def test_example_guard_blocks_nothing_when_copied(self):
         import guardhook as gh
@@ -403,6 +406,9 @@ class ConfigExample(unittest.TestCase):
         from config import DEFAULT_DISK_WATCH
         for k, v in DEFAULT_DISK_WATCH.items():
             self.assertEqual(default_of(k, "disk_watch"), f"`{json.dumps(v)}`", k)
+        from config import DEFAULT_STATUSLINE
+        for k, v in DEFAULT_STATUSLINE.items():
+            self.assertEqual(default_of(k, "statusline"), f"`{json.dumps(v)}`", k)
         self.assertEqual(default_of("left", "view"), f"`{json.dumps(DEFAULT_VIEW['left'])}`")
 
 
