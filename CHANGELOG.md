@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-25
+
 ### 追加
 
 - claude-prompt-suffix に略号 `sub`（作業はサブエージェントにさせ、自分は依頼・確認・報告にとどめる。コードは別のサブエージェントにレビューさせる）と `htpre`（結果を HTML のページにして保存し、開いて見せる）を足した。並べて `sub htpre` とすると「サブエージェントに調べさせ、HTML のレポートで見せる」。
@@ -432,7 +434,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.9...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/hummer98/claude-kitty/compare/v0.7.9...v0.8.0
 [0.7.9]: https://github.com/hummer98/claude-kitty/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/hummer98/claude-kitty/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/hummer98/claude-kitty/compare/v0.7.6...v0.7.7
