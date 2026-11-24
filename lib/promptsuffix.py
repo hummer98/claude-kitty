@@ -56,6 +56,9 @@ BUILTIN = {
                                 "直前の返答に番号の付いた項目が無ければ、どこを指すかユーザーに確認してから解説する。"},
         "next": "ユーザーが決めることだけを、1 行目にその数を書いて、番号を振って並べる。自分で決められるものは決めておく。",
         "ss": "最新のスクリーンショットを開いて見てから答える。{screenshot}",
+        "aq": "作業を始める前に、分からない点や決めておきたい前提を番号を振って聞き、答えを待つ。"
+              "自分で決められる小さな選択は決めて、その内容を書いておく。聞くことが無ければ「質問なし」と書いて進める。"
+              "ほかの略号の指示は、答えを受けてから従う。",
     },
     "en": {
         "wdt": "The user is asking for an opinion only, not for work. Do not change files, commit, or ask other sessions or "
@@ -69,6 +72,9 @@ BUILTIN = {
                                 "previous reply. If that reply has no numbered items, ask the user what it refers to first."},
         # next は英語の文の終わりの語（what comes next）と重なりやすいので、en の既定には入れない（使うなら suffixes で足す）
         "ss":"Open and look at the latest screenshot before answering. {screenshot}",
+        "aq": "Before starting, ask numbered questions about anything unclear or any assumption worth settling, and wait "
+              "for the answers. Settle minor choices yourself and state them. If there is nothing to ask, say \"No questions\" "
+              "and go ahead. Follow any other shorthand only after the answers.",
     },
 }
 LANGUAGES = tuple(BUILTIN)

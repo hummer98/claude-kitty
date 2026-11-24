@@ -209,7 +209,7 @@ printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 
 ### 文の最後の略号を効かせる claude-prompt-suffix（任意）
 
-指示の文の最後に `wdt`（意見だけ）・`opt`（案を出す）・`pre`（見せる）・`desc 2`（2 番を解説）・`next`（決めることだけ）・`ss`（最新のスクリーンショットを見る）を付けると、その意味を UserPromptSubmit hook がモデルに渡し、画面に「略号 wdt を適用」と出します。CLAUDE.md に書いてモデルに任せるより確実に効きます。
+指示の文の最後に `wdt`（意見だけ）・`opt`（案を出す）・`pre`（見せる）・`desc 2`（2 番を解説）・`next`（決めることだけ）・`ss`（最新のスクリーンショットを見る）・`aq`（始める前に質問する）を付けると、その意味を UserPromptSubmit hook がモデルに渡し、画面に「略号 wdt を適用」と出します。CLAUDE.md に書いてモデルに任せるより確実に効きます。
 
 - 入れる: `tools/install.sh --hooks=suffix`（`--all` には入らない）。手で入れるなら `hooks.UserPromptSubmit` に `{"type": "command", "command": "/path/to/claude-kitty/bin/claude-prompt-suffix", "timeout": 10}`。
 - 拾うのは最後の行の最後の単独の語だけ（貼り付けた文・コードブロック・`$ ` や `--` のあるコマンドの行・引用は見ない）。略号の足し方・変え方・消し方、スクリーンショットの置き場は [docs/prompt-suffix.md](docs/prompt-suffix.md)。

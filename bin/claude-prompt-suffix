@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook: ユーザーの文の最後の略号（wdt・opt・pre・desc [番号]・next・ss）の意味をモデルに渡す。
+"""UserPromptSubmit hook: ユーザーの文の最後の略号（wdt・opt・pre・desc [番号]・next・ss・aq）の意味をモデルに渡す。
 
   claude-prompt-suffix              hook 用。stdin に UserPromptSubmit の JSON。略号を拾ったときだけ stdout に
                                     {"systemMessage": "略号 … を適用", "hookSpecificOutput": {…, "additionalContext": …}}

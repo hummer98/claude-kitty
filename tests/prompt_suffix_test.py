@@ -49,7 +49,7 @@ class Base(unittest.TestCase):
 
 class Find(Base):
     def test_each_default(self):
-        for name in ("wdt", "opt", "pre", "desc", "next", "ss"):
+        for name in ("wdt", "opt", "pre", "desc", "next", "ss", "aq"):
             self.assertEqual(self.find(f"これはどう？ {name}"), [(name, None)], name)
 
     def test_case_insensitive_and_alone(self):
@@ -121,6 +121,14 @@ class Find(Base):
             self.assertEqual(self.find(text), [], text)
         self.assertEqual(self.find("どう思う wdt  \n\n"), [("wdt", None)])    # 後ろの空白と空行は許す
 
+    def test_aq_needs_its_own_word(self):
+        # aq はほかの語の一部（aqua・aom-aq・faq）では拾わない
+        for text in ("aqua", "aom-aq", "faq", "aq2", "これはaq?"):
+            self.assertEqual(self.find(text), [], text)
+        self.assertEqual(self.find("これを直して aq"), [("aq", None)])
+        self.assertIn("質問なし", self.hook("これを直して aq")["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self.find("これを直してaq"), [("aq", None)])
+
     def test_english_sentence_middle_next(self):
         self.assertEqual(self.find("do the next step and commit"), [])
         self.assertEqual(self.find("next we should fix it"), [])
@@ -186,7 +194,7 @@ class Config(Base):
     def test_defaults_without_file(self):
         cfg, problems = self.cfg()
         self.assertEqual(problems, [])
-        self.assertEqual(set(cfg["table"]), {"wdt", "opt", "pre", "desc", "next", "ss"})
+        self.assertEqual(set(cfg["table"]), {"wdt", "opt", "pre", "desc", "next", "ss", "aq"})
         self.assertTrue(cfg["enabled"] and cfg["notice"])
         self.assertFalse(cfg["number_lists"])
 
@@ -241,6 +249,7 @@ class Config(Base):
         out = self.hook("thoughts? wdt")
         self.assertIn("Treated the trailing \"wdt\"", out["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(out["systemMessage"], "Shorthand wdt applied")
+        self.assertIn("No questions", self.hook("ok aq")["hookSpecificOutput"]["additionalContext"])
         self.assertIsNone(self.hook("what comes next"))       # en の既定に next は無い（英語の文の終わりと重なる）
         self.write_cfg({"language": "en", "suffixes": {"next": "List decisions."}})
         self.assertIsNotNone(self.hook("ok next"))
