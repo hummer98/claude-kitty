@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-11-24
+
 ### 追加
 
 - `claude-statusline`（新しい道具。任意）: Claude Code のステータス行の 1 行を出す。名前（claude-state の状態の色）・モデル・いまの会話の長さ（`ctx 380k`）・`sub: N`・週の使用量（`rate_limits.seven_day` の残り時間と %）。手元の sh + jq のスクリプトでしていたことを、python3 だけで同梱するため（[docs/statusline.md](docs/statusline.md)）。
@@ -398,7 +400,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.6...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.7...HEAD
+[0.7.7]: https://github.com/hummer98/claude-kitty/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/hummer98/claude-kitty/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/hummer98/claude-kitty/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/hummer98/claude-kitty/compare/v0.7.3...v0.7.4
