@@ -104,7 +104,14 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 
 ## guard_hook（claude-guard: 状態で働く安全装置）
 
-`guard_hook.guards` に、ガードの名前（英数字と `_ . -`、`all` は不可）ごとに書きます。**既定ではガードは 1 つも無く、何も止めません。**
+`guard_hook.guards` に、ガードの名前（英数字と `_ . -`、`all` は不可）ごとに書きます。**既定ではガードは 1 つも無く、ガードとしては何も止めません。**
+ただし、until / while のループの中の `pgrep -f`（待つシェル自身に一致して終わらない形）だけは、既定で常に止めます（`wait_loop_check`）。
+
+| 項目（`guard_hook` の直下） | 既定 | 意味 |
+|---|---|---|
+| `wait_loop_check` | `true` | `false` で、ループの中の `pgrep -f` を止める判定を切る（[guard-hook.md](guard-hook.md#待つシェル自身に一致する-pgrep--f-のループ)）。true / false でない値は有効のまま「問題:」に出す |
+
+ガードごとの項目:
 
 | 項目 | 既定 | 意味 |
 |---|---|---|

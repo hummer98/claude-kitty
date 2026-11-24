@@ -35,6 +35,7 @@
     "min": 20
   },
   "guard_hook": {
+    "wait_loop_check": true,
     "guards": {
       "presenting": {
         "enabled": false,

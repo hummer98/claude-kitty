@@ -1938,6 +1938,160 @@ def find_reasons(guard, tool, tool_input, cwd, env, session=None, owner_ok=True,
     return []
 
 
+# ---- 待つシェル自身に一致する pgrep -f のループ ------------------------------------
+# Claude Code は Bash のコマンドを bash -c '<コマンド>' で動かすので、until ! pgrep -f "X"; do sleep 2; done の
+# pgrep は待つシェル自身のコマンド行（X を含む）に一致し、ループが終わらない（2026-11 に 15〜19 時間残り、
+# セッションの status が shell のままで claude-roster restart が断った）。保護するプロセスやガードの設定に関係なく、
+# この形だけは常に止める（設定 guard_hook.wait_loop_check: false で切れる）。
+
+WAIT_LOOP_KEY = "wait_loop_check"
+# 値をとる pgrep のオプション（procps-ng と BSD）。パターンの位置を取り違えないため
+PGREP_VALUE_SHORT = set("dgGPstuUFr")
+PGREP_VALUE_LONG = {"--delimiter", "--pgroup", "--group", "--parent", "--session", "--terminal", "--euid", "--uid",
+                    "--pidfile", "--ns", "--nslist", "--runstates", "--signal", "--cgroup", "--env"}
+LOOP_START = {"while", "until"}
+# 自分のコマンド行に一致しない形: 頭の文字を [x] で囲んだもの（[l]uajit。^ の後でも）と、^ の後に文字そのものが
+# 続くもの（^\./app・^./app・^luajit。シェルのコマンド行は /bin/bash -c … で始まるので一致しない。^/bin/bash の
+# ように、シェルの頭そのものを書いたパターンは見逃す）
+PGREP_SAFE = re.compile(r"^\^?\[[^\]]+\]|^\^(?:\\?\.)?(?:[A-Za-z0-9_/~-]|\\[./-])")
+
+
+def _pgrep_full_pattern(args):
+    """pgrep の引数から、-f（--full）付きのときのパターン。-f が無い・-x（全体の一致）・パターンが無いなら None。"""
+    full = exact = False
+    pattern = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            pattern = args[i + 1] if i + 1 < len(args) else None
+            break
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            full = full or name == "--full"
+            exact = exact or name == "--exact"
+            i += 2 if (name in PGREP_VALUE_LONG and "=" not in a) else 1
+            continue
+        if a.startswith("-") and len(a) > 1:
+            for j, c in enumerate(a[1:], 1):
+                if c == "f":
+                    full = True
+                elif c == "x":
+                    exact = True
+                elif c in PGREP_VALUE_SHORT:
+                    if j == len(a) - 1:
+                        i += 1          # 値は次の語（-u me）
+                    break               # 値は残りの字（-ume）
+            i += 1
+            continue
+        pattern = a
+        break
+    return pattern if (full and not exact and pattern) else None
+
+
+def self_match_waits(command, in_loop=False, depth=0):
+    """until / while のループの中の、待つシェル自身に一致する pgrep -f のパターンのリスト（字句で読む）。
+
+    ループでない単発の pgrep -f、-x、頭を [x] で囲んだパターン、^ で頭を決めたパターンは数えない。
+    同じコマンドの中で代入した変数（P="…"; until ! pgrep -f "$P"）はその値で見る（代入の字もシェルのコマンド行に
+    残るので一致する）。値の分からない変数は数えない。bash -c の中身とコマンド置換の中も読む。"""
+    found = []
+    if depth > 4 or not isinstance(command, str) or "pgrep" not in command:
+        return found
+    subs = []
+    stack = []
+    vars_ = {}
+
+    def add(pats):
+        for p in pats:
+            if p not in found:
+                found.append(p)
+
+    for item in segments(tokenize(command, subs)):
+        if item[0] != "cmd":
+            continue
+        words = item[1]
+        while words:
+            w = words[0]
+            if w in LOOP_START:
+                stack.append("wait")
+            elif w in ("for", "select"):
+                stack.append("for")
+                words = []                       # for x in … の頭はコマンドでない
+                break
+            elif w == "done":
+                if stack:
+                    stack.pop()
+            elif w not in RESERVED:
+                break
+            words = words[1:]
+        looping = in_loop or "wait" in stack
+        for w in words + item[2]:
+            for m in list(SUB_IN_WORD.finditer(w)) + list(SUB_LINE.finditer(w)):
+                n = int(m.group(1))
+                if n < len(subs):
+                    add(self_match_waits(subs[n][0], looping, depth + 1))
+        if not words:
+            continue
+        assigns, rest = _split_assignments(words)
+        if not rest:
+            vars_.update(assigns)
+            continue
+        rest, _more = _unwrap(rest)
+        rest = _unmark(rest)
+        if not rest:
+            continue
+        name = os.path.basename(rest[0])
+        if name in SHELLS:
+            script = _shell_c(rest[1:])
+            if script:
+                add(self_match_waits(script, looping, depth + 1))
+            continue
+        if name != "pgrep" or not looping:
+            continue
+        pat = _pgrep_full_pattern(rest[1:])
+        if pat is None:
+            continue
+        pat = SUB_IN_WORD.sub(lambda m: subs[int(m.group(1))][1] if int(m.group(1)) < len(subs) else "", pat)
+        value = _expand(pat, vars_)
+        if VAR.search(value) or "$(" in value or "`" in value:
+            continue                              # 値の分からない変数（シェルのコマンド行には $P の字しかない）
+        if PGREP_SAFE.match(value):
+            continue
+        add([value])
+    return found
+
+
+def _sq(text):
+    return "'" + text.replace("'", "'\"'\"'") + "'"
+
+
+def wait_loop_text(patterns):
+    pat = patterns[0]
+    more = f"（ほか {len(patterns) - 1} 件）" if len(patterns) > 1 else ""
+    bracket = f"[{pat[0]}]{pat[1:]}" if pat[:1].isalnum() else "[l]uajit …"
+    return (f"{TAG} until/while のループの中の pgrep -f {_sq(pat)}{more} は、待つシェル自身に一致して終わらない"
+            f"（Claude Code は bash -c '<コマンド>' で動かすので、シェルのコマンド行にパターンの字が入る）。"
+            f"claude-waitfor proc {_sq(pat)} を使う（上限時間付き。既定 30 分）。"
+            f"ループのまま書くなら、頭の文字を囲んだ pgrep -f {_sq(bracket)} の形にする")
+
+
+def load_wait_loop_check(env, path=None):
+    """(有効か, 問題の文か None)。既定は有効。設定が読めないときも有効のまま（この判定は設定に頼らない）。"""
+    path = Path(path) if path else config_path(env)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return True, None
+    sec = data.get("guard_hook") if isinstance(data, dict) else None
+    if not isinstance(sec, dict) or WAIT_LOOP_KEY not in sec:
+        return True, None
+    v = sec[WAIT_LOOP_KEY]
+    if isinstance(v, bool):
+        return v, None
+    return True, f"guard_hook.{WAIT_LOOP_KEY} が true / false でない（{v!r}）。有効のまま"
+
+
 class _Blank(dict):
     def __missing__(self, key):
         return "{" + key + "}"
@@ -1961,13 +2115,21 @@ def evaluate(data, env, probe=Probe, now=None, path=None, assume=False):
     tool_input = data.get("tool_input")
     if not isinstance(tool, str) or not isinstance(tool_input, dict):
         return None
+    texts = []
+    cmd = tool_input.get("command") if tool == "Bash" else None
+    if isinstance(cmd, str) and "pgrep" in cmd:      # 安い前置きの判定（ほとんどのコマンドは設定も読まない）
+        enabled, problem = load_wait_loop_check(env, path)
+        if problem:
+            log_error(env, problem, once=True)
+        pats = self_match_waits(cmd) if enabled else []
+        if pats:
+            texts.append(wait_loop_text(pats))
     guards, problems = load_guard_config(env, path)
     for p in problems:
         log_error(env, p, once=True)
     allowed = allow_names(env.get(ALLOW_ENV))
     cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else None
     session = data.get("session_id") if isinstance(data.get("session_id"), str) else None
-    texts = []
     for g in guards:
         if not g["enabled"] or allowed & {"all", g["name"]}:
             continue
@@ -2073,6 +2235,11 @@ def status_lines(env, probe=Probe, now=None, path=None):
             parts.append(f"{ALLOW_ENV} で通す")
         parts.extend(owner_status(g, env, now))
         lines.append("、".join(parts))
+    enabled, problem = load_wait_loop_check(env, path)
+    lines.append("待つシェル自身に一致する pgrep -f のループ: " + ("常に止める" if enabled else
+                 f"止めない（guard_hook.{WAIT_LOOP_KEY}: false）"))
+    if problem:
+        problems = problems + [problem]
     for p in problems:
         lines.append(f"問題: {p}")
     return lines, bool(problems)

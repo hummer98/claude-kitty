@@ -364,6 +364,7 @@ class ConfigExample(unittest.TestCase):
         import guardhook as gh
         data = {"tool_name": "Bash", "tool_input": {"command": "claude-view all"}, "cwd": "/", "session_id": "s"}
         self.assertIsNone(gh.evaluate(data, self.env, path=self.PATH))
+        self.assertEqual(gh.load_wait_loop_check(self.env, self.PATH), (True, None))
 
     def test_docs_mention_every_key(self):
         doc = (ROOT / "docs/config.md").read_text()
@@ -371,7 +372,7 @@ class ConfigExample(unittest.TestCase):
             self.assertIn(f"## {section}", doc)
             keys = list(body)
             if section == "guard_hook":
-                keys = list(body["guards"]["presenting"])
+                keys = list(body["guards"]["presenting"]) + [k for k in body if k != "guards"]
             for k in keys:
                 self.assertTrue(re.search(rf"`{re.escape(k)}[`.]", doc), f"{section}.{k} が docs/config.md に無い")
         for k in self.data["state"]["colors"]:

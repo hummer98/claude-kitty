@@ -1384,5 +1384,127 @@ class Robustness(Base):
         self.assertEqual(self.cfg.read_text(), before)
 
 
+class WaitLoop(Base):
+    """until / while のループの中の pgrep -f は、待つシェル自身に一致して終わらないので、ガードに関係なく止める。"""
+
+    BLOCK = [
+        ('until ! pgrep -f "luajit tests/run.lua" >/dev/null; do sleep 2; done; echo ok', "luajit tests/run.lua"),
+        ("cd ~/x && until ! pgrep -f rail_v2.sh >/dev/null; do sleep 3; done; tail -22 b.log", "rail_v2.sh"),
+        ("while pgrep -f 'svc worker'; do sleep 1; done", "svc worker"),
+        ("while true; do\n  if ! pgrep -af tool.py; then break; fi\n  sleep 2\ndone", "tool.py"),
+        ('while [ -n "$(pgrep -f foo)" ]; do sleep 1; done', "foo"),
+        ("while x=$(pgrep -f foo); do :; done", "foo"),
+        ("while `pgrep -f foo`; do :; done", "foo"),
+        ('bash -c "until ! pgrep -f inner; do sleep 1; done"', "inner"),
+        ("while timeout 5 pgrep -f foo; do sleep 1; done", "foo"),
+        ("while pgrep -u me -f foo; do sleep 1; done", "foo"),
+        ("while pgrep -fu me foo; do sleep 1; done", "foo"),
+        ("while pgrep --full -- foo; do sleep 1; done", "foo"),
+        ('P="luajit t"; until ! pgrep -f "$P"; do sleep 1; done', "luajit t"),   # 代入の字もシェルの行に残る
+        ("for i in 1 2; do while pgrep -f foo; do sleep 1; done; done", "foo"),
+        ("while pgrep -f '^.*app'; do sleep 1; done", "^.*app"),
+    ]
+    PASS = [
+        'pgrep -f "luajit tests/run.lua"',                                  # 単発
+        "pgrep -f foo && echo running",
+        'until ! pgrep -f "[l]uajit tests/run.lua" >/dev/null; do sleep 2; done',  # [x] 形式
+        "while pgrep -f '^[l]uajit'; do sleep 1; done",
+        "while pgrep -f '^\\./TransportFever3'; do sleep 2; done",          # ^ で頭を決めた形
+        "while pgrep -f ^\\./TransportFever3; do sleep 2; done",
+        "while pgrep -fx 'luajit x'; do sleep 1; done",                     # 全体の一致
+        "while pgrep luajit; do sleep 1; done",                             # -f なし（名前だけ）
+        'while read p; do pgrep -f "$p"; done < list',                      # 値の分からない変数
+        "for i in 1 2; do pgrep -f foo; done",                              # for は待ちのループでない
+        "while true; do sleep 1; done; pgrep -f foo",                       # ループの後の単発
+        'echo "while pgrep -f x; do sleep 1; done"',                        # 文字列
+        "cat <<'EOF'\nwhile pgrep -f x; do :; done\nEOF",                   # ヒアドキュメントの本文
+        "git commit -m 'until pgrep -f x; do'",
+        "while read l; do echo $l; done < <(pgrep -f foo)",
+        "claude-waitfor proc 'luajit tests/run.lua'",
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self.write_config({})                    # ガードなしでも効く
+
+    def test_blocks_without_any_guard(self):
+        for cmd, pat in self.BLOCK:
+            r = self.bash(cmd, probe=fake_probe(process=False))
+            self.assertIsNotNone(r, cmd)
+            self.assertIn(f"claude-waitfor proc '{pat}'", r, cmd)
+            self.assertIn("待つシェル自身に一致して終わらない", r)
+            self.assertTrue(r.startswith(gh.TAG))
+
+    def test_passes(self):
+        for cmd in self.PASS:
+            self.assertIsNone(self.bash(cmd, probe=fake_probe(process=False)), cmd)
+            self.assertEqual(gh.self_match_waits(cmd), [], cmd)
+
+    def test_suggests_bracket_form(self):
+        r = self.bash('until ! pgrep -f "luajit tests/run.lua"; do sleep 2; done')
+        self.assertIn("pgrep -f '[l]uajit tests/run.lua'", r)
+        self.assertIn("'\"'\"'", gh.wait_loop_text(["it's"]))       # 一重引用符の中の ' を閉じて書く
+
+    def test_guard_allowances_do_not_release_it(self):
+        # CLAUDE_GUARD_ALLOW・許可のファイルはガードの名前ごとの通す道で、この判定は外さない
+        gh.write_state(self.env, "all", "allow", 30, "e2e")
+        self.assertIsNotNone(self.bash("while pgrep -f foo; do sleep 1; done", env=dict(self.env, CLAUDE_GUARD_ALLOW="all")))
+
+    def test_no_config_file_still_blocks(self):
+        self.cfg.unlink()
+        self.assertIsNotNone(self.bash("while pgrep -f foo; do sleep 1; done"))
+
+    def test_can_be_turned_off(self):
+        self.cfg.write_text(json.dumps({"guard_hook": {"wait_loop_check": False, "guards": {}}}))
+        self.assertIsNone(self.bash("while pgrep -f foo; do sleep 1; done"))
+        lines, bad = gh.status_lines(self.env, fake_probe())
+        self.assertFalse(bad)
+        self.assertIn("止めない（guard_hook.wait_loop_check: false）", "\n".join(lines))
+
+    def test_bad_switch_keeps_it_on_and_is_reported(self):
+        self.cfg.write_text(json.dumps({"guard_hook": {"wait_loop_check": "no", "guards": {}}}))
+        self.assertIsNotNone(self.bash("while pgrep -f foo; do sleep 1; done"))
+        lines, bad = gh.status_lines(self.env, fake_probe())
+        self.assertTrue(bad)
+        self.assertTrue(any(l.startswith("問題: guard_hook.wait_loop_check") for l in lines))
+
+    def test_status_line_default(self):
+        lines, _bad = gh.status_lines(self.env, fake_probe())
+        self.assertIn("待つシェル自身に一致する pgrep -f のループ: 常に止める", lines)
+
+    def test_combined_with_guard_reasons(self):
+        # ガードの止める理由と並べて返す（どちらも消さない）
+        self.write_config(self.default_guards())
+        r = self.bash(f"rm -rf {self.shared_dir}/m1; while pgrep -f foo; do sleep 1; done",
+                      probe=fake_probe(process=True))
+        self.assertIn("claude-waitfor proc 'foo'", r)
+        self.assertIn("app-running", r)
+
+    def test_no_pgrep_reads_nothing(self):
+        # pgrep の字が無いコマンドは、この判定のために設定も読まない（hook を遅くしない）
+        with mock.patch.object(gh, "load_wait_loop_check", side_effect=AssertionError("読んだ")):
+            self.assertIsNone(self.bash("while true; do sleep 1; done", probe=fake_probe()))
+
+    def test_real_hook(self):
+        e = dict(os.environ, **self.env)
+        e.pop("CLAUDE_GUARD_ALLOW", None)
+        stdin = json.dumps(self.hook_input("Bash", {"command": "until ! pgrep -f x.lua; do sleep 2; done"}))
+        r = subprocess.run([sys.executable, str(BIN), "hook"], input=stdin, text=True, capture_output=True, env=e)
+        self.assertEqual(r.returncode, 0)
+        out = json.loads(r.stdout)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("claude-waitfor proc 'x.lua'", out["permissionDecisionReason"])
+
+    def test_pgrep_options(self):
+        self.assertEqual(gh._pgrep_full_pattern(["-f", "a"]), "a")
+        self.assertEqual(gh._pgrep_full_pattern(["-l", "-f", "a"]), "a")
+        self.assertEqual(gh._pgrep_full_pattern(["-cf", "a"]), "a")          # -c は数だけ（値をとらない）
+        self.assertEqual(gh._pgrep_full_pattern(["-f", "-n", "--", "-a"]), "-a")
+        self.assertEqual(gh._pgrep_full_pattern(["--full", "--uid=me", "a"]), "a")
+        self.assertIsNone(gh._pgrep_full_pattern(["-f"]))
+        self.assertIsNone(gh._pgrep_full_pattern(["a"]))
+        self.assertIsNone(gh._pgrep_full_pattern(["-f", "--exact", "a"]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
