@@ -194,6 +194,8 @@ step_statusline() {
 	[ "$DRY" = 1 ] && set -- "$@" --dry-run
 	out=$(python3 "$REPO/tools/merge_statusline.py" "$@")
 	rc=$?
+	# 実行の回は「そのまま」に加えて「! 別の statusLine がある」も省く。見せる回に出した注意で、実行の回は
+	# 何もしないため（merge_hooks.py の ! は settings.json が壊れたときだけで、そのときは見せる回で止まる）
 	[ "$DRY" = 0 ] && out=$(printf '%s\n' "$out" | grep -v '^[=!] ')
 	[ -n "$out" ] && printf '%s\n' "$out"
 	n=$(printf '%s\n' "$out" | grep -c '^[-+~] ')

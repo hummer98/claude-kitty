@@ -300,6 +300,32 @@ class Doctor(unittest.TestCase):
         self.assertFalse(json.loads(r.stdout)["ok"])
 
 
+    def test_statusline_row(self):
+        # statusLine は任意: 無し・別のもの・claude-statusline のどれでも ok。claude-statusline の道具が無いときだけ NG
+        sp = self.w.home / ".claude/settings.json"
+        base = json.loads(sp.read_text())
+
+        def row(sl):
+            sp.write_text(json.dumps(dict(base, **({} if sl is None else {"statusLine": sl}))))
+            return self.by_name(self.w.ctx())["statusLine"]
+        r = row(None)
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("無し", r["detail"])
+        r = row({"type": "command", "command": "~/.claude/mine.sh"})
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("別のもの", r["detail"])
+        r = row({"type": "command", "command": str(ROOT / "bin/claude-statusline")})
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("claude-statusline（", r["detail"])
+        r = row({"type": "command", "command": "~/.local/bin/claude-statusline"})  # FakeWorld のリンク
+        self.assertEqual(r["status"], "ok")
+        r = row({"type": "command", "command": "/nonexistent/bin/claude-statusline"})
+        self.assertEqual(r["status"], "ng")
+        self.assertIn("install.sh --links", r["fix"])
+        sp.write_text("{broken")
+        self.assertNotIn("statusLine", self.by_name(self.w.ctx()))  # settings.json の行で NG にする
+
+
 class ConfigExample(unittest.TestCase):
     """config.example.json の全部の節が、各道具の読み込みで問題なく読め、docs/config.md に全部の項目がある。"""
 

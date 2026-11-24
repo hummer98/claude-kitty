@@ -349,18 +349,44 @@ def hook_programs_missing(ctx, M, data, part):
         prog = M.program(c)
         if not prog:
             continue
-        p = prog.replace("${HOME}", str(ctx.home)).replace("$HOME", str(ctx.home))
-        if p == "~" or p.startswith("~/"):
-            p = str(ctx.home) + p[1:]       # 調べる環境の HOME（doctor を動かしたプロセスの HOME ではない）
-        else:
-            p = os.path.expanduser(p)       # ~user の形
-        if "/" in p:
-            ok = os.path.isfile(p) and os.access(p, os.X_OK)
-        else:
-            ok = bool(ctx.which(p))
-        if not ok and prog not in lost:
+        if not program_found(ctx, prog) and prog not in lost:
             lost.append(prog)
     return lost
+
+
+def program_found(ctx, prog):
+    """command の最初の語の道具が、絶対パス（~・$HOME は調べる環境の HOME）でも PATH でも見つかるか。"""
+    p = prog.replace("${HOME}", str(ctx.home)).replace("$HOME", str(ctx.home))
+    if p == "~" or p.startswith("~/"):
+        p = str(ctx.home) + p[1:]       # 調べる環境の HOME（doctor を動かしたプロセスの HOME ではない）
+    else:
+        p = os.path.expanduser(p)       # ~user の形
+    if "/" in p:
+        return os.path.isfile(p) and os.access(p, os.X_OK)
+    return bool(ctx.which(p))
+
+
+def check_statusline(ctx, rep):
+    """settings.json の statusLine が claude-statusline か・別のものか・無いか（読むだけ。どれも任意なので NG にしない。
+    claude-statusline なのに道具が見つからないときだけ NG: ステータス行が黙って空になるため）。"""
+    import merge_hooks as M
+    import merge_statusline as MS
+    try:
+        data = M.load(ctx.settings)
+    except M.Broken:
+        return  # settings.json の行で NG にする
+    sl = data.get("statusLine")
+    if sl is None:
+        rep.ok("statusLine", "無し（claude-statusline は任意。使うなら tools/install.sh --statusline。docs/statusline.md）")
+    elif not MS.ours(sl):
+        shown = sl.get("command") if isinstance(sl, dict) else sl
+        rep.ok("statusLine", f"別のもの（{shown!r}。claude-statusline は使っていない）")
+    elif not program_found(ctx, M.program(sl["command"])):
+        rep.ng("statusLine", f"claude-statusline だが道具が見つからない: {sl['command']}",
+               "tools/install.sh --links でリンクを張るか、settings.json の command をこのリポジトリの "
+               f"{ctx.repo / 'bin' / 'claude-statusline'} に書き直す")
+    else:
+        rep.ok("statusLine", f"claude-statusline（{sl['command']}）")
 
 
 # ---- systemd / launchd ----------------------------------------------------------
@@ -744,7 +770,7 @@ def check_bg_shells(ctx, rep):
         rep.ok("背景のシェル", f"{bgshell.LONG_SECONDS // 3600} 時間を超えて続くものは無い（セッション {len(sessions)} 件）")
 
 
-CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_systemd, check_config, check_desktop,
+CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_statusline, check_systemd, check_config, check_desktop,
           check_relay, check_model_policy, check_disk, check_bg_shells]
 MARK = {"ok": "OK  ", "ng": "NG  ", "warn": "注意", "skip": "--  "}
 

@@ -118,11 +118,13 @@ def context_tokens(data):
     """(トークン数か None, 出どころ "context_window" / "transcript" / None)。
 
     context_window があればそれだけを使う。current_usage は最初の応答の前と /compact の直後に null（か 0）で、
-    そのとき記録の最後の usage は圧縮の前の大きさなので、記録には戻らない（出さない）。"""
+    そのとき記録の最後の usage は圧縮の前の大きさなので、記録には戻らない（出さない）。total_input_tokens も
+    そのとき前の値が残りうるので、使うのは current_usage の鍵そのものが無い版のときだけ。"""
     cw = data.get("context_window")
     if isinstance(cw, dict):
-        n = _usage_sum(cw.get("current_usage"))
-        if not n:
+        if "current_usage" in cw:
+            n = _usage_sum(cw.get("current_usage"))
+        else:
             t = _num(cw.get("total_input_tokens"))
             n = int(t) if t else None
         return (n, "context_window") if n else (None, "context_window")
@@ -153,14 +155,15 @@ def left_text(sec):
 
 
 def weekly_segment(data, now, conf):
-    """週の使用量「2d4h 41.2%」。色は整数部がしきい値を超えたら（前の sh 版の ${pct%%.*} -gt 85 と同じ）。"""
+    """週の使用量「2d4h 41.2%」（% は小数 1 桁まで）。色は丸める前の整数部がしきい値を超えたら
+    （前の sh 版の ${pct%%.*} -gt 85 と同じ。95.97 は「96%」と見えても赤にしない）。"""
     rl = data.get("rate_limits")
     sd = rl.get("seven_day") if isinstance(rl, dict) else None
     pct = _num(sd.get("used_percentage")) if isinstance(sd, dict) else None
     if pct is None:
         return ""
     reset = _num(sd.get("resets_at"))
-    text = f"{pct:g}%"
+    text = f"{round(pct, 1):g}%"  # 小数 1 桁まで（41.2%。API の 41.23456 をそのまま並べない）
     if reset is not None:
         text = f"{left_text(reset - int(now))} {text}"  # 秒の端数を切る（date +%s と同じ）
     return ansi(text, step_color(int(pct), conf["weekly_thresholds"], conf["weekly_colors"], strict=True))

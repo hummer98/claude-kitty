@@ -12,7 +12,7 @@ dev-a | Opus | ctx 380k | sub: 2 | 2d4h 41.2%
 | モデル | `model.display_name` | なし |
 | `ctx 380k` | いまの会話の長さ（文脈に入っているトークンの数。下の「会話の長さ」） | 既定は 20 万未満なし、20 万以上は淡い黄（186）、40 万以上はくすんだ橙（173） |
 | `sub: N` | 動いているサブエージェントの数（`claude-state subagents` と同じ。0 なら省く） | 控えめな青（110） |
-| 週の使用量 | `rate_limits.seven_day` の残り時間（`2d4h`・`3h`・`59m`）と使った % | % の整数部が 85 を超えたら橙（208）、95 を超えたら赤（196） |
+| 週の使用量 | `rate_limits.seven_day` の残り時間（`2d4h`・`3h`・`59m`）と使った %（小数 1 桁まで） | % の整数部が 85 を超えたら橙（208）、95 を超えたら赤（196） |
 
 - 名前の色と `sub: N` は claude-state の hook（[SETUP.md の 5.](../SETUP.md#5-状態の色claude-state)）が入っているときだけ。無ければ名前は色なし、`sub` は出ない。
 - 週の使用量は設定 `statusline.weekly_roles` の役割だけに出す（既定 `["left"]` = `view.left` の統括。アカウントで 1 つの数なので、全員に出すと同じものが並ぶだけのため。全員なら `["*"]`）。`rate_limits` は claude.ai の Pro / Max などの契約で、最初の応答のあとにだけ来る。無ければ省く。
@@ -23,10 +23,10 @@ dev-a | Opus | ctx 380k | sub: 2 | 2d4h 41.2%
 stdin の `context_window` から読みます（[公式の説明](https://code.claude.com/docs/en/statusline)）。
 
 1. `context_window.current_usage` の `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`（`used_percentage` と同じ数え方。出力は入れない）。
-2. それが無ければ `context_window.total_input_tokens`（同じ合計）。
+2. `current_usage` の鍵そのものが無ければ `context_window.total_input_tokens`（同じ合計）。鍵があって `null` のときは使わない（下）。
 3. `context_window` そのものが無い古い Claude Code では、`transcript_path`（会話の記録）の末尾 256 KB から、本体（サブエージェントの行でない）の最後の `usage` の同じ合計。
 
-最初の応答の前と `/compact` の直後は `current_usage` が `null`（か 0）になります。そのときは出しません（記録の最後の `usage` は圧縮の前の大きさなので、記録には戻らない）。
+最初の応答の前と `/compact` の直後は `current_usage` が `null`（か 0）になります。そのときは出しません（記録の最後の `usage` と `total_input_tokens` は圧縮の前の大きさが残りうるので、どちらにも戻らない）。
 
 ## 入れ方（任意）
 
@@ -45,7 +45,7 @@ stdin の `context_window` から読みます（[公式の説明](https://code.c
 
 - `statusLine` が無いときだけ入れる。別の `statusLine` があれば置き換えず、`!` の行で知らせて何もしない。
 - `tools/install.sh --uninstall --statusline`（`--all --uninstall` でも）は、claude-statusline の `statusLine` だけを外す（別のものは触らない）。
-- 入れたか・設定が読めるかは `claude-kitty doctor`（「設定: statusline」の行）。
+- 入れたか・設定が読めるかは `claude-kitty doctor`（「statusLine」の行に claude-statusline か・別のものか・無しか、「設定: statusline」の行に設定が読めるか。statusLine は任意なので、claude-statusline なのに道具が見つからないときだけ NG）。
 
 ## 確かめる
 

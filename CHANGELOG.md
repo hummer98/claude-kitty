@@ -13,7 +13,7 @@
   - 週の使用量は設定 `statusline.weekly_roles` の役割だけ（既定 `["left"]` = 統括。`["*"]` で全員）。85 % 超で橙、95 % 超で赤。
   - しきい値と色は設定 `statusline`（[docs/config.md](docs/config.md)）。失敗しても何かしら 1 行を出す（設定の誤りは既定で出して末尾に知らせる）。
 - `tools/install.sh --statusline`: `settings.json` の `statusLine` に claude-statusline を入れる（`--all` には入らない。別の `statusLine` があれば置き換えない）。`--uninstall` は claude-statusline のものだけ外す。
-- `claude-kitty doctor`: 「設定: statusline」の行。
+- `claude-kitty doctor`: 「設定: statusline」と「statusLine」（claude-statusline か・別のものか・無しか。読むだけ）の行。
 
 ### 変更
 
@@ -51,7 +51,8 @@
 
 ### 上げるときに手で行うこと
 
-- `tools/install.sh --links`（新しい `claude-waitfor` を `~/.local/bin` にリンクする。`git pull` だけではリンクされない）。
+- `tools/install.sh --links`（新しい `claude-waitfor` と `claude-statusline` を `~/.local/bin` にリンクする。`git pull` だけではリンクされない）。
+- `claude-statusline` を使うときだけ: `tools/install.sh --statusline`（または `settings.json` の `statusLine` を手で。[docs/statusline.md](docs/statusline.md)）。使わないなら何もしなくてよい。
 
 ## [0.7.6] - 2026-11-23
 

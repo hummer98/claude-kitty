@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tests"))
 import statusline as SL  # noqa: E402
 from config import DEFAULT_STATUSLINE, load_statusline_config  # noqa: E402
 
@@ -86,16 +87,22 @@ class Segments(unittest.TestCase):
         self.assertEqual([SL.format_tokens(n) for n in (0, 999, 1000, 1499, 380_400, 999_499, 999_600, 1_250_000)],
                          ["0", "999", "1k", "1k", "380k", "999k", "1.0M", "1.2M"])
 
-    def test_context_falls_back_to_total_input_tokens(self):
-        self.assertEqual(SL.context_tokens({"context_window": {"total_input_tokens": 5000, "current_usage": None}}),
-                         (5000, "context_window"))
+    def test_context_falls_back_to_total_input_tokens_only_without_current_usage_key(self):
+        self.assertEqual(SL.context_tokens({"context_window": {"total_input_tokens": 5000}}), (5000, "context_window"))
+        # 鍵があって null / 0（最初の応答の前・/compact の直後）なら、total_input_tokens に前の値が残っていても出さない
+        for cu in (None, usage(), {}):
+            with self.subTest(cu=cu):
+                cw = {"total_input_tokens": 480_000, "current_usage": cu}
+                self.assertEqual(SL.context_tokens({"context_window": cw}), (None, "context_window"))
+                self.assertEqual(SL.build({"session_name": "x", "context_window": cw}, {}, NOW, conf()), "x")
 
     def test_context_after_compact_shows_nothing_even_with_transcript(self):
         # /compact の直後は current_usage が null / 0。記録の最後の usage は圧縮の前の大きさなので使わない
         with tempfile.TemporaryDirectory() as d:
             t = Path(d) / "t.jsonl"
             t.write_text(json.dumps({"message": {"usage": usage(read=500_000)}}) + "\n")
-            for cw in ({"current_usage": None, "total_input_tokens": 0}, {"current_usage": usage()}):
+            for cw in ({"current_usage": None, "total_input_tokens": 0}, {"current_usage": usage()},
+                       {"current_usage": None, "total_input_tokens": 300_000}):
                 with self.subTest(cw=cw):
                     self.assertEqual(SL.context_tokens({"context_window": cw, "transcript_path": str(t)}),
                                      (None, "context_window"))
@@ -138,8 +145,17 @@ class Segments(unittest.TestCase):
         for pct, color in ((85, None), (85.9, None), (86, 208), (95, 208), (95.99, 208), (96, 196), (100, 196)):
             with self.subTest(pct=pct):
                 s = SL.weekly_segment({"rate_limits": weekly(pct)}, NOW, c)
-                text = f"2d4h {pct:g}%"
+                text = f"2d4h {round(pct, 1):g}%"
                 self.assertEqual(s, text if color is None else col(text, color))
+
+    def test_weekly_percent_one_decimal(self):
+        c = conf(weekly_thresholds=[], weekly_colors=[])
+        for pct, text in ((41.23456, "41.2%"), (41.0, "41%"), (7, "7%"), (99.96, "100%"), (0.04, "0%")):
+            with self.subTest(pct=pct):
+                self.assertEqual(SL.weekly_segment({"rate_limits": {"seven_day": {"used_percentage": pct}}}, NOW, c), text)
+        # 色は丸める前の整数部（95.97 は 96.0% と見えても 95 を超えない = 橙のまま）
+        s = SL.weekly_segment({"rate_limits": {"seven_day": {"used_percentage": 95.97}}}, NOW, conf())
+        self.assertEqual(s, col("96%", 208))
 
     def test_weekly_left_time_forms(self):
         c = conf(weekly_thresholds=[], weekly_colors=[])
@@ -332,20 +348,30 @@ class InstallSh(unittest.TestCase):
     """tools/install.sh: statusLine は --statusline と明示したときだけ入れ、外すのは --statusline か --all --uninstall。"""
 
     def setUp(self):
+        import install_test as IT  # 偽の systemctl / launchctl（本物の常駐に触らない）
         self.tmp = tempfile.TemporaryDirectory()
-        self.home = Path(self.tmp.name)
-        (self.home / ".claude").mkdir()
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "home"
+        (self.home / ".claude").mkdir(parents=True)
         self.settings = self.home / ".claude/settings.json"
         self.settings.write_text("{}")
+        fake = self.root / "fake"
+        fake.mkdir()
+        for name, body in (("systemctl", IT.FAKE_SYSTEMCTL), ("launchctl", IT.FAKE_LAUNCHCTL)):
+            (fake / name).write_text(body)
+            (fake / name).chmod(0o755)
+        self.fake = fake
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def sh(self, *args):
-        env = {"HOME": str(self.home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CLAUDE_KITTY_UNAME": "Linux",
-               "CLAUDE_KITTY_SYSTEMCTL": "false"}
+    def sh(self, *args, os_name="Linux"):
+        env = {"HOME": str(self.home), "PATH": f"{self.home}/.local/bin:/usr/bin:/bin", "LANG": "C.UTF-8",
+               "CLAUDE_KITTY_UNAME": os_name, "TMPDIR": str(self.root),
+               "CLAUDE_KITTY_SYSTEMCTL": str(self.fake / "systemctl"), "FAKE_SYSTEMD": str(self.root / "sd"),
+               "CLAUDE_KITTY_LAUNCHCTL": str(self.fake / "launchctl"), "FAKE_LAUNCHD": str(self.root / "launchd")}
         return subprocess.run(["sh", str(ROOT / "tools/install.sh"), "--yes", *args], env=env, capture_output=True,
-                              text=True, timeout=60)
+                              text=True, timeout=120)
 
     def line(self):
         return json.loads(self.settings.read_text()).get("statusLine")
@@ -360,6 +386,30 @@ class InstallSh(unittest.TestCase):
         self.assertIsNotNone(self.line())
         self.sh("--uninstall", "--statusline")
         self.assertIsNone(self.line())
+
+    def test_all_and_no_args_do_not_install(self):
+        for args in (("--all",), ()):
+            with self.subTest(args=args):
+                r = self.sh(*args)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("claude-state", self.settings.read_text())  # ほかの部品は入った（何もしないで終わったのではない）
+                self.assertIsNone(self.line())
+                self.assertNotIn("statusLine", r.stdout)
+
+    def test_uninstall_all_and_no_args_remove_only_ours(self):
+        for args in (("--all",), ()):
+            with self.subTest(args=args):
+                self.assertEqual(self.sh("--statusline").returncode, 0)
+                self.assertIsNotNone(self.line())
+                r = self.sh("--uninstall", *args)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIsNone(self.line())
+        other = {"type": "command", "command": "~/.claude/mine.sh"}
+        data = json.loads(self.settings.read_text())
+        data["statusLine"] = other
+        self.settings.write_text(json.dumps(data))
+        self.sh("--uninstall")
+        self.assertEqual(self.line(), other)
 
     def test_other_statusline_is_kept(self):
         other = {"type": "command", "command": "~/.claude/mine.sh"}
