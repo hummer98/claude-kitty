@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-11-25
+
 ### 追加
 
 - claude-prompt-suffix に略号 `aq`（any question）を足した。作業を始める前に、分からない点や決めておきたい前提を番号を振って聞き、答えを待つ。自分で決められる小さな選択は決めて書いておく。聞くことが無ければ「質問なし」と書いて進める。ほかの略号と並べると、先に質問して答えを受けてから従う。`ask` は句点の無い英文の終わりと重なりやすいので避けた。
@@ -422,7 +424,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.8...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.9...HEAD
+[0.7.9]: https://github.com/hummer98/claude-kitty/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/hummer98/claude-kitty/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/hummer98/claude-kitty/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/hummer98/claude-kitty/compare/v0.7.5...v0.7.6
