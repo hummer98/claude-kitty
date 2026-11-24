@@ -16,7 +16,7 @@
     "done_dwell_seconds": 2,
     "watch_sockets": null,
     "notice": {"contains": [], "prefix": []},
-    "subagent_colors": {"running": 110, "ended": 245}
+    "subagent_colors": {"running": 110}
   },
   "kitty": {
     "desktop": null,

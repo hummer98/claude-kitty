@@ -71,7 +71,7 @@ Flatpak / Snap の Chrome（`command` に `flatpak run …` を書いたとき�
 | `watch_sockets` | `null` | `claude-state watch` が見る kitty のソケット（`"unix:/…"` のリスト）。`null` なら `$XDG_RUNTIME_DIR/kitty-*` の動いているもの全部 |
 | `notice.contains` | `[]` | 他のセッションからのメッセージの本文にこれのどれかがあれば「通知」とみて、色を変えない |
 | `notice.prefix` | `[]` | 本文がこれのどれかで始まれば「通知」 |
-| `subagent_colors.running` / `.ended` | `110` / `245` | `claude-state subagents`（ステータス行のサブエージェントの要約）の色。`null` は色なし |
+| `subagent_colors.running` | `110` | `claude-state subagents`（ステータス行の `sub: N`）の色。`null` は色なし。前の版の `.ended`（終了済みの色）は、終了済みを出さなくなったので読み捨てる（書いてあっても断らない。値が 0〜255 か null でなければ今までどおり断る） |
 
 `notice` の既定は空で、他のセッションからのメッセージはどれも普通の依頼と同じに色を変えます。セッション同士で「返事も作業も要らない知らせ」の決まった言い回しを使うなら、それを書きます。日本語で連絡するチームの例（0.4 までの既定）:
 

@@ -277,7 +277,7 @@ def transition(prev, event, payload, now):
         tasks = payload.get("background_tasks")
         bg = isinstance(tasks, list) and any(isinstance(t, dict) and t.get("id") == a for t in tasks)
         if bg or (agents.get(a) or {}).get("bg"):
-            # 背景のサブエージェント: Claude Code の一覧に残るので、終わった時刻を残す（ステータス行の要約用）
+            # 背景のサブエージェント: 終わった時刻と bg の印を残す（SendMessage で続きを動かしたときに背景のものと分かるように）
             agents[a] = dict(agents.get(a) or {"type": payload.get("agent_type"), "start": now}, end=now, bg=True)
             _trim_ended(agents)
         else:
@@ -417,41 +417,26 @@ def paint(text, state, colors):
     return text if n is None else f"\033[38;5;{n}m{text}\033[0m"
 
 
-DEFAULT_SUBAGENT_COLORS = {"running": 110, "ended": 245}  # 動いているもの: 控えめな青、終わって残っているもの: 灰色
-
-
-def age_ja(seconds):
-    """経った時間を短く（分・時間・日）。"""
-    s = max(0, int(seconds))
-    if s < 3600:
-        return f"{s // 60}分"
-    if s < 86400:
-        return f"{s // 3600}時間"
-    return f"{s // 86400}日"
+DEFAULT_SUBAGENT_COLORS = {"running": 110}  # 動いているもの: 控えめな青
+# 前の版の「終了済み」の色。表示をやめたので、設定に残っていても断らずに読み捨てる（後方互換）
+IGNORED_SUBAGENT_COLORS = ("ended",)
 
 
 def subagent_summary(rec, now, colors=None):
-    """ステータス行の 1 区切り「サブ: 動作 N ／ 終了済み M（最古 X日）」。どちらも 0 なら空文字。
+    """ステータス行の 1 区切り「sub: N」（動いているサブエージェントの数）。0 なら空文字。
 
-    終了済みは、背景のサブエージェントで、終わったあとも Claude Code の一覧に残っているもの
-    （本体が TaskStop で止めたものは記録から外す）。
+    終わった背景のサブエージェントは数えない。Claude Code の一覧から消えたことを知る hook が無く、
+    数が実物と合わずに増え続けるだけで、見てもやることが無いため（記録は bg の印のために残す）。
+    now は前の版との呼び出しの互換のために受ける。
     """
     c = dict(DEFAULT_SUBAGENT_COLORS, **(colors or {}))
     raw = (rec or {}).get("agents")
     agents = [v for v in raw.values() if isinstance(v, dict)] if isinstance(raw, dict) else []
-    running = [v for v in agents if v.get("end") is None]
-    ended = [v["end"] for v in agents if isinstance(v.get("end"), (int, float))]
-    if not running and not ended:
+    n = sum(1 for v in agents if v.get("end") is None)
+    if not n:
         return ""
-
-    def col(n, text):
-        return text if n is None else f"\033[38;5;{n}m{text}\033[0m"
-    parts = []
-    if running:
-        parts.append(col(c["running"], f"動作 {len(running)}"))
-    if ended:
-        parts.append(col(c["ended"], f"終了済み {len(ended)}（最古 {age_ja(now - min(ended))}）"))
-    return "サブ: " + " ／ ".join(parts)
+    text = f"sub: {n}"
+    return text if c.get("running") is None else f"\033[38;5;{c['running']}m{text}\033[0m"
 
 
 def merge_subagent_colors(user):
@@ -461,9 +446,11 @@ def merge_subagent_colors(user):
     if not isinstance(user, dict):
         raise ValueError(f"state.subagent_colors がオブジェクトでない: {user!r}")
     for k, x in user.items():
-        if k not in out or not (x is None or (isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 255)):
+        known = k in out or k in IGNORED_SUBAGENT_COLORS
+        if not known or not (x is None or (isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 255)):
             raise ValueError(f"state.subagent_colors.{k} は 0〜255 か null: {x!r}")
-        out[k] = x
+        if k in out:
+            out[k] = x
     return out
 
 

@@ -7,7 +7,7 @@
   claude-state paint SESSION_ID TEXT   TEXT を状態の色で出す（ステータス行用）
   claude-state list [--json] [--all]   統括用。1 行 1 セッションで role・状態・続いている時間
   claude-state marks [--clear]   standby などのタブの題の「●」を付け直す（--clear は全部外す）
-  claude-state subagents [SESSION_ID]  ステータス行用。「サブ: 動作 N ／ 終了済み M（最古 X日）」（どちらも 0 なら何も出さない）
+  claude-state subagents [SESSION_ID]  ステータス行用。動いているサブエージェントの数「sub: N」（0 なら何も出さない）
   claude-state repaint [--to SOCKET]   記録から全ペインの背景を塗り直す（kitty が設定を読み直すと色が消えるため）
   claude-state watch [--to SOCKET]... [--interval 1]   常駐。done のペインを見たら idle に戻す（systemd のユーザーサービスで動かす）。
                                  ディスクの使用率も見て、閾値を超えたら知らせる（config.json の disk_watch。lib/diskwatch.py）

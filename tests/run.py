@@ -1440,7 +1440,7 @@ from guard import guarded_in_front  # noqa: E402
 from state import (DEFAULT_COLORS, MARK, background_for, duration, format_list, kitty_conf_background,  # noqa: E402
                    list_rows, main_tab_ids, merge_colors, nested_claude, paint, parse_hook_input,
                    strip_mark, tab_mark_ops, transition, valid_session_id, viewing)
-from state import STATES, age_ja, is_notice, merge_notice, merge_subagent_colors, repaint_ops, subagent_summary  # noqa: E402
+from state import STATES, is_notice, merge_notice, merge_subagent_colors, repaint_ops, subagent_summary  # noqa: E402
 
 STATE_BIN = Path(__file__).resolve().parent.parent / "bin" / "claude-state"
 SHOW_BIN = Path(__file__).resolve().parent.parent / "bin" / "claude-show"
@@ -1991,24 +1991,29 @@ class TurnOrigin(unittest.TestCase):
 
 class SubagentSummary(unittest.TestCase):
     def test_empty(self):
-        for rec in (None, {}, {"agents": {}}, {"agents": "x"}, {"agents": {"a": None}}):
+        for rec in (None, {}, {"agents": {}}, {"agents": "x"}, {"agents": {"a": None}}, {"agents": {"a": "x"}}):
             self.assertEqual(subagent_summary(rec, 100), "", rec)
 
-    def test_running_and_ended(self):
+    def test_running_only(self):
+        # 終わった背景のもの（end が時刻）は数えない。数が実物と合わずに増え続けるだけなので
         rec = {"agents": {"a": {"end": None}, "b": {"end": None}, "c": {"end": 100 - 3 * 86400 - 5},
                           "d": {"end": 100 - 3600}}}
-        self.assertEqual(subagent_summary(rec, 100, {"running": None, "ended": None}),
-                         "サブ: 動作 2 ／ 終了済み 2（最古 3日）")
-        self.assertEqual(subagent_summary(rec, 100),
-                         "サブ: \033[38;5;110m動作 2\033[0m ／ \033[38;5;245m終了済み 2（最古 3日）\033[0m")
-        only_ended = {"agents": {"c": {"end": 0}}}
-        self.assertEqual(subagent_summary(only_ended, 7200, {"ended": None}), "サブ: 終了済み 1（最古 2時間）")
-        self.assertEqual(subagent_summary({"agents": {"a": {}}}, 0, {"running": None}), "サブ: 動作 1")
+        self.assertEqual(subagent_summary(rec, 100, {"running": None}), "sub: 2")
+        self.assertEqual(subagent_summary(rec, 100), "\033[38;5;110msub: 2\033[0m")
+        self.assertEqual(subagent_summary({"agents": {"c": {"end": 0}}}, 7200), "")  # 終わったものだけなら空
+        self.assertEqual(subagent_summary({"agents": {"a": {}}}, 0, {"running": None}), "sub: 1")
+        self.assertEqual(subagent_summary({"agents": {"a": {}}}, 0, {"running": 70}), "\033[38;5;70msub: 1\033[0m")
+        # 前の版の設定（ended の色）を渡されても使わない
+        self.assertEqual(subagent_summary(rec, 100, {"running": None, "ended": 245}), "sub: 2")
 
-    def test_age_and_colors(self):
-        self.assertEqual([age_ja(x) for x in (-1, 59, 600, 3600, 86399, 86400 * 9)], ["0分", "0分", "10分", "1時間", "23時間", "9日"])
-        self.assertEqual(merge_subagent_colors({"running": 70})["ended"], 245)
-        for bad in ([], {"x": 1}, {"running": 300}, {"ended": True}):
+    def test_colors(self):
+        self.assertEqual(merge_subagent_colors(None), {"running": 110})
+        self.assertEqual(merge_subagent_colors({"running": 70}), {"running": 70})
+        self.assertEqual(merge_subagent_colors({"running": None}), {"running": None})
+        # 前の版の ended は後方互換で受けて読み捨てる（値が壊れていれば今までどおり断る）
+        self.assertEqual(merge_subagent_colors({"running": 70, "ended": 245}), {"running": 70})
+        self.assertEqual(merge_subagent_colors({"ended": None}), {"running": 110})
+        for bad in ([], {"x": 1}, {"running": 300}, {"running": True}, {"ended": True}, {"ended": 256}):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 merge_subagent_colors(bad)
 
@@ -2016,11 +2021,18 @@ class SubagentSummary(unittest.TestCase):
         bt = [{"id": "a1", "type": "subagent", "status": "running"}]
         _, rec = run_events([("UserPromptSubmit", {}), ("SubagentStart", {"agent_id": "a1"}),
                              ("SubagentStart", {"agent_id": "f1"}), ("Stop", {"background_tasks": bt})])
-        self.assertEqual(subagent_summary(rec, 1000, {"running": None}), "サブ: 動作 1")  # 前面の f1 は Stop で終わり
+        self.assertEqual(subagent_summary(rec, 1000, {"running": None}), "sub: 1")  # 前面の f1 は Stop で終わり
         rec = transition(rec, "SubagentStop", {"agent_id": "a1", "background_tasks": bt}, 1000)
-        self.assertEqual(subagent_summary(rec, 1000 + 86400 * 2, {"ended": None}), "サブ: 終了済み 1（最古 2日）")
-        rec = transition(rec, "PostToolUse", {"tool_name": "TaskStop", "tool_input": {"task_id": "a1"}}, 1001)
-        self.assertEqual(subagent_summary(rec, 2000), "")
+        self.assertEqual(rec["agents"]["a1"]["end"], 1000)  # 記録は残す（bg の印。続きで動かしたときのため）
+        self.assertEqual(subagent_summary(rec, 1000 + 86400 * 2), "")  # 表示はしない
+        rec = transition(rec, "SubagentStart", {"agent_id": "a1"}, 2000)  # SendMessage で続きを動かした
+        self.assertTrue(rec["agents"]["a1"]["bg"])
+        self.assertEqual(subagent_summary(rec, 2000, {"running": None}), "sub: 1")
+        rec = transition(rec, "SubagentStop", {"agent_id": "a1"}, 2001)  # background_tasks が無くても背景と分かる
+        self.assertEqual(rec["agents"]["a1"]["end"], 2001)
+        rec = transition(rec, "PostToolUse", {"tool_name": "TaskStop", "tool_input": {"task_id": "a1"}}, 2002)
+        self.assertNotIn("a1", rec["agents"])
+        self.assertEqual(subagent_summary(rec, 3000), "")
 
 
 class StateHookInput(unittest.TestCase):
@@ -2784,7 +2796,7 @@ class ClaudeStateCli(unittest.TestCase):
         self.hook("SubagentStart", {"agent_id": "a1"})
         (self.d / "c.json").write_text(json.dumps({"state": {"subagent_colors": {"running": None}}}))
         r = self.cli("subagents", self.SID, CLAUDE_KITTY_CONFIG=str(self.d / "c.json"))
-        self.assertEqual((r.returncode, r.stdout), (0, "サブ: 動作 1"))
+        self.assertEqual((r.returncode, r.stdout), (0, "sub: 1"))
         self.assertEqual(self.cli("subagents", "../x").stdout, "")
 
     def test_unchanged_state_does_not_call_kitten(self):

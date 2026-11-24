@@ -182,7 +182,7 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 
 - 許可を断る（No）か Esc で止めると、Stop も PostToolUseFailure も来ない（実物で確認した。入力欄のまま 60 秒の `idle_prompt` も来なかった）。待受中のまま残り、次に打ったとき（UserPromptSubmit）に消える。`idle_prompt` が来れば、そこで本体を止まったことにする。
 - 許可に答えてから長いツールが終わるまでは、待受中のまま（答えたことを知らせる hook が無い）。並行する別のツールの終わりでは外さない。同じエージェントが 2 秒より後に別のツールを呼び始めたら、断られたと見なして外す。
-- 終わった背景のサブエージェントの記録は、本体が TaskStop で止めるか、そのセッションの記録が消えるまで残る（ステータス行の要約用。新しい 50 件まで）。
+- 終わった背景のサブエージェントの記録は、本体が TaskStop で止めるか、そのセッションの記録が消えるまで残る（SendMessage で続きを動かしたときに背景のものと分かるように。新しい 50 件まで）。ステータス行には出さない。
 - Stop の時点で `kitten @ ls` に失敗すると、見ているペインでも done になる（watch が、done になってから 2 秒後に消す）。
 - 同じセッションの hook は 1 つずつ書く。ロックを 5 秒で取れなければ、そのイベントを捨てて `errors.log` に残す。
 - タブの題を明示していないタブ（kitty が中の題を出しているタブ）には「●」を付けられない（`set-tab-title` で題を固定してしまうため）。
@@ -204,7 +204,7 @@ Claude Code の hook から呼び、セッションの状態をペインの背�
 - `claude-state list [--json] [--all]`: 統括用。1 行 1 セッションで role・状態・続いている時間（waiting・done・working・idle の順）。`--all` は claude が動いていない古い記録も出す。
 - `claude-state get [SESSION_ID]` / `claude-state paint SESSION_ID TEXT`: ステータス行用（状態の 1 語 / TEXT を状態の色で）。SESSION_ID を省くと `$CLAUDE_CODE_SESSION_ID`。
 - `claude-state marks [--clear]`: タブの題の「●」を付け直す（ふつうは hook と claude-view が行う）。
-- `claude-state subagents [SESSION_ID]`: ステータス行用。`サブ: 動作 N ／ 終了済み M（最古 X日）` の 1 区切り（動いているものは控えめな青、終わったまま Claude Code の一覧に残っている背景のものは灰色で、いちばん古いものが終わってからの時間）。どちらも 0 なら何も出さない。色は `state.subagent_colors`（`{"running": 110, "ended": 245}`、null で色なし）。終了済みは、本体が TaskStop で止めたら外し、それ以外はセッションの記録が続く限り残す（Claude Code の一覧から消えたことを知る hook が無いため）。
+- `claude-state subagents [SESSION_ID]`: ステータス行用。動いているサブエージェントの数を `sub: N` の 1 区切りで出す（控えめな青）。0 なら何も出さない。色は `state.subagent_colors.running`（既定 `110`、null で色なし）。終わった背景のサブエージェントは数えない（Claude Code の一覧から消えたことを知る hook が無く、数が実物と合わずに増え続けるだけなので）。
 - `claude-state repaint [--to SOCKET]`: 記録から全ペインの背景を塗り直す（watcher の無い kitty で設定を読み直したあとなど）。
 - 状態は `$XDG_RUNTIME_DIR/claude-state/<session_id>.json`（state・waits・agents・window・socket・role・pid など）。同じペインで新しいセッションが始まると古い記録は消す。別のペインで resume したら、前のペインを使う記録が無ければ前のペインの色を戻す。
 - main（統括のいるタブ。統括がいない kitty では表示中のタブ）以外のタブに待受中のペインがいれば（done には付けない）、そのタブの題の頭に「● 」を付け、いなくなれば外す。claude-view は並べ替えの前に外し（standby タブを題で探すため）、あとで付け直す。

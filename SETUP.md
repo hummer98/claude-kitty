@@ -183,7 +183,7 @@ input=$(cat)
 sid=$(printf '%s' "$input" | jq -r '.session_id // empty')
 name=$(printf '%s' "$input" | jq -r '.session_name // "?"')
 command -v claude-state >/dev/null 2>&1 && [ -n "$sid" ] && name=$(claude-state paint "$sid" "$name")
-# サブエージェントの要約（動いている数 / 終わったまま残っている数と、いちばん古いものからの時間）。無ければ空
+# 動いているサブエージェントの数（sub: N）。無ければ空
 subs=$(command -v claude-state >/dev/null 2>&1 && [ -n "$sid" ] && claude-state subagents "$sid")
 # 別の端末から届いていれば「端末 mac-a から 1 通」（claude-relay を使うときだけ。7.）
 relay=$(command -v claude-relay >/dev/null 2>&1 && [ -n "$sid" ] && claude-relay status "$sid")
