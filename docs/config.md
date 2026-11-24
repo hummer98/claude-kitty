@@ -240,7 +240,7 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `number_lists` | `false` | `true` で、略号の無い文にも毎回「案・判断・指摘の一覧には番号を振る」を足す（`desc 2` で指せるように。毎ターン 40 トークンほど増えるので、CLAUDE.md に書く方を勧める） |
 | `notice` | `true` | 拾ったときに画面に「略号 wdt を適用」の 1 行を出す |
 | `screenshot_dir` | `null` | `ss` が見るスクリーンショットの置き場（文字列か、そのリスト。glob・`~` を使える）。`null` は OS の普通の場所（Linux は `<ピクチャ>/Screenshots`・Spectacle の保存先・Steam など、macOS は保存先の設定・`~/Desktop`・Steam） |
-| `screenshot_by_cwd` | `{}` | 作業フォルダ → 置き場（文字列かリスト）。フォルダの区切りで前方一致する一番長いものを、`screenshot_dir` より先に使う |
+| `screenshot_by_cwd` | `{}` | 作業フォルダ → 置き場（文字列かリスト）。両方を realpath にして、フォルダの区切りで前方一致する一番長いものを、`screenshot_dir` より先に使う（キーに glob は使えない） |
 | `screenshot_names` | `null` | スクリーンショットとみなす名前（大文字小文字を区別しない glob のリスト）。`null` は既定（`Screenshot*`・`スクリーンショット*`・`Bildschirmfoto*` などと Steam の `YYYYMMDDhhmmss_N.jpg`）。`["*"]` で全部の画像 |
 | `screenshot_max_age_min` | `120` | 一番新しいものがこの分数より古ければ「新しいスクリーンショットは無い（最新は…）」と書く。`null` で古さを問わない |
 

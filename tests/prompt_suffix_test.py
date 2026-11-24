@@ -66,6 +66,37 @@ class Find(Base):
         self.assertEqual(self.find("desc 1-3"), [("desc", "1-3")])
         self.assertEqual(self.find("opt desc 3"), [("opt", None), ("desc", "3")])
 
+    def test_number_forms(self):
+        self.assertEqual(self.find("desc 2、3"), [("desc", "2、3")])     # 全角の読点も番号の区切り
+        self.assertEqual(self.find("desc 2，3"), [("desc", "2，3")])
+        self.assertEqual(self.find("desc ２"), [])                        # 番号は ASCII の数字だけ
+        self.assertEqual(self.find("desc2"), [])                          # 略号と番号の間には空白が要る（wdt2 と同じ）
+
+    def test_fullwidth_alnum_is_part_of_word(self):
+        for text in ("ＡＢＣwdt", "１２３pre", "ｘopt"):
+            self.assertEqual(self.find(text), [], text)
+        self.assertEqual(self.find("１２３ wdt"), [("wdt", None)])
+
+    def test_image_placeholder_at_end(self):
+        self.assertEqual(self.find("この画面どう？ wdt [Image #1]"), [("wdt", None)])
+        self.assertEqual(self.find("見て opt [Image #1] [Image #2]\n"), [("opt", None)])
+        self.assertEqual(self.find("[Image #1]"), [])
+
+    def test_real_forms_regression(self):
+        # history.jsonl で見た打ち方を、中身を短く置き換えたもの
+        cases = {
+            "この案の仕組みについてwdt": [("wdt", None)],
+            "「Aは対象外です」の書き方は？wdt": [("wdt", None)],
+            "全体像を知りたいので、改修案をHTMLでまとめてpre": [("pre", None)],
+            "- 項目 1\n- 項目 2\n\n検討してください。wdt": [("wdt", None)],
+            "どこまで面倒をみるべきでしょうかwdt": [("wdt", None)],
+            "次が要ります、についてのopt": [("opt", None)],
+            "1. はい wdt\n2. いいえ\n3. あとで": [],          # 項目ごとの略号（途中の行）は拾わない
+            "1. はい\n2. いいえ\n\nopt": [("opt", None)],
+        }
+        for text, want in cases.items():
+            self.assertEqual(self.find(text), want, text)
+
     def test_number_only_after_number_taking_suffix(self):
         self.assertEqual(self.find("案は 2"), [])
         self.assertEqual(self.find("opt 2"), [])            # opt は番号を取らない
@@ -136,6 +167,11 @@ class Find(Base):
     def test_typed_suffix_then_paste(self):
         # 打った文 + wdt + 貼り付け: 貼り付けを除くと最後の語は打った wdt なので拾う（意図どおり）
         self.assertEqual(self.find("これどう思う？ wdt" + paste("長い文\n二行目\n三行目")), [("wdt", None)])
+
+    def test_marker_inside_paste_does_not_exclude(self):
+        # 貼り付けたログに <task-notification> などがあっても、打った文の略号は拾う
+        self.assertEqual(self.find("このログどう？ wdt" + paste("<task-notification>\nx\n</task-notification>")),
+                         [("wdt", None)])
 
     def test_not_typed_messages(self):
         for head in ('<cross-session-message from="uds:/x">', "<task-notification>", '<relay-message from="a">',
@@ -386,7 +422,7 @@ class Screenshot(Base):
 
     def test_steam_default_glob_and_symlink_dedupe(self):
         home = self.d / "home"
-        steam = home / ".local/share/Steam/userdata/51/760/remote/3493540/screenshots"
+        steam = home / ".local/share/Steam/userdata/51/760/remote/123450/screenshots"
         self.touch(steam / "20261124041518_1.jpg", 1_799_999_000)
         self.touch(steam / "thumbnails/20261124041518_1.jpg", 1_799_999_500)   # 直下だけを見る
         (home / ".steam").mkdir()
@@ -441,9 +477,32 @@ class Screenshot(Base):
         self.assertIn("Screenshot b.png", ctx(str(self.d / "projector")))  # 区切りでない前方一致は当てない
         self.assertIn("Screenshot b.png", ctx(str(self.d)))
 
+    def test_by_cwd_through_symlink(self):
+        # 回帰: /home → /var/home のようなリンクの片側で書いても当たる（macOS の /tmp → /private/tmp も同じ）
+        real = self.d / "real"
+        (real / "proj/sub").mkdir(parents=True)
+        link = self.d / "link"
+        link.symlink_to(real)
+        shots = self.d / "shots_link"
+        self.touch(shots / "Screenshot l.png", 1_799_999_000)
+        for key, cwd in ((link / "proj", real / "proj/sub"), (real / "proj", link / "proj/sub")):
+            self.write_cfg({"screenshot_dir": str(self.d / "none"), "screenshot_by_cwd": {str(key): str(shots)}})
+            ctx = self.hook("ss", cwd=str(cwd))["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Screenshot l.png", ctx, (key, cwd))
+
+    def test_nfd_file_name(self):
+        import unicodedata
+        shots = self.d / "shots"
+        name = unicodedata.normalize("NFD", "スクリーンショット 2026-11-24.png")   # macOS が付ける形
+        self.touch(shots / name, 1_799_999_000)
+        self.assertIsNotNone(P.latest_screenshot([shots]))
+
     def test_screenshot_config_errors(self):
-        self.write_cfg({"screenshot_by_cwd": {"/x": 3}, "screenshot_names": [], "screenshot_max_age_min": 0})
-        text = "\n".join(self.cfg()[1])
+        self.write_cfg({"screenshot_by_cwd": {"/x": 3, "~/g*": "~/s"}, "screenshot_names": [],
+                        "screenshot_max_age_min": 0})
+        problems = self.cfg()[1]
+        self.assertTrue(any("glob" in x and "~/g*" in x for x in problems), problems)
+        text = "\n".join(problems)
         for word in ("screenshot_by_cwd", "screenshot_names", "screenshot_max_age_min"):
             self.assertIn(word, text)
 

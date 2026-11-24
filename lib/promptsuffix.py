@@ -23,6 +23,7 @@ CLAUDE.md に「wdt は意見だけ」と書いてモデルに任せるだけだ
 import fnmatch
 import glob
 import json
+import unicodedata
 import os
 import plistlib
 import re
@@ -36,7 +37,8 @@ TAG = "[claude-prompt-suffix]"
 # 略号の名前: 英字で始まる短い語。大文字小文字は区別しないので、設定の名前は小文字にそろえる
 NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,19}$")
 # 番号: desc 2、desc 2,3、desc 1-3
-NUMBER = re.compile(r"^\d{1,3}(?:[,\-]\d{1,3}){0,9}$")
+# 番号は ASCII の数字だけ（\d は全角の数字にも当たる）。区切りは , - と全角の 、 ，（「desc 2、3」）
+NUMBER = re.compile(r"^[0-9]{1,3}(?:[,\-、，][0-9]{1,3}){0,9}$")
 MAX_SUFFIXES = 4          # 文の最後に並べられる略号の数（これを超える並びは最後の 4 つだけ見る）
 MAX_TEXT = 2000           # 1 つの略号の文の上限（設定の誤りで毎ターン大きな文を足さないため）
 
@@ -206,6 +208,8 @@ def load_config(env, path=None):
                 d = _dirs_value(dirs)
                 if not (isinstance(k, str) and k.strip()) or d in (False, None):
                     problems.append(f"prompt_suffix.screenshot_by_cwd の {k!r} は、フォルダ → 文字列か文字列のリスト")
+                elif any(c in k for c in "*?["):
+                    problems.append(f"prompt_suffix.screenshot_by_cwd のキー {k!r} に glob の字（* ? [）は使えない（フォルダをそのまま書く）")
                 else:
                     table_cwd[k] = d
             out["screenshot_by_cwd"] = table_cwd
@@ -253,6 +257,8 @@ def load_config(env, path=None):
 # この形で包む（2.1.331 で確認。id は 4 桁の 16 進だったが、変わっても外れないよう広く取る。閉じが無ければ最後まで貼り付け）
 PASTED = re.compile(r'<pasted_content id="([^"\n]{1,64})">.*?(?:</pasted_content id="\1">|\Z)', re.S)
 FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+# 画像を貼ると、文の最後に [Image #1] が付く（打った略号の後ろに付くことがあるので、除いてから見る）
+IMAGES = re.compile(r"(?:[ \t]*\[Image #\d+\])+\s*$")
 
 
 def strip_pastes(text):
@@ -261,7 +267,7 @@ def strip_pastes(text):
 
 def last_line(text):
     """貼り付けを除いた文の、最後の空でない行。コードブロックの中・コマンド・引用なら None。"""
-    lines = strip_pastes(text).rstrip().split("\n")
+    lines = IMAGES.sub("", strip_pastes(text).rstrip()).rstrip().split("\n")
     if not lines or not lines[-1].strip():
         return None
     fence = None
@@ -289,7 +295,8 @@ NOT_TYPED = ("<cross-session-message", "<agent-message", "<task-notification", "
              "<teammate-message", "[SYSTEM NOTIFICATION")
 SLASH = re.compile(r"^/[A-Za-z][\w:-]*(?:\s|$)")
 # 語の末尾の ASCII の英字の並び（その前が ASCII 以外の字のときだけ区切りとみなす。「…についてwdt」）
-TAIL = re.compile(r"[^\x00-\x7f]([A-Za-z][A-Za-z0-9_-]*)$")
+# 全角の英数字（ＡＢＣ・１２３）も ASCII と同じく語の一部とみなす
+TAIL = re.compile(r"[^\x00-\x7f０-９Ａ-Ｚａ-ｚ]([A-Za-z][A-Za-z0-9_-]*)$")
 
 
 def is_typed(text):
@@ -310,7 +317,7 @@ def find(text, table):
     """文の最後の略号の並び [(名前, 番号か None), ...]（書いた順）。無ければ []。"""
     if not isinstance(text, str) or not text.strip():
         return []
-    if not is_typed(text):
+    if not is_typed(strip_pastes(text)):     # 貼り付けた文の中の印（ログを貼ったなど）では除かない
         return []
     head = text.lstrip()
     if SLASH.match(head) or head.startswith("!"):
@@ -439,8 +446,10 @@ def _for_cwd(table, cwd, home):
     if not cwd or not table:
         return None
     best = None
+    # 両方を realpath にしてから比べる（/home が /var/home へのリンクの環境、macOS の /tmp → /private/tmp など）
+    cwd = os.path.realpath(cwd)
     for prefix, dirs in table.items():
-        root = os.path.normpath(_expand(prefix, home)[0]) if not any(c in prefix for c in "*?[") else None
+        root = os.path.realpath(_expand(prefix, home)[0]) if not any(c in prefix for c in "*?[") else None
         if root and (cwd == root or cwd.startswith(root.rstrip("/") + "/")):
             if best is None or len(root) > len(best[0]):
                 best = (root, dirs)
@@ -466,14 +475,15 @@ def screenshot_dirs(cfg, env, os_name=None, cwd=None):
 
 def latest_screenshot(dirs, names=None):
     """置き場の直下の、名前の合う画像のうち、一番新しいもの (パス, 更新時刻)。無ければ None。"""
-    pats = [n.lower() for n in (names or DEFAULT_NAMES)]
+    # macOS のファイル名は NFD（濁点が分かれる）なので、名前も型も NFC にそろえてから比べる
+    pats = [unicodedata.normalize("NFC", n).lower() for n in (names or DEFAULT_NAMES)]
     best = None
     for d in dirs:
         try:
             with os.scandir(d) as it:
                 n = 0
                 for e in it:
-                    low = e.name.lower()
+                    low = unicodedata.normalize("NFC", e.name).lower()
                     if os.path.splitext(low)[1] not in IMAGE_EXT or not any(fnmatch.fnmatchcase(low, p) for p in pats):
                         continue
                     n += 1

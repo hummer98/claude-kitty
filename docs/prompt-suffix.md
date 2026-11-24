@@ -32,9 +32,9 @@ CLAUDE.md に略号の意味を書いてモデルに任せるだけだと、効�
 1. **貼り付けた文は除く。** Claude Code は、まとめて貼り付けた文（入力欄で `[Pasted text #1 +N lines]` に畳まれるもの）を hook の `prompt` の中で `<pasted_content id="1a2b">` … `</pasted_content id="1a2b">` で包む（Claude Code 2.1.331 で確認。id は 4 桁の 16 進だったが、変わっても外れないよう `"` と改行以外の 64 字までを受ける）。この範囲を除いてから見る。貼り付けた文の最後が `next` でも拾わない。
    - 「打った文 + `wdt` + 貼り付け」（`これどう思う？ wdt` と打ってから長い文を貼る）は、貼り付けを除くと最後の語が打った `wdt` なので拾う（意図どおり）。
    - 畳まれない短い貼り付け（数行まで）は、打った文と見分けがつかない。
-2. **最後の語が単独のとき。** 最後の行の最後の語で、後ろに何も無い（句読点も付かない）。前は空白（全角の空白も）・改行・**ASCII 以外の字**（ひらがな・漢字・全角の句読点など）なら区切りとみなす: `以上の仕組みについてwdt`・`…は？wdt`・`HTMLでまとめてpre`・`これについてdesc 2` は拾う。ASCII の字の直後は語の一部とみなして拾わない: `pre-commit`・`xwdt`・`wdt2`・`--pretty=desc`・`ok?wdt`。`wdt。`・`next.`（後ろに句読点）も拾わない。
+2. **最後の語が単独のとき。** 最後の行の最後の語で、後ろに何も無い（句読点も付かない）。前は空白（全角の空白も）・改行・**ASCII 以外の字**（ひらがな・漢字・全角の句読点など）なら区切りとみなす: `以上の仕組みについてwdt`・`…は？wdt`・`HTMLでまとめてpre`・`これについてdesc 2` は拾う。ASCII の字と全角の英数字（`ＡＢＣ`・`１２３`）の直後は語の一部とみなして拾わない: `pre-commit`・`xwdt`・`wdt2`・`desc2`・`--pretty=desc`・`ok?wdt`。番号は ASCII の数字だけで、区切りは `,`・`-`・`、`・`，`（`desc 2、3`）。最後に画像の `[Image #1]` が付いていれば、それを除いて見る。見るのは最後の行だけなので、番号付きの答えの途中の行に付けた略号（`1. はい wdt` の次に `2. …` が続くもの）は拾わない。`wdt。`・`next.`（後ろに句読点）も拾わない。
 3. **最後の行がコード・コマンド・引用なら見ない。** 閉じていないコードブロック（```` ``` ```` か `~~~`）の中、`$ ` か `% ` で始まる行（シェルの入力）、`--` を含む行（オプション付きのコマンド）、`>` で始まる行（引用）。文がスラッシュコマンドの形（`/review …`・`/plugin:cmd …`。`/var/log …` のようなパスは当たらない）か `!` で始まるとき（シェルのモード）も見ない。
-4. **打った文でないものは見ない。** 別のセッションからのメッセージ（`<cross-session-message`・`<agent-message`・`<teammate-message`）、背景の仕事の知らせ（`<task-notification`）、claude-relay のメッセージ（`<relay-message`）、`[SYSTEM NOTIFICATION` を含む prompt。Claude Code がユーザーの入力の形で渡すことがあるが、最後の語はユーザーの略号ではないため。
+4. **打った文でないものは見ない。** 貼り付けを除いた文に次の印があるとき: 別のセッションからのメッセージ（`<cross-session-message`・`<agent-message`・`<teammate-message`）、背景の仕事の知らせ（`<task-notification`）、claude-relay のメッセージ（`<relay-message`）、`[SYSTEM NOTIFICATION`。Claude Code がユーザーの入力の形で渡すことがあるが、最後の語はユーザーの略号ではないため。
 5. **拾ったら画面に 1 行。** `略号 desc 2 を適用`（`notice: false` で出さない）。思っていないときに拾ったら気づけるように。
 6. **足す文は断り付き。** 「ユーザーの文の最後の「X」を略号とみなした。明らかに文の一部なら無視してよい。」の後に、略号ごとの意味を 1 行ずつ。
 
@@ -44,6 +44,7 @@ CLAUDE.md に略号の意味を書いてモデルに任せるだけだと、効�
 
 - **句点の無い英文の終わり**: `what comes next`・`let me know what to do next` の `next`、`I'd like your opt`（まれ）など、句読点を付けずに終えた英語の文の最後の語が略号と同じなら拾う。画面の 1 行で気づけ、モデルには「明らかに文の一部なら無視してよい」と渡すので、多くは害が無い。英語で書く人に向けて、`language: "en"` の既定からは `next` を外してある（使うなら `suffixes` で足す）。
 - 日本語の文の最後に英単語を置いた形（`…はnext`）も同じく拾う。
+- **`$` の無いコマンドの行**: `make pre`・`pip install pre`・`ls -la pre`（`--` が無いもの）のように、コマンドを打っただけの行の最後の語も拾う。無理に見分けず、画面の 1 行と断りの文に任せる。
 
 足す文の例（`どれにする？ opt wdt`）:
 
@@ -67,12 +68,12 @@ CLAUDE.md に略号の意味を書いてモデルに任せるだけだと、効�
 
 - 一番新しいものが `screenshot_max_age_min`（既定 120 分）より古ければ「新しいスクリーンショットは無い（120 分以内のもの。最新は <パス>、<時刻>、<何日前>）。ユーザーに確認する」。前の画像を今のものと取り違えないため。`null` で古さを問わない。
 - 見つからなければ「見つからなかった（探した場所: …）。ユーザーに置き場を確認する」。
-- 名前（`screenshot_names`、大文字小文字は区別しない glob）の既定: `Screenshot*`・`Screen Shot*`（古い macOS）・`スクリーンショット*`・`Bildschirmfoto*`・`Capture d’écran*`・`Captura de pantalla*`・`Schermafbeelding*`・`屏幕截图*`・`스크린샷*` など OS の道具の既定の名前と、Steam の `YYYYMMDDhhmmss_N.jpg`。拡張子は png・jpg・webp など画像だけ。ほかの名前で保存するなら `screenshot_names` に書く（`["*"]` で全部）。
+- 名前（`screenshot_names`、大文字小文字は区別しない glob。名前も型も NFC にそろえて比べる）の既定: `Screenshot*`・`Screen Shot*`（古い macOS）・`スクリーンショット*`・`Bildschirmfoto*`・`Capture d’écran*`・`Captura de pantalla*`・`Schermafbeelding*`・`屏幕截图*`・`스크린샷*` など OS の道具の既定の名前と、Steam の `YYYYMMDDhhmmss_N.jpg`。拡張子は png・jpg・webp など画像だけ。ほかの名前で保存するなら `screenshot_names` に書く（`["*"]` で全部）。
 - 1 つの置き場で見る、名前の合う画像は 2 万個まで（`SCAN_LIMIT`）。フォルダの中の並びは OS 任せなので、それを超えるフォルダでは一番新しいものを取りこぼしうる。
 
 置き場（どれも glob を使える。`~`・`$HOME` も可）は、次の順で 1 つを使う。
 
-1. `screenshot_by_cwd`: 作業フォルダ（hook の入力の `cwd`）→ 置き場。フォルダの区切りで前方一致する一番長いもの（`{"~/game-mod": "~/.local/share/Steam/userdata/*/760/remote/3493540/screenshots"}`）。
+1. `screenshot_by_cwd`: 作業フォルダ（hook の入力の `cwd`）→ 置き場。両方をリンクを解いた形（realpath）にしてから、フォルダの区切りで前方一致する一番長いもの。キーに glob は使えない（`{"~/game-mod": "~/.local/share/Steam/userdata/*/760/remote/<appid>/screenshots"}`）。
 2. `screenshot_dir`: 文字列かそのリスト。
 3. OS の普通の場所（全部を見て、一番新しいものを選ぶ）:
 
