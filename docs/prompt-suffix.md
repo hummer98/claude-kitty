@@ -18,7 +18,7 @@ CLAUDE.md に略号の意味を書いてモデルに任せるだけだと、効�
 | `pre` | 生成物を見せる（HTML なら HTML、画像なら画像を開く。kitty 上なら `claude-show <file>`。デプロイしていればその URL） |
 | `desc` | 解説だけ。作業はしない（読むだけの調べものはよい）。直前の話題を解説する |
 | `desc <番号>` | 直前の返答のその番号の項目を解説する（`desc 2`、`desc 2,3`、`desc 1-3`）。番号の付いた項目が無い返答なら、どこを指すか確認してから |
-| `next` | ユーザーが決めることだけを、1 行目にその数を書き、番号を振って並べる。自分で決められるものは決めておく |
+| `next` | ユーザーが決めることだけを、1 行目にその数を書き、番号を振って並べる。自分で決められるものは決めておく（`language: "en"` の既定には無い。下の「拾ってしまうもの」） |
 | `ss` | 最新のスクリーンショットを開いて見てから答える。hook が最新の画像のパスと時刻を添える（下の「スクリーンショット」） |
 
 - 並べると全部効く: `どれがいい？ opt wdt`（案を出す + 意見だけ）。4 つまで。同じものは 1 回に数える。
@@ -29,14 +29,21 @@ CLAUDE.md に略号の意味を書いてモデルに任せるだけだと、効�
 
 拾うのは、次をすべて満たすときだけ。
 
-1. **貼り付けた文は除く。** Claude Code は、まとめて貼り付けた文（入力欄で `[Pasted text #1 +N lines]` に畳まれるもの）を hook の `prompt` の中で `<pasted_content id="1a2b">` … `</pasted_content id="1a2b">` で包む（Claude Code 2.1.331 で確認）。この範囲を除いてから見る。貼り付けた文の最後が `next` でも拾わない。
+1. **貼り付けた文は除く。** Claude Code は、まとめて貼り付けた文（入力欄で `[Pasted text #1 +N lines]` に畳まれるもの）を hook の `prompt` の中で `<pasted_content id="1a2b">` … `</pasted_content id="1a2b">` で包む（Claude Code 2.1.331 で確認。id は 4 桁の 16 進だったが、変わっても外れないよう `"` と改行以外の 64 字までを受ける）。この範囲を除いてから見る。貼り付けた文の最後が `next` でも拾わない。
+   - 「打った文 + `wdt` + 貼り付け」（`これどう思う？ wdt` と打ってから長い文を貼る）は、貼り付けを除くと最後の語が打った `wdt` なので拾う（意図どおり）。
    - 畳まれない短い貼り付け（数行まで）は、打った文と見分けがつかない。
-2. **最後の語が単独のとき。** 最後の行の最後の語で、前が空白（全角の空白も）か改行、後ろに何も無い（句読点も付かない）。`これでいい？wdt`（前に空白が無い）、`wdt。`・`next.`（句読点付き）、`--pretty=desc`（語の一部）は拾わない。英語の文の終わりの `what comes next.` を拾わないよう、句読点は許さない。
-3. **最後の行がコード・コマンド・引用なら見ない。** 閉じていないコードブロック（```` ``` ```` か `~~~`）の中、`$ ` か `% ` で始まる行（シェルの入力）、`--` を含む行（オプション付きのコマンド）、`>` で始まる行（引用）。文全体が `/` か `!` で始まるとき（スラッシュコマンド・シェルのモード）も見ない。
-4. **拾ったら画面に 1 行。** `略号 desc 2 を適用`（`notice: false` で出さない）。思っていないときに拾ったら気づけるように。
-5. **足す文は断り付き。** 「ユーザーの文の最後の「X」を略号とみなした。明らかに文の一部なら無視してよい。」の後に、略号ごとの意味を 1 行ずつ。
+2. **最後の語が単独のとき。** 最後の行の最後の語で、後ろに何も無い（句読点も付かない）。前は空白（全角の空白も）・改行・**ASCII 以外の字**（ひらがな・漢字・全角の句読点など）なら区切りとみなす: `以上の仕組みについてwdt`・`…は？wdt`・`HTMLでまとめてpre`・`これについてdesc 2` は拾う。ASCII の字の直後は語の一部とみなして拾わない: `pre-commit`・`xwdt`・`wdt2`・`--pretty=desc`・`ok?wdt`。`wdt。`・`next.`（後ろに句読点）も拾わない。
+3. **最後の行がコード・コマンド・引用なら見ない。** 閉じていないコードブロック（```` ``` ```` か `~~~`）の中、`$ ` か `% ` で始まる行（シェルの入力）、`--` を含む行（オプション付きのコマンド）、`>` で始まる行（引用）。文がスラッシュコマンドの形（`/review …`・`/plugin:cmd …`。`/var/log …` のようなパスは当たらない）か `!` で始まるとき（シェルのモード）も見ない。
+4. **打った文でないものは見ない。** 別のセッションからのメッセージ（`<cross-session-message`・`<agent-message`・`<teammate-message`）、背景の仕事の知らせ（`<task-notification`）、claude-relay のメッセージ（`<relay-message`）、`[SYSTEM NOTIFICATION` を含む prompt。Claude Code がユーザーの入力の形で渡すことがあるが、最後の語はユーザーの略号ではないため。
+5. **拾ったら画面に 1 行。** `略号 desc 2 を適用`（`notice: false` で出さない）。思っていないときに拾ったら気づけるように。
+6. **足す文は断り付き。** 「ユーザーの文の最後の「X」を略号とみなした。明らかに文の一部なら無視してよい。」の後に、略号ごとの意味を 1 行ずつ。
 
-サブエージェントへの指示（入力に `agent_id` があるもの。親のモデルが書いた文）は対象外。
+入力に `agent_id` があるときも見ない（サブエージェントの入力に UserPromptSubmit を呼ぶ版があったときの保険。親のモデルが書いた文なので。Claude Code 2.1.331 がサブエージェントの入力でこの hook を呼ぶかは確認していない）。
+
+### 拾ってしまうもの
+
+- **句点の無い英文の終わり**: `what comes next`・`let me know what to do next` の `next`、`I'd like your opt`（まれ）など、句読点を付けずに終えた英語の文の最後の語が略号と同じなら拾う。画面の 1 行で気づけ、モデルには「明らかに文の一部なら無視してよい」と渡すので、多くは害が無い。英語で書く人に向けて、`language: "en"` の既定からは `next` を外してある（使うなら `suffixes` で足す）。
+- 日本語の文の最後に英単語を置いた形（`…はnext`）も同じく拾う。
 
 足す文の例（`どれにする？ opt wdt`）:
 
@@ -56,16 +63,25 @@ CLAUDE.md に略号の意味を書いてモデルに任せるだけだと、効�
 
 ## スクリーンショット（ss）
 
-`ss` の文の `{screenshot}` を、置き場の直下の画像（png・jpg・webp など）のうち一番新しいもののパスと時刻（`最新: /home/me/Pictures/Screenshots/a.png（11-24 10:31、3 分前）。`）に置き換える。見つからなければ「見つからなかった（探した場所: …）。ユーザーに置き場を確認する」。
+`ss` の文の `{screenshot}` を、置き場の直下の「スクリーンショットらしい名前」の画像のうち一番新しいもののパスと時刻（`最新: /home/me/Pictures/Screenshots/Screenshot_1.png（11-24 10:31、3 分前）。`）に置き換える。
 
-置き場は設定 `screenshot_dir`（文字列か、そのリスト。`~` を使える）。`null`（既定）なら OS の普通の場所を順に見て、一番新しいものを選ぶ。
+- 一番新しいものが `screenshot_max_age_min`（既定 120 分）より古ければ「新しいスクリーンショットは無い（120 分以内のもの。最新は <パス>、<時刻>、<何日前>）。ユーザーに確認する」。前の画像を今のものと取り違えないため。`null` で古さを問わない。
+- 見つからなければ「見つからなかった（探した場所: …）。ユーザーに置き場を確認する」。
+- 名前（`screenshot_names`、大文字小文字は区別しない glob）の既定: `Screenshot*`・`Screen Shot*`（古い macOS）・`スクリーンショット*`・`Bildschirmfoto*`・`Capture d’écran*`・`Captura de pantalla*`・`Schermafbeelding*`・`屏幕截图*`・`스크린샷*` など OS の道具の既定の名前と、Steam の `YYYYMMDDhhmmss_N.jpg`。拡張子は png・jpg・webp など画像だけ。ほかの名前で保存するなら `screenshot_names` に書く（`["*"]` で全部）。
+- 1 つの置き場で見る、名前の合う画像は 2 万個まで（`SCAN_LIMIT`）。フォルダの中の並びは OS 任せなので、それを超えるフォルダでは一番新しいものを取りこぼしうる。
+
+置き場（どれも glob を使える。`~`・`$HOME` も可）は、次の順で 1 つを使う。
+
+1. `screenshot_by_cwd`: 作業フォルダ（hook の入力の `cwd`）→ 置き場。フォルダの区切りで前方一致する一番長いもの（`{"~/game-mod": "~/.local/share/Steam/userdata/*/760/remote/3493540/screenshots"}`）。
+2. `screenshot_dir`: 文字列かそのリスト。
+3. OS の普通の場所（全部を見て、一番新しいものを選ぶ）:
 
 | OS | 見る場所 |
 |---|---|
-| Linux | `<ピクチャ>/Screenshots`（GNOME・KDE の Spectacle）、`<ピクチャ>/スクリーンショット`（日本語の GNOME）、`<ピクチャ>`（古い Spectacle）、`~/Pictures/Screenshots`、`~/Pictures`。`<ピクチャ>` は `~/.config/user-dirs.dirs` の `XDG_PICTURES_DIR`（日本語の環境では `~/画像` など） |
-| macOS | 「スクリーンショット」の保存先の設定（`defaults read com.apple.screencapture location`）と `~/Desktop` |
+| Linux | `<ピクチャ>/Screenshots`（GNOME・KDE）、`<ピクチャ>/スクリーンショット`（日本語の GNOME）、KDE の Spectacle の保存先（`~/.config/spectaclerc` の `[ImageSave]` の `imageSaveLocation`、無ければ `<ピクチャ>/<translatedScreenshotsFolder>`）、`<ピクチャ>`、`~/Pictures/Screenshots`、`~/Pictures`、Steam（`~/.local/share/Steam/userdata/*/760/remote/*/screenshots`、`~/.steam/steam/…`、Flatpak の `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/…`）。`<ピクチャ>` は `~/.config/user-dirs.dirs` の `XDG_PICTURES_DIR`（日本語の環境では `~/画像` など） |
+| macOS | 「スクリーンショット」の保存先の設定（`defaults read com.apple.screencapture location`）、`~/Desktop`、`~/Pictures/Screenshots`、Steam（`~/Library/Application Support/Steam/userdata/*/760/remote/*/screenshots`） |
 
-`<ピクチャ>` の直下も見るので、スクリーンショットでない画像が一番新しければそれを選ぶ。違う画像を見てほしくなければ `screenshot_dir` に置き場だけを書く。
+同じフォルダへのリンク（`~/.steam/steam` → `~/.local/share/Steam` など）は 1 回だけ見る。
 
 ## 設定
 
@@ -80,14 +96,16 @@ CLAUDE.md に略号の意味を書いてモデルに任せるだけだと、効�
     "pick": {"text": "おすすめを 1 つだけ選ぶ。", "with_number": "直前の返答の {n} 番を選んだものとして進める。"},
     "pre": null
   },
-  "screenshot_dir": "~/Pictures/Screenshots"
+  "screenshot_dir": "~/Pictures/Screenshots",
+  "screenshot_by_cwd": {"~/game-mod": "~/.local/share/Steam/userdata/*/760/remote/*/screenshots"},
+  "screenshot_max_age_min": 60
 }}
 ```
 
 - `suffixes` は既定に重ねる。文字列で足す・置き換える、`null` で既定のものを消す。番号を取る略号は `{"text": 番号なしの文, "with_number": 番号ありの文}`（`{n}` が番号に置き換わる）。`{screenshot}` はどの略号の文にも書ける。
 - 名前は英字で始まる 20 字までの英数字（`_`・`-` も可）。大文字で書いても小文字で比べる。
 - `language`: 既定の略号と断りの文の言語（`ja` か `en`）。
-- 正しくない項目は、その項目だけ既定に戻す。正しくない略号は使わない（既定にあるものも）。問題は `$XDG_RUNTIME_DIR/claude-prompt-suffix/errors.log` に残り、`claude-kitty doctor` の「設定: prompt_suffix」が NG になる。
+- 正しくない項目は、その項目だけ既定に戻す。正しくない略号は使わない（既定にあるものも）。問題は `$XDG_RUNTIME_DIR/claude-prompt-suffix/errors.log` に残り（直前と同じ文は書かない。256 KB を超えたら `errors.log.1` に回す）、`claude-kitty doctor` の「設定: prompt_suffix」が NG になる。
 - 環境変数 `CLAUDE_PROMPT_SUFFIX=off` で止める。
 
 ## 導入

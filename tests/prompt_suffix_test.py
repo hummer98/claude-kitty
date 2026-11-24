@@ -71,8 +71,17 @@ class Find(Base):
         self.assertEqual(self.find("opt 2"), [])            # opt は番号を取らない
         self.assertEqual(self.find("desc 2 3"), [])         # 最後の 3 の前は番号で、略号でない
 
-    def test_needs_space_before(self):
-        self.assertEqual(self.find("これでいい？wdt"), [])
+    def test_boundary_before(self):
+        # 前が空白・改行・ASCII 以外の字なら区切り。history.jsonl で見た実際の打ち方
+        for text in ("以上の仕組みについてwdt", "「ライトレールが含まれる路線は特急・急行の対象外です」は？wdt",
+                     "全体像を把握したいので、改修案をHTMLでまとめてpre", "検討してください。wdt",
+                     "どこまでclaude-kittyで面倒をみるべきでしょうかwdt", "次が要ります、についてのopt"):
+            self.assertEqual(len(self.find(text)), 1, text)
+        self.assertEqual(self.find("これについてdesc 2"), [("desc", "2")])
+        self.assertEqual(self.find("どれ？opt wdt"), [("opt", None), ("wdt", None)])
+        # ASCII の英数字の直後は語の一部
+        for text in ("pre-commit", "xwdt", "wdt2", "foo_next", "is it ok?wdt"):
+            self.assertEqual(self.find(text), [], text)
         self.assertEqual(self.find("どう思う？　wdt"), [("wdt", None)])   # 全角の空白も区切り
         self.assertEqual(self.find("どう思う？\nwdt"), [("wdt", None)])
 
@@ -109,7 +118,9 @@ class Find(Base):
 
     def test_slash_and_bang(self):
         self.assertEqual(self.find("/review next"), [])
+        self.assertEqual(self.find("/plugin:cmd next"), [])
         self.assertEqual(self.find("!ls next"), [])
+        self.assertEqual(self.find("/var/log/x を見て wdt"), [("wdt", None)])   # パスで始まる文はスラッシュコマンドでない
 
     def test_paste_excluded(self):
         # 貼り付けた文の最後が略号でも拾わない（Claude Code が貼り付けの範囲を包んで渡す）
@@ -118,8 +129,18 @@ class Find(Base):
         self.assertEqual(self.find("look at this \n" + paste("x\ny") + "\n wdt"), [("wdt", None)])
         self.assertEqual(self.find('見て\n<pasted_content id="abcd">\nnot closed wdt'), [])   # 閉じなければ最後まで
 
-    def test_paste_like_text_with_bad_id_is_not_removed(self):
-        self.assertEqual(self.find('<pasted_content id="zz">\nwdt'), [("wdt", None)])
+    def test_paste_id_forms(self):
+        self.assertEqual(self.find('見て\n<pasted_content id="paste-12">\nx wdt\n</pasted_content id="paste-12">\n'), [])
+        self.assertEqual(self.find('<pasted_content id="">\nwdt'), [("wdt", None)])   # id の無いものは包みでない
+
+    def test_typed_suffix_then_paste(self):
+        # 打った文 + wdt + 貼り付け: 貼り付けを除くと最後の語は打った wdt なので拾う（意図どおり）
+        self.assertEqual(self.find("これどう思う？ wdt" + paste("長い文\n二行目\n三行目")), [("wdt", None)])
+
+    def test_not_typed_messages(self):
+        for head in ('<cross-session-message from="uds:/x">', "<task-notification>", '<relay-message from="a">',
+                     "<agent-message>", "[SYSTEM NOTIFICATION - NOT USER INPUT]"):
+            self.assertEqual(self.find(f"{head}\n終わったら next"), [], head)
 
     def test_cap(self):
         self.assertEqual(len(self.find("opt wdt pre ss next desc")), P.MAX_SUFFIXES)
@@ -184,6 +205,9 @@ class Config(Base):
         out = self.hook("thoughts? wdt")
         self.assertIn("Treated the trailing \"wdt\"", out["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(out["systemMessage"], "Shorthand wdt applied")
+        self.assertIsNone(self.hook("what comes next"))       # en の既定に next は無い（英語の文の終わりと重なる）
+        self.write_cfg({"language": "en", "suffixes": {"next": "List decisions."}})
+        self.assertIsNotNone(self.hook("ok next"))
 
 
 class Hook(Base):
@@ -241,12 +265,28 @@ class Hook(Base):
         log = (self.d / "claude-prompt-suffix" / "errors.log").read_text()
         self.assertIn("suffixes.wdt", log)
 
+    def test_errors_log_not_repeated(self):
+        self.write_cfg({"suffixes": {"wdt": 3}})
+        for _ in range(3):
+            self.hook("どう？ wdt")
+        log = (self.d / "claude-prompt-suffix" / "errors.log").read_text()
+        self.assertEqual(log.count("suffixes.wdt"), 1)
+
+    def test_errors_log_rotates(self):
+        d = self.d / "claude-prompt-suffix"
+        d.mkdir()
+        (d / "errors.log").write_text("x" * (P.LOG_MAX + 10) + "\n")
+        P.log_error(self.env, "new problem")
+        self.assertTrue((d / "errors.log.1").exists())
+        self.assertIn("new problem", (d / "errors.log").read_text())
+
     def test_cli_hook_and_check(self):
         env = dict(os.environ, **self.env)
         inp = json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "どう？ wdt"})
         r = subprocess.run([str(BIN)], input=inp, env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(json.loads(r.stdout)["systemMessage"], "略号 wdt を適用")
+        self.assertTrue(r.stdout.isascii())                   # 端末の文字コードに左右されないよう ASCII で出す
         r = subprocess.run([str(BIN)], input="{broken", env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
         r = subprocess.run([str(BIN), "check"], input="直して", env=env, capture_output=True, text=True, timeout=30)
@@ -280,21 +320,23 @@ class Screenshot(Base):
 
     def test_latest_in_configured_dir(self):
         shots = self.d / "shots"
-        self.touch(shots / "old.png", 1_799_990_000)
-        self.touch(shots / "new.PNG", 1_799_999_820)
-        self.touch(shots / "newer.txt", 1_799_999_900)      # 画像でないものは数えない
+        self.touch(shots / "Screenshot_old.png", 1_799_990_000)
+        self.touch(shots / "Screenshot_new.PNG", 1_799_999_820)
+        self.touch(shots / "Screenshot_newer.txt", 1_799_999_900)   # 画像でないものは数えない
+        self.touch(shots / "photo.png", 1_799_999_950)              # スクリーンショットらしくない名前も数えない
         self.write_cfg({"screenshot_dir": str(shots)})
         ctx = self.hook("これ ss")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn(str(shots / "new.PNG"), ctx)
+        self.assertIn(str(shots / "Screenshot_new.PNG"), ctx)
         self.assertIn("3 分前", ctx)
         self.assertNotIn("{screenshot}", ctx)
 
     def test_list_of_dirs_and_tilde(self):
-        self.touch(self.d / "home/a/one.png", 1_799_000_000)
-        self.touch(self.d / "home/b/two.jpg", 1_799_500_000)
+        self.touch(self.d / "home/a/Screenshot one.png", 1_799_000_000)
+        self.touch(self.d / "home/b/スクリーンショット two.jpg", 1_799_500_000)
         self.write_cfg({"screenshot_dir": ["~/a", "$HOME/b", "~/missing"]})
         cfg = self.cfg()[0]
-        self.assertEqual(P.latest_screenshot(P.screenshot_dirs(cfg, self.env, "Linux"))[0], self.d / "home/b/two.jpg")
+        self.assertEqual(P.latest_screenshot(P.screenshot_dirs(cfg, self.env, "Linux"))[0],
+                         self.d / "home/b/スクリーンショット two.jpg")
 
     def test_none_found(self):
         self.write_cfg({"screenshot_dir": str(self.d / "nowhere")})
@@ -310,8 +352,8 @@ class Screenshot(Base):
         home = self.d / "home"
         self.assertEqual(dirs[:3], [home / "画像/Screenshots", home / "画像/スクリーンショット", home / "画像"])
         self.assertIn(home / "Pictures/Screenshots", dirs)
-        self.touch(home / "画像/Screenshots/s.png", 1_799_999_000)
-        self.assertEqual(P.latest_screenshot(dirs)[0], home / "画像/Screenshots/s.png")
+        self.touch(home / "画像/Screenshots/Screenshot_1.png", 1_799_999_000)
+        self.assertEqual(P.latest_screenshot(dirs)[0], home / "画像/Screenshots/Screenshot_1.png")
 
     def test_linux_default_without_user_dirs(self):
         dirs = P.screenshot_dirs(self.cfg()[0], self.env, "Linux")
@@ -326,17 +368,96 @@ class Screenshot(Base):
             plistlib.dump({"location": "~/Shots"}, f)
         dirs = P.screenshot_dirs(self.cfg()[0], dict(self.env, HOME=str(home)), "Darwin")
         self.assertEqual(dirs[0], Path(os.path.expanduser("~/Shots")))
-        self.assertEqual(dirs[-1], home / "Desktop")
+        self.assertIn(home / "Desktop", dirs)
         (prefs / "com.apple.screencapture.plist").write_bytes(b"broken")
-        self.assertEqual(P.screenshot_dirs(self.cfg()[0], self.env, "Darwin"), [home / "Desktop"])
+        self.assertEqual(P.screenshot_dirs(self.cfg()[0], self.env, "Darwin")[0], home / "Desktop")
+        steam = home / "Library/Application Support/Steam/userdata/1/760/remote/42/screenshots"
+        self.touch(steam / "20261124041518_1.jpg", 1_799_999_000)
+        self.assertIn(steam, P.screenshot_dirs(self.cfg()[0], self.env, "Darwin"))
 
     def test_placeholder_in_custom_suffix(self):
         shots = self.d / "shots"
-        self.touch(shots / "a.webp", 1_799_999_990)
+        self.touch(shots / "Screenshot a.webp", 1_799_999_990)
         self.write_cfg({"screenshot_dir": str(shots), "suffixes": {"look": "画面を見る。{screenshot}"}})
         ctx = self.hook("ここ look")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn(str(shots / "a.webp"), ctx)
+        self.assertIn(str(shots / "Screenshot a.webp"), ctx)
         self.assertIn("1 分以内", ctx)
+
+
+    def test_steam_default_glob_and_symlink_dedupe(self):
+        home = self.d / "home"
+        steam = home / ".local/share/Steam/userdata/51/760/remote/3493540/screenshots"
+        self.touch(steam / "20261124041518_1.jpg", 1_799_999_000)
+        self.touch(steam / "thumbnails/20261124041518_1.jpg", 1_799_999_500)   # 直下だけを見る
+        (home / ".steam").mkdir()
+        (home / ".steam/steam").symlink_to(home / ".local/share/Steam")
+        dirs = P.screenshot_dirs(self.cfg()[0], self.env, "Linux")
+        self.assertEqual(sum(1 for d in dirs if d.name == "screenshots"), 1)    # リンク先が同じなら 1 回
+        self.assertEqual(P.latest_screenshot(dirs)[0], steam / "20261124041518_1.jpg")
+
+    def test_glob_in_config(self):
+        self.touch(self.d / "g/x1/Screenshot a.png", 1_799_999_000)
+        self.touch(self.d / "g/x2/Screenshot b.png", 1_799_999_500)
+        self.write_cfg({"screenshot_dir": [str(self.d / "g/*")]})
+        ctx = self.hook("ss")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(str(self.d / "g/x2/Screenshot b.png"), ctx)
+
+    def test_spectacle_location(self):
+        xdg = self.d / "xdg"
+        xdg.mkdir()
+        (xdg / "spectaclerc").write_text("[ImageSave]\nimageSaveLocation=file:///tmp/spec\n"
+                                         "translatedScreenshotsFolder=スクリーンショット\n[Other]\nimageSaveLocation=file:///no\n")
+        dirs = P.screenshot_dirs(self.cfg()[0], self.env, "Linux")
+        self.assertIn(Path("/tmp/spec"), dirs)
+        self.assertNotIn(Path("/no"), dirs)
+
+    def test_names_setting(self):
+        shots = self.d / "shots"
+        self.touch(shots / "photo.png", 1_799_999_900)
+        self.write_cfg({"screenshot_dir": str(shots), "screenshot_names": ["photo*"]})
+        self.assertIn("photo.png", self.hook("ss")["hookSpecificOutput"]["additionalContext"])
+
+    def test_old_screenshot(self):
+        shots = self.d / "shots"
+        self.touch(shots / "Screenshot old.png", 1_800_000_000 - 3 * 3600)
+        self.write_cfg({"screenshot_dir": str(shots)})
+        ctx = self.hook("ss")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("新しいスクリーンショットは無い（120 分以内", ctx)
+        self.assertIn("Screenshot old.png", ctx)
+        self.write_cfg({"screenshot_dir": str(shots), "screenshot_max_age_min": 240})
+        self.assertIn("最新: ", self.hook("ss")["hookSpecificOutput"]["additionalContext"])
+        self.write_cfg({"screenshot_dir": str(shots), "screenshot_max_age_min": None})   # null は古さを問わない
+        self.assertIn("最新: ", self.hook("ss")["hookSpecificOutput"]["additionalContext"])
+
+    def test_by_cwd(self):
+        a, b = self.d / "shots_a", self.d / "shots_b"
+        self.touch(a / "Screenshot a.png", 1_799_999_000)
+        self.touch(b / "Screenshot b.png", 1_799_999_500)
+        proj = self.d / "proj"
+        self.write_cfg({"screenshot_dir": str(b), "screenshot_by_cwd": {str(proj): str(a), str(proj / "sub"): [str(b)]}})
+        ctx = lambda cwd: self.hook("ss", cwd=cwd)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Screenshot a.png", ctx(str(proj / "x")))
+        self.assertIn("Screenshot b.png", ctx(str(proj / "sub/y")))         # 長い方が勝つ
+        self.assertIn("Screenshot b.png", ctx(str(self.d / "projector")))  # 区切りでない前方一致は当てない
+        self.assertIn("Screenshot b.png", ctx(str(self.d)))
+
+    def test_screenshot_config_errors(self):
+        self.write_cfg({"screenshot_by_cwd": {"/x": 3}, "screenshot_names": [], "screenshot_max_age_min": 0})
+        text = "\n".join(self.cfg()[1])
+        for word in ("screenshot_by_cwd", "screenshot_names", "screenshot_max_age_min"):
+            self.assertIn(word, text)
+
+    def test_scan_limit_counts_only_matching_images(self):
+        shots = self.d / "shots"
+        for i in range(30):
+            self.touch(shots / f"note{i}.txt", 1_799_999_000)
+        self.touch(shots / "Screenshot z.png", 1_799_999_100)
+        old = P.SCAN_LIMIT
+        P.SCAN_LIMIT = 1
+        try:
+            self.assertEqual(P.latest_screenshot([shots])[0].name, "Screenshot z.png")
+        finally:
+            P.SCAN_LIMIT = old
 
 
 class Install(unittest.TestCase):

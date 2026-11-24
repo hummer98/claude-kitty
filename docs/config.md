@@ -235,11 +235,14 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | 項目 | 既定 | 意味 |
 |---|---|---|
 | `enabled` | `true` | `false` で何も足さない |
-| `language` | `"ja"` | 既定の略号の文と断りの文の言語（`ja`・`en`） |
+| `language` | `"ja"` | 既定の略号の文と断りの文の言語（`ja`・`en`）。`en` の既定には `next` が無い（句点の無い英文の終わりの語と重なるため） |
 | `suffixes` | `{}` | 既定の略号（`wdt`・`opt`・`pre`・`desc`・`next`・`ss`）に重ねる略号。名前 → 文字列（足す・置き換える）か `null`（消す）か `{"text": …, "with_number": …}`（`desc 2` のように番号を取る略号。`{n}` が番号）。文に `{screenshot}` を書くと最新のスクリーンショットのパスと時刻になる |
 | `number_lists` | `false` | `true` で、略号の無い文にも毎回「案・判断・指摘の一覧には番号を振る」を足す（`desc 2` で指せるように。毎ターン 40 トークンほど増えるので、CLAUDE.md に書く方を勧める） |
 | `notice` | `true` | 拾ったときに画面に「略号 wdt を適用」の 1 行を出す |
-| `screenshot_dir` | `null` | `ss` が見るスクリーンショットの置き場（文字列か、そのリスト）。`null` は OS の普通の場所（Linux は `<ピクチャ>/Screenshots` など、macOS は保存先の設定か `~/Desktop`） |
+| `screenshot_dir` | `null` | `ss` が見るスクリーンショットの置き場（文字列か、そのリスト。glob・`~` を使える）。`null` は OS の普通の場所（Linux は `<ピクチャ>/Screenshots`・Spectacle の保存先・Steam など、macOS は保存先の設定・`~/Desktop`・Steam） |
+| `screenshot_by_cwd` | `{}` | 作業フォルダ → 置き場（文字列かリスト）。フォルダの区切りで前方一致する一番長いものを、`screenshot_dir` より先に使う |
+| `screenshot_names` | `null` | スクリーンショットとみなす名前（大文字小文字を区別しない glob のリスト）。`null` は既定（`Screenshot*`・`スクリーンショット*`・`Bildschirmfoto*` などと Steam の `YYYYMMDDhhmmss_N.jpg`）。`["*"]` で全部の画像 |
+| `screenshot_max_age_min` | `120` | 一番新しいものがこの分数より古ければ「新しいスクリーンショットは無い（最新は…）」と書く。`null` で古さを問わない |
 
 - 正しくない項目はその項目だけ既定に戻し、正しくない略号は使わない（`claude-kitty doctor` の「設定: prompt_suffix」が NG）。止めるのは環境変数 `CLAUDE_PROMPT_SUFFIX=off`。
 

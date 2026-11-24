@@ -113,6 +113,9 @@
     "suffixes": {},
     "number_lists": false,
     "notice": true,
-    "screenshot_dir": null
+    "screenshot_dir": null,
+    "screenshot_by_cwd": {},
+    "screenshot_names": null,
+    "screenshot_max_age_min": 120
   }
 }

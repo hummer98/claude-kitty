@@ -40,7 +40,7 @@ def main(argv):
             print(f"claude-prompt-suffix: 読めない: {e}", file=sys.stderr)
             return 2
         found = find(text, cfg["table"]) if cfg["enabled"] else []
-        context, notice = render(found, cfg, os.environ)
+        context, notice = render(found, cfg, os.environ, cwd=os.getcwd())
         if not found:
             print("拾わない" + ("（prompt_suffix.enabled が false か CLAUDE_PROMPT_SUFFIX=off）" if not cfg["enabled"] else ""))
             if context:
@@ -61,7 +61,7 @@ def main(argv):
         except Exception:  # noqa: BLE001
             pass
     if out:
-        sys.stdout.write(json.dumps(out, ensure_ascii=False))
+        sys.stdout.write(json.dumps(out))  # ASCII だけにする（端末の文字コードで書けず落ちて exit 0 を破らないため）
     return 0
 
 

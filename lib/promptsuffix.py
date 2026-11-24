@@ -6,18 +6,22 @@ CLAUDE.md に「wdt は意見だけ」と書いてモデルに任せるだけだ
 
 混同を防ぐため、拾うのは次のときだけ（docs/prompt-suffix.md）:
 - 貼り付けた文（Claude Code が `<pasted_content id="…">…</pasted_content id="…">` で包んだもの）は除いて見る。
-- 最後の行の、最後の語（前が空白か改行、後ろに何もない。句読点も付かない）が略号のとき。
+- 最後の行の、最後の語（前が空白・改行・ASCII 以外の字、後ろに何もない。句読点も付かない）が略号のとき。
+- 別のセッション・背景の仕事・claude-relay からの知らせ（打った文でないもの）は見ない。
 - 最後の行がコードブロックの中・コマンドのような形（`$ ` 始まり、`--` を含むなど）・引用（`>`）なら見ない。
 - 拾ったら画面に 1 行（systemMessage）出し、足す文は「略号とみなした。明らかに文の一部なら無視してよい」と書く。
 
 設定（~/.config/claude-kitty/config.json の prompt_suffix の節。どれも省ける）:
 
   {"prompt_suffix": {"enabled": true, "language": "ja", "suffixes": {}, "number_lists": false,
-                     "notice": true, "screenshot_dir": null}}
+                     "notice": true, "screenshot_dir": null, "screenshot_by_cwd": {}, "screenshot_names": null,
+                     "screenshot_max_age_min": 120}}
 
 環境変数 CLAUDE_PROMPT_SUFFIX=off で止める。副作用は設定を読むこと、ss のときにスクリーンショットの置き場を
 見ること、設定の問題を errors.log に残すことだけ。
 """
+import fnmatch
+import glob
 import json
 import os
 import plistlib
@@ -61,9 +65,8 @@ BUILTIN = {
         "desc": {"text": "Explain only; do no work (read-only investigation is fine). Explain the topic just discussed.",
                  "with_number": "Explain only; do no work (read-only investigation is fine). Explain item {n} of your "
                                 "previous reply. If that reply has no numbered items, ask the user what it refers to first."},
-        "next": "List only the things the user has to decide, numbered, with their count on the first line. Decide "
-                "whatever you can decide yourself.",
-        "ss": "Open and look at the latest screenshot before answering. {screenshot}",
+        # next は英語の文の終わりの語（what comes next）と重なりやすいので、en の既定には入れない（使うなら suffixes で足す）
+        "ss":"Open and look at the latest screenshot before answering. {screenshot}",
     },
 }
 LANGUAGES = tuple(BUILTIN)
@@ -76,8 +79,9 @@ WORDS = {
         "sep": "・",
         "numbering": "案・判断・指摘の一覧には番号を振る（ユーザーが「desc 2」のように番号で指せるように）。",
         "shot": "最新: {path}（{clock}、{age}）。",
+        "shot_old": "新しいスクリーンショットは無い（{limit}以内のもの。最新は {path}、{clock}、{age}）。ユーザーに確認する。",
         "shot_none": "スクリーンショットが見つからなかった（探した場所: {dirs}）。ユーザーに置き場を確認する。",
-        "min": "{n} 分前", "hour": "{n} 時間前", "day": "{n} 日前", "now": "1 分以内",
+        "min": "{n} 分前", "hour": "{n} 時間前", "day": "{n} 日前", "now": "1 分以内", "limit": "{n} 分",
     },
     "en": {
         "head": "Treated the trailing \"{tokens}\" in the user's message as shorthand. If it is clearly part of the "
@@ -87,16 +91,23 @@ WORDS = {
         "numbering": "Number the items of any list of options, decisions or findings (so the user can point at one "
                      "with \"desc 2\").",
         "shot": "Latest: {path} ({clock}, {age}).",
+        "shot_old": "No recent screenshot (none within {limit}; the latest is {path}, {clock}, {age}). Ask the user.",
         "shot_none": "No screenshot found (looked in: {dirs}). Ask the user where it is.",
-        "min": "{n} min ago", "hour": "{n} h ago", "day": "{n} d ago", "now": "under a minute ago",
+        "min": "{n} min ago", "hour": "{n} h ago", "day": "{n} d ago", "now": "under a minute ago", "limit": "{n} min",
     },
 }
 
 DEFAULTS = {"enabled": True, "language": "ja", "suffixes": {}, "number_lists": False, "notice": True,
-            "screenshot_dir": None}
+            "screenshot_dir": None, "screenshot_by_cwd": {}, "screenshot_names": None, "screenshot_max_age_min": 120}
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".avif"}
-SCAN_LIMIT = 5000          # 1 つの置き場で見るファイルの数の上限（大きなフォルダで hook を遅くしないため）
+# スクリーンショットらしい名前（大文字小文字は区別しない。置き場の直下の、写真などほかの画像を選ばないため）。
+# OS の道具の既定の名前（GNOME・KDE の Spectacle・macOS・Windows の各言語）と、Steam の YYYYMMDDhhmmss_N.jpg
+DEFAULT_NAMES = ["screenshot*", "screen shot*", "スクリーンショット*", "bildschirmfoto*", "capture d’écran*",
+                 "capture d'écran*", "captura de pantalla*", "captura de tela*", "schermafbeelding*", "schermata*",
+                 "skärmbild*", "zrzut ekranu*", "снимок экрана*", "屏幕截图*", "螢幕截圖*", "截屏*", "스크린샷*",
+                 "[0-9]" * 14 + "_*"]
+SCAN_LIMIT = 20000         # 1 つの置き場で見る、名前の合う画像の数の上限（並びは OS 任せなので、超えると取りこぼしうる）
 
 
 # ---- 設定 ------------------------------------------------------------------
@@ -135,6 +146,17 @@ def _entry(value):
     return out
 
 
+def _dirs_value(v):
+    """置き場の設定の値を None・文字列のリストにする。誤りなら False。"""
+    if v is None:
+        return None
+    if isinstance(v, str) and v.strip():
+        return [v]
+    if isinstance(v, list) and v and all(isinstance(x, str) and x.strip() for x in v):
+        return list(v)
+    return False
+
+
 def load_config(env, path=None):
     """(設定, 問題のリスト)。設定の suffixes は、既定と設定を重ねた {名前: {"text", "with_number"?}}。
 
@@ -169,13 +191,36 @@ def load_config(env, path=None):
         else:
             problems.append(f"prompt_suffix.language は {' / '.join(LANGUAGES)}: {section['language']!r}")
     if "screenshot_dir" in section:
-        v = section["screenshot_dir"]
-        if v is None or (isinstance(v, str) and v.strip()):
-            out["screenshot_dir"] = v
-        elif isinstance(v, list) and v and all(isinstance(x, str) and x.strip() for x in v):
-            out["screenshot_dir"] = list(v)
+        v = _dirs_value(section["screenshot_dir"])
+        if v is False:
+            problems.append(f"prompt_suffix.screenshot_dir は null・文字列・文字列のリスト: {section['screenshot_dir']!r}")
         else:
-            problems.append(f"prompt_suffix.screenshot_dir は null・文字列・文字列のリスト: {v!r}")
+            out["screenshot_dir"] = v
+    if "screenshot_by_cwd" in section:
+        v = section["screenshot_by_cwd"]
+        if not isinstance(v, dict):
+            problems.append(f"prompt_suffix.screenshot_by_cwd がオブジェクトでない: {v!r}")
+        else:
+            table_cwd = {}
+            for k, dirs in v.items():
+                d = _dirs_value(dirs)
+                if not (isinstance(k, str) and k.strip()) or d in (False, None):
+                    problems.append(f"prompt_suffix.screenshot_by_cwd の {k!r} は、フォルダ → 文字列か文字列のリスト")
+                else:
+                    table_cwd[k] = d
+            out["screenshot_by_cwd"] = table_cwd
+    if "screenshot_names" in section:
+        v = section["screenshot_names"]
+        if v is None or (isinstance(v, list) and v and all(isinstance(x, str) and x.strip() for x in v)):
+            out["screenshot_names"] = v
+        else:
+            problems.append(f"prompt_suffix.screenshot_names は null か、空でない文字列のリスト: {v!r}")
+    if "screenshot_max_age_min" in section:
+        v = section["screenshot_max_age_min"]
+        if v is None or (isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 525600):
+            out["screenshot_max_age_min"] = v
+        else:
+            problems.append(f"prompt_suffix.screenshot_max_age_min は 1〜525600 の整数か null: {v!r}")
 
     table = {k: (dict(text=v) if isinstance(v, str) else dict(v)) for k, v in BUILTIN[out["language"]].items()}
     given = section.get("suffixes", {})
@@ -205,8 +250,8 @@ def load_config(env, path=None):
 # ---- 略号を拾う ------------------------------------------------------------
 
 # Claude Code は、まとめて貼り付けた文（[Pasted text #1 +N lines] に畳まれたもの）を hook の prompt の中で
-# この形で包む（2.1.331 で確認。閉じが無ければ最後まで貼り付けとみなす）
-PASTED = re.compile(r'<pasted_content id="([0-9a-f]{4})">.*?(?:</pasted_content id="\1">|\Z)', re.S)
+# この形で包む（2.1.331 で確認。id は 4 桁の 16 進だったが、変わっても外れないよう広く取る。閉じが無ければ最後まで貼り付け）
+PASTED = re.compile(r'<pasted_content id="([^"\n]{1,64})">.*?(?:</pasted_content id="\1">|\Z)', re.S)
 FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 
 
@@ -238,11 +283,37 @@ def last_line(text):
     return last
 
 
+# 打った文でないもの: 別のセッションからの知らせ・背景の仕事の知らせ・claude-relay のメッセージなど。
+# Claude Code がユーザーの入力として渡すことがあるが、最後の語はユーザーの略号ではない
+NOT_TYPED = ("<cross-session-message", "<agent-message", "<task-notification", "<relay-message",
+             "<teammate-message", "[SYSTEM NOTIFICATION")
+SLASH = re.compile(r"^/[A-Za-z][\w:-]*(?:\s|$)")
+# 語の末尾の ASCII の英字の並び（その前が ASCII 以外の字のときだけ区切りとみなす。「…についてwdt」）
+TAIL = re.compile(r"[^\x00-\x7f]([A-Za-z][A-Za-z0-9_-]*)$")
+
+
+def is_typed(text):
+    return not any(m in text for m in NOT_TYPED)
+
+
+def _match(word, prev, table):
+    """word（と、番号ならその前の語 prev）が略号か。(名前, 番号) か None。"""
+    w = word.lower()
+    if NUMBER.match(w) and prev is not None and "with_number" in table.get(prev.lower(), {}):
+        return prev.lower(), w
+    if w in table:
+        return w, None
+    return None
+
+
 def find(text, table):
     """文の最後の略号の並び [(名前, 番号か None), ...]（書いた順）。無ければ []。"""
     if not isinstance(text, str) or not text.strip():
         return []
-    if text.lstrip().startswith(("/", "!")):
+    if not is_typed(text):
+        return []
+    head = text.lstrip()
+    if SLASH.match(head) or head.startswith("!"):
         return []                        # スラッシュコマンドとシェルのモード（引数の最後の語は略号でない）
     line = last_line(text)
     if line is None:
@@ -251,15 +322,29 @@ def find(text, table):
     found = []
     i = len(words) - 1
     while i >= 0 and len(found) < MAX_SUFFIXES:
-        w = words[i].lower()
-        if NUMBER.match(w) and i >= 1 and "with_number" in table.get(words[i - 1].lower(), {}):
-            found.append((words[i - 1].lower(), w))
-            i -= 2
-        elif w in table:
-            found.append((w, None))
-            i -= 1
-        else:
+        w = words[i]
+        if NUMBER.match(w.lower()) and i >= 1:
+            prev = words[i - 1]
+            hit = _match(w, prev, table)
+            if hit:
+                found.append(hit)
+                i -= 2
+                continue
+            m = TAIL.search(prev)        # 「…についてdesc 2」
+            hit = _match(w, m.group(1), table) if m else None
+            if hit:
+                found.append(hit)
             break
+        hit = _match(w, None, table)
+        if hit:
+            found.append(hit)
+            i -= 1
+            continue
+        m = TAIL.search(w)               # 「…についてwdt」「…は？wdt」。ASCII の英数字の直後（xwdt）は拾わない
+        hit = _match(m.group(1), None, table) if m else None
+        if hit:
+            found.append(hit)
+        break
     found.reverse()
     seen, out = set(), []
     for item in found:
@@ -270,6 +355,10 @@ def find(text, table):
 
 
 # ---- スクリーンショット ----------------------------------------------------
+
+def _home(env):
+    return Path(env.get("HOME") or Path.home())
+
 
 def _xdg_pictures(env, home):
     """~/.config/user-dirs.dirs の XDG_PICTURES_DIR（日本語の環境では ~/画像 など）。無ければ ~/Pictures。"""
@@ -284,14 +373,35 @@ def _xdg_pictures(env, home):
     return home / "Pictures"
 
 
-def screenshot_dirs(cfg, env, os_name=None):
-    """スクリーンショットを探す場所（書いた順・重なりなし）。設定 screenshot_dir が無ければ OS の普通の場所。"""
-    home = Path(env.get("HOME") or Path.home())
-    v = cfg.get("screenshot_dir")
-    if v:
-        given = [v] if isinstance(v, str) else v
-        return list(dict.fromkeys(Path(os.path.expanduser(x.replace("$HOME", str(home)))) for x in given))
-    os_name = os_name or os.uname().sysname
+def _spectacle_dirs(env, home, pics):
+    """KDE の Spectacle の保存先（spectaclerc の [ImageSave] imageSaveLocation。無ければ
+    <ピクチャ>/<translatedScreenshotsFolder>）。読めなければ []。"""
+    base = Path(env["XDG_CONFIG_HOME"]) if env.get("XDG_CONFIG_HOME") else home / ".config"
+    try:
+        text = (base / "spectaclerc").read_text()
+    except (OSError, UnicodeDecodeError):
+        return []
+    out, section = [], None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line
+            continue
+        if section != "[ImageSave]" or "=" not in line:
+            continue
+        key, value = (x.strip() for x in line.split("=", 1))
+        if key == "imageSaveLocation" and value:
+            out.insert(0, Path(re.sub(r"^file://", "", value)))
+        elif key == "translatedScreenshotsFolder" and value and "/" not in value:
+            out.append(pics / value)
+    return out
+
+
+STEAM = "userdata/*/760/remote/*/screenshots"
+
+
+def default_dirs(env, os_name):
+    home = _home(env)
     if os_name == "Darwin":
         # macOS の置き場は「スクリーンショット」の設定（defaults write com.apple.screencapture location）。既定はデスクトップ
         dirs = []
@@ -299,28 +409,76 @@ def screenshot_dirs(cfg, env, os_name=None):
             with open(home / "Library/Preferences/com.apple.screencapture.plist", "rb") as f:
                 loc = plistlib.load(f).get("location")
             if isinstance(loc, str) and loc:
-                dirs.append(Path(os.path.expanduser(loc)))
+                dirs.append(os.path.expanduser(loc))
         except (OSError, ValueError, plistlib.InvalidFileException):
             pass
-        return list(dict.fromkeys(dirs + [home / "Desktop"]))
+        return dirs + [str(home / "Desktop"), str(home / "Pictures/Screenshots"),
+                       str(home / "Library/Application Support/Steam" / STEAM)]
     # Linux: GNOME は <ピクチャ>/Screenshots（日本語の GNOME は「スクリーンショット」）、KDE の Spectacle は
-    # <ピクチャ>/Screenshots（古い版は <ピクチャ> の直下）
+    # spectaclerc の保存先（既定は <ピクチャ>/<その言語の Screenshots>）。Steam はゲームごとのフォルダ
     pics = _xdg_pictures(env, home)
-    dirs = [pics / "Screenshots", pics / "スクリーンショット", pics, home / "Pictures/Screenshots", home / "Pictures"]
-    return list(dict.fromkeys(dirs))
+    dirs = [pics / "Screenshots", pics / "スクリーンショット", *_spectacle_dirs(env, home, pics), pics,
+            home / "Pictures/Screenshots", home / "Pictures",
+            home / ".local/share/Steam" / STEAM, home / ".steam/steam" / STEAM,
+            home / ".var/app/com.valvesoftware.Steam/.local/share/Steam" / STEAM]
+    return [str(d) for d in dirs]
 
 
-def latest_screenshot(dirs):
-    """置き場の直下の画像のうち、一番新しいもの (パス, 更新時刻)。無ければ None。"""
+def _expand(pattern, home):
+    """置き場の書き方（~・$HOME・glob）を、あるフォルダのリストにする。"""
+    p = os.path.expanduser(pattern.replace("$HOME", str(home)))
+    if pattern.startswith("~/") or pattern == "~":
+        p = str(home) + pattern[1:]
+    if any(c in p for c in "*?["):
+        return sorted(Path(x) for x in glob.glob(p) if os.path.isdir(x))
+    return [Path(p)]
+
+
+def _for_cwd(table, cwd, home):
+    """screenshot_by_cwd のうち、cwd に前方一致する（フォルダの区切りで）一番長いもの。無ければ None。"""
+    if not cwd or not table:
+        return None
+    best = None
+    for prefix, dirs in table.items():
+        root = os.path.normpath(_expand(prefix, home)[0]) if not any(c in prefix for c in "*?[") else None
+        if root and (cwd == root or cwd.startswith(root.rstrip("/") + "/")):
+            if best is None or len(root) > len(best[0]):
+                best = (root, dirs)
+    return best[1] if best else None
+
+
+def screenshot_dirs(cfg, env, os_name=None, cwd=None):
+    """スクリーンショットを探すフォルダ（重なりなし）。作業フォルダの設定 > screenshot_dir > OS の普通の場所。"""
+    home = _home(env)
+    given = _for_cwd(cfg.get("screenshot_by_cwd") or {}, cwd and os.path.normpath(cwd), home) or cfg.get("screenshot_dir")
+    if isinstance(given, str):
+        given = [given]
+    patterns = given or default_dirs(env, os_name or os.uname().sysname)
+    out, seen = [], set()
+    for pat in patterns:
+        for d in _expand(pat, home):
+            key = os.path.realpath(d)        # ~/.steam/steam は ~/.local/share/Steam へのリンクのことが多い
+            if key not in seen:
+                seen.add(key)
+                out.append(d)
+    return out
+
+
+def latest_screenshot(dirs, names=None):
+    """置き場の直下の、名前の合う画像のうち、一番新しいもの (パス, 更新時刻)。無ければ None。"""
+    pats = [n.lower() for n in (names or DEFAULT_NAMES)]
     best = None
     for d in dirs:
         try:
             with os.scandir(d) as it:
-                for n, e in enumerate(it):
-                    if n >= SCAN_LIMIT:
-                        break
-                    if os.path.splitext(e.name)[1].lower() not in IMAGE_EXT:
+                n = 0
+                for e in it:
+                    low = e.name.lower()
+                    if os.path.splitext(low)[1] not in IMAGE_EXT or not any(fnmatch.fnmatchcase(low, p) for p in pats):
                         continue
+                    n += 1
+                    if n > SCAN_LIMIT:
+                        break
                     try:
                         if not e.is_file():
                             continue
@@ -345,20 +503,24 @@ def _age(seconds, w):
     return w["day"].format(n=m // (24 * 60))
 
 
-def screenshot_text(cfg, env, now=None, os_name=None):
+def screenshot_text(cfg, env, now=None, os_name=None, cwd=None):
     w = WORDS[cfg["language"]]
-    dirs = screenshot_dirs(cfg, env, os_name)
-    found = latest_screenshot(dirs)
+    dirs = screenshot_dirs(cfg, env, os_name, cwd)
+    found = latest_screenshot(dirs, cfg.get("screenshot_names"))
     if not found:
-        return w["shot_none"].format(dirs=", ".join(str(d) for d in dirs))
+        return w["shot_none"].format(dirs=", ".join(str(d) for d in dirs) or "-")
     path, mtime = found
     now = time.time() if now is None else now
-    return w["shot"].format(path=path, clock=time.strftime("%m-%d %H:%M", time.localtime(mtime)), age=_age(now - mtime, w))
+    args = dict(path=path, clock=time.strftime("%m-%d %H:%M", time.localtime(mtime)), age=_age(now - mtime, w))
+    limit = cfg.get("screenshot_max_age_min")
+    if limit and now - mtime > limit * 60:
+        return w["shot_old"].format(limit=w["limit"].format(n=limit), **args)
+    return w["shot"].format(**args)
 
 
 # ---- 足す文 ----------------------------------------------------------------
 
-def render(found, cfg, env, now=None, os_name=None):
+def render(found, cfg, env, now=None, os_name=None, cwd=None):
     """(モデルに足す文, 画面の 1 行)。found が空なら (number_lists の文か None, None)。"""
     w = WORDS[cfg["language"]]
     if not found:
@@ -371,7 +533,7 @@ def render(found, cfg, env, now=None, os_name=None):
         text = entry["text"] if n is None else entry["with_number"].replace("{n}", n)
         if "{screenshot}" in text:
             if shot is None:
-                shot = screenshot_text(cfg, env, now, os_name)
+                shot = screenshot_text(cfg, env, now, os_name, cwd)
             text = text.replace("{screenshot}", shot)
         lines.append(f"- {name if n is None else f'{name} {n}'}: {text.strip()}")
     if cfg["number_lists"]:
@@ -382,6 +544,9 @@ def render(found, cfg, env, now=None, os_name=None):
 
 # ---- 記録 ------------------------------------------------------------------
 
+LOG_MAX = 256 * 1024     # errors.log の大きさの上限。超えたら errors.log.1 に回す（設定の誤りは毎ターン出るため）
+
+
 def state_dir(env):
     base = env.get("XDG_RUNTIME_DIR")
     if base and os.path.isdir(base):
@@ -390,11 +555,25 @@ def state_dir(env):
 
 
 def log_error(env, message):
-    """設定の問題や例外を残す（stdout・stderr には出さない。claude-kitty doctor の「設定: prompt_suffix」でも見える）。"""
+    """設定の問題や例外を残す（stdout・stderr には出さない。claude-kitty doctor の「設定: prompt_suffix」でも見える）。
+
+    直前の行と同じ文なら書かない（壊れた設定は毎ターン同じ問題を出すので、ログを埋めないため）。"""
     try:
         d = state_dir(env)
         d.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with open(d / "errors.log", "a") as f:
+        log = d / "errors.log"
+        try:
+            size = log.stat().st_size
+            with open(log, "rb") as f:
+                f.seek(max(0, size - 4096))
+                last = f.read().decode("utf-8", "replace").rstrip("\n").rsplit("\n", 1)[-1]
+            if last.split(" ", 1)[-1] == message:
+                return
+            if size > LOG_MAX:
+                os.replace(log, d / "errors.log.1")
+        except FileNotFoundError:
+            pass
+        with open(log, "a") as f:
             f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
     except OSError:
         pass
@@ -413,7 +592,7 @@ def decide(stdin_text, env, now=None, os_name=None):
     if data.get("hook_event_name", "UserPromptSubmit") != "UserPromptSubmit":
         return None
     if data.get("agent_id"):
-        return None                       # サブエージェントへの指示（親のモデルが書いた文）は対象外
+        return None                       # 保険: サブエージェントの入力に hook が呼ばれる版があれば、それは親のモデルの文
     prompt = data.get("prompt")
     if not isinstance(prompt, str):
         return None
@@ -423,7 +602,8 @@ def decide(stdin_text, env, now=None, os_name=None):
     if not cfg["enabled"]:
         return None
     found = find(prompt, cfg["table"])
-    context, notice = render(found, cfg, env, now, os_name)
+    cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else None
+    context, notice = render(found, cfg, env, now, os_name, cwd)
     if not context:
         return None
     out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}}
