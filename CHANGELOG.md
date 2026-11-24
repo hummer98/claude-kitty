@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-11-24
+
 ### 追加
 
 - `claude-relay send local/<役割>`: 同じ端末の中で、別の claude.ai アカウント（別の `CLAUDE_CONFIG_DIR`）で動くセッションへ送る。Claude Code 自身のセッション間の連絡はアカウントをまたげず、同じ端末で 2 つのアカウントを使い分けるときに話す手段が無かったため（[docs/relay.md](docs/relay.md#同じ端末の別のセッションへlocal)）。
@@ -416,7 +418,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.7...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.7.8...HEAD
+[0.7.8]: https://github.com/hummer98/claude-kitty/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/hummer98/claude-kitty/compare/v0.7.6...v0.7.7
 [0.7.6]: https://github.com/hummer98/claude-kitty/compare/v0.7.5...v0.7.6
 [0.7.5]: https://github.com/hummer98/claude-kitty/compare/v0.7.4...v0.7.5
