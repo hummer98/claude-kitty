@@ -541,8 +541,10 @@ def new_id(d, sender, t):
     return name
 
 
-def receive(env, sender, original, data, now=None, notify=None):
-    """recv の中身。(結果の 1 行, 終了コード)。受信箱に置けたら成功（ペインに知らせられなくても）。"""
+def receive(env, sender, original, data, now=None, notify=None, local=False):
+    """recv の中身。(結果の 1 行, 終了コード)。受信箱に置けたら成功（ペインに知らせられなくても）。
+    local は send local/… から直接呼んだとき（送り元は LOCAL）。ssh から来た送り元が LOCAL・自分の relay.name を
+    名乗ることは許さない（同じ端末のセッションからのものと見分けがつかず、返信先も同じ端末になるため）。"""
     now = time.time() if now is None else now
     role = None
     entry = {"at": now_iso(now), "dir": "in", "from": sender if isinstance(sender, str) else None}
@@ -556,12 +558,19 @@ def receive(env, sender, original, data, now=None, notify=None):
             raise Refused(f"受け取る側の設定が読めない: {e}")
         if not conf["enabled"]:
             raise Refused("受け取りを止めている（relay.enabled が false）")
+        if not local and reserved_name(sender, conf):
+            raise Refused(f"送り元の名前 {sender} は同じ端末への宛先として予約している（受け取る側で claude-relay untrust {sender} し、"
+                          "相手に pair --name で別の名前を作り直してもらう）")
+        if local and sender != LOCAL:
+            raise Refused("同じ端末からの送り元の名前が正しくない")
         if not conf["receivers"]:
             raise Refused("受け取る役割が無い（relay.receivers が空）")
         role = role or conf["receivers"][0]
         entry["role"] = role
         if role not in conf["receivers"]:
-            raise Refused(f"役割 {role} は受け取らない（受け取るのは {', '.join(conf['receivers'])}）")
+            # 同じ端末なら受け取る側の設定も自分の設定なので、足し方まで案内する（ssh の相手には、相手の設定のことなので言わない）
+            hint = f"。受け取るなら設定の relay.receivers に {role} を足す" if local else ""
+            raise Refused(f"役割 {role} は受け取らない（受け取るのは {', '.join(conf['receivers'])}{hint}）")
         limit = conf["max_bytes"]
         if len(data) > limit + STDIN_SLACK:
             raise Refused(f"大きすぎる（本文は {limit} バイトまで）")
@@ -725,15 +734,35 @@ def sender_address(rec):
     return f"{s}/{r}" if r else s
 
 
-def frame(rec, body=None):
+def no_reply_reason(rec, receivers):
+    """同じ端末からのもので、返事が届かないと分かるならその理由（届きうるなら None）。受け取る側の設定は
+    送り手と同じ設定ファイルなので、送り手の役割が relay.receivers に無ければ返事は拒否される。"""
+    if rec.get("from") != LOCAL or receivers is None:
+        return None
+    r = rec.get("from_role")
+    if not r:
+        return "送り手の役割が分からない（kitty の外など）"
+    if r not in receivers:
+        return f"送り手の役割 {r} は relay.receivers に無い"
+    return None
+
+
+def frame(rec, body=None, receivers=None):
     addr = sender_address(rec)
-    reply = f"claude-relay send {addr} --reply-to {rec.get('id')} -"
+    why = no_reply_reason(rec, receivers)
+    if why:
+        # 拒否される reply の command を見せない（往復するなら設定の relay.receivers に送り手の役割を足す）
+        note = f"返事は届かない（{why}）。返事が要るならユーザーに伝える"
+        tail = f'reply_note="{attr(note)}"'
+    else:
+        reply = f"claude-relay send {addr} --reply-to {rec.get('id')} -"
+        tail = f'reply="{attr(reply)}"'
     b = escape_body(rec["body"] if body is None else body)
     return (f'<relay-message from="{attr(addr)}" id="{attr(rec.get("id") or "")}" at="{attr(rec.get("received_at") or "")}" '
-            f'reply="{attr(reply)}">\n{b}\n</relay-message>')
+            f'{tail}>\n{b}\n</relay-message>')
 
 
-def compose(items, budget=CONTEXT_BUDGET, delivered=None):
+def compose(items, budget=CONTEXT_BUDGET, delivered=None, receivers=None):
     """渡す文と、そのうちの何通を入れたか。budget を超える分は次に回す（1 通目だけは切って入れる）。"""
     def text(frames, rest):
         top = f"claude-relay: {origin(items)}から {len(frames)} 通のメッセージが届いた。"
@@ -741,7 +770,7 @@ def compose(items, budget=CONTEXT_BUDGET, delivered=None):
         return top + "\n\n" + "\n\n".join(frames) + "\n\n" + NOTICE + more
     frames = []
     for i, rec in enumerate(items):
-        f = frame(rec)
+        f = frame(rec, receivers=receivers)
         if len(text(frames + [f], len(items) - i - 1)) <= budget:
             frames.append(f)
             continue
@@ -749,7 +778,7 @@ def compose(items, budget=CONTEXT_BUDGET, delivered=None):
             where = (delivered(rec) if delivered else "delivered/")
             note = f"\n（長いので途中まで。全文は {where}）"
             over = len(text([f], len(items) - 1)) - budget + len(note) + 16
-            frames.append(frame(rec, rec["body"][:max(0, len(rec["body"]) - over)] + note))
+            frames.append(frame(rec, rec["body"][:max(0, len(rec["body"]) - over)] + note, receivers))
             continue
         break
     return text(frames, len(items) - len(frames)), len(frames)
@@ -764,7 +793,11 @@ def take(env, role, budget=CONTEXT_BUDGET, now=None, timeout=10.0, moved_ids=Non
         if not items:
             return None, 0  # 呼ぶ側（hook・inbox --deliver）は 2 つに分けて受ける
         dd = delivered_dir(env, role)
-        text, n = compose(items, budget, delivered=lambda r: str(dd / f"{r['id']}.json"))
+        try:
+            receivers = load_relay_config(env)["receivers"]  # 同じ端末からのものに、届かない返事の command を見せない
+        except ValueError:
+            receivers = None
+        text, n = compose(items, budget, delivered=lambda r: str(dd / f"{r['id']}.json"), receivers=receivers)
         mkdir_private(dd)
         moved = 0
         for rec in items[:n]:
@@ -1207,14 +1240,15 @@ def reserved_name(name, conf):
 
 
 def own_role(env):
-    from kstate import load, state_dir, state_file
+    """送ったセッションの役割。claude-state の記録、まだ無ければ kitty のペインの user var（受け手の hook の
+    session_role と同じ見分け方。自分宛てを見分けるのに、記録の無い始まったばかりのセッションでも効くように）。"""
     from state import valid_session_id
     sid = env.get("CLAUDE_CODE_SESSION_ID")
-    if valid_session_id(sid):
-        rec = load(state_file(state_dir(env), sid))
-        if rec and isinstance(rec.get("role"), str) and NAME_RE.match(rec["role"]):
-            return rec["role"]
-    return None
+    try:
+        role = session_role(env, sid if valid_session_id(sid) else None)
+    except Exception:  # noqa: BLE001 — 分からなければ None（送るのは止めない）
+        return None
+    return role if isinstance(role, str) and NAME_RE.match(role) else None
 
 
 def ssh_argv(env, peer, role):
@@ -1264,7 +1298,7 @@ def send(env, target, body, reply_to=None, ping=False, now=None, run=subprocess.
         # recv と同じ receive() を通す（受け取りの役割・大きさ・通数・ログ・拒否の理由・ペインの色・起こす）。
         # 送り元の名前は local に決める（本文の中の自称は、ssh のときと同じく記録と返信先の表示だけに使う）
         try:
-            out, rc = receive(env, LOCAL, "recv" + (f" {role}" if role else ""), data, now=now)
+            out, rc = receive(env, LOCAL, "recv" + (f" {role}" if role else ""), data, now=now, local=True)
             err = ""
         except Exception as e:  # noqa: BLE001 — ssh の先の recv が落ちたときと同じく「届かない」にする
             out, err, rc = "", f"{type(e).__name__}: {e}", None

@@ -1174,7 +1174,9 @@ class LocalSend(RelayBase):
         out = self.w.hook("b", "UserPromptSubmit", {"session_id": "sid-other", "prompt": text}, **e)
         ctx = out["hookSpecificOutput"]["additionalContext"]
         self.assertTrue(ctx.startswith("claude-relay: この端末の別のセッションから 1 通のメッセージが届いた。"), ctx[:80])
-        self.assertIn(f'reply="claude-relay send local/dev-a --reply-to {f.stem} -"', ctx)
+        # 送り手の役割 dev-a は relay.receivers に無い（同じ設定ファイル）: 拒否される reply の command は見せない
+        self.assertNotIn('reply="', ctx)
+        self.assertIn('reply_note="返事は届かない（送り手の役割 dev-a は relay.receivers に無い）。返事が要るならユーザーに伝える"', ctx)
         self.assertIn("secret-xyz", ctx)
         self.assertIn("ユーザーが打ったものではない", ctx)
         self.assertEqual((self.w.inbox("b"), len(self.w.delivered("b"))), ([], 1))
@@ -1187,7 +1189,65 @@ class LocalSend(RelayBase):
         r = self.w.cli("b", "send", "local/dev-a", "-", input="見ました", CLAUDE_CODE_SESSION_ID="sid-other",
                        CLAUDE_CONFIG_DIR=self.other)
         self.assertEqual(r.returncode, 1)
-        self.assertIn("拒否: 役割 dev-a は受け取らない", r.stderr)
+        self.assertIn("拒否: 役割 dev-a は受け取らない（受け取るのは main。受け取るなら設定の relay.receivers に dev-a を足す）",
+                      r.stderr)
+
+    def test_round_trip_when_both_roles_receive(self):
+        # 往復するなら、送り手の役割も relay.receivers に足す（受け取る側の設定も同じファイル）
+        self.w.set_relay("b", receivers=["left", "dev-a"])
+        e = self.receiver_session()
+        self.w.session("b", "sid-dev", "dev-a", window=5)
+        self.assertEqual(self.send("local/main", "質問").returncode, 0)
+        self.assertTrue(self.srv.done.wait(10))
+        mid = self.w.inbox("b")[0].stem
+        out = self.w.hook("b", "UserPromptSubmit", {"session_id": "sid-other", "prompt": "読んで"}, **e)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(f'reply="claude-relay send local/dev-a --reply-to {mid} -"', ctx)
+        self.assertNotIn("reply_note", ctx)
+        # 枠の reply のとおりに返す（受け手のアカウントの置き場から）
+        r = self.w.cli("b", "send", "local/dev-a", "--reply-to", mid, "-", input="答え", CLAUDE_CODE_SESSION_ID="sid-other",
+                       CLAUDE_CONFIG_DIR=self.other)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("配達済み: local/dev-a", r.stdout)
+        [back] = self.w.inbox("b", "dev-a")
+        got = json.loads(back.read_text())
+        self.assertEqual((got["from"], got["from_role"], got["reply_to"]), ("local", "main", mid))
+        # dev-a の hook（送り手の置き場）が受け取る。返事の返事の宛ても届く（main は受け取る）
+        out = self.w.hook("b", "Stop", {"session_id": "sid-dev"}, CLAUDE_CONFIG_DIR=self.mine)
+        self.assertIn(f'reply="claude-relay send local/main --reply-to {back.stem} -"', out["reason"])
+
+    def test_unknown_sender_role_gets_no_reply_command(self):
+        r = self.w.cli("b", "send", "local/main", "kitty の外から")  # 記録も kitty も無い: 役割が分からない
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text, _rest = R.take(self.env, "main")
+        self.assertNotIn('reply="', text)
+        self.assertIn("返事は届かない（送り手の役割が分からない（kitty の外など））", text)
+
+    def test_own_role_from_kitty_without_record(self):
+        # claude-state の記録がまだ無いセッションでも、kitty のペインの role で自分宛てを見分ける
+        r = self.send("local/main", sid="sid-new", **self.kitty)  # LS の window 4 = main
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("自分宛て（この端末の役割 main は自分）", r.stderr)
+        r = self.send("local/main", sid="sid-new", KITTY_WINDOW_ID="5", KITTY_LISTEN_ON="unix:/fake/kitty-1")  # dev-a
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(self.w.inbox("b")[0].read_text())["from_role"], "dev-a")
+
+    def test_ssh_sender_cannot_claim_local(self):
+        # ssh の強制コマンドの --from が local・自分の relay.name なら断る（同じ端末からのものと見分けられない）
+        self.w.set_relay("b", name="b")
+        data = json.dumps({"body": "x"}).encode()
+        for name in ("local", "b"):
+            line, rc = R.receive(self.env, name, "recv", data)
+            self.assertEqual(rc, 1, name)
+            self.assertIn(f"送り元の名前 {name} は同じ端末への宛先として予約している", line)
+            r = subprocess.run([sys.executable, str(RELAY), "recv", "--from", name], input=b"{\"body\": \"x\"}",
+                               capture_output=True, env=dict(self.env, SSH_ORIGINAL_COMMAND="recv"), timeout=60)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("予約", r.stdout.decode())
+        self.assertEqual(self.w.inbox("b"), [])
+        self.assertEqual(R.receive(self.env, "mac-a", "recv", data)[1], 0)  # ほかの名前は今までどおり
+        # 同じ端末から（send local）は通る
+        self.assertEqual(R.receive(self.env, "local", "recv", data, local=True)[1], 0)
 
     def test_relay_name_means_local(self):
         self.w.set_relay("b", name="b")
@@ -1206,7 +1266,7 @@ class LocalSend(RelayBase):
     def test_role_not_receiver(self):
         r = self.send("local/dev-a")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("拒否: 役割 dev-a は受け取らない（受け取るのは main）", r.stderr)
+        self.assertIn("拒否: 役割 dev-a は受け取らない（受け取るのは main。受け取るなら設定の relay.receivers に dev-a を足す）", r.stderr)
         self.assertEqual(self.w.inbox("b", "dev-a"), [])
         self.assertEqual((self.logs("in")[-1]["result"], self.logs("out")[-1]["result"]), ("rejected", "rejected"))
 
@@ -1346,6 +1406,13 @@ class Units(unittest.TestCase):
         self.assertEqual(R.origin(items), "別の端末・この端末の別のセッション")
         self.assertEqual(R.origin([{"from": "local"}]), "この端末の別のセッション")
         self.assertEqual(R.origin([{"from": "mac-a"}]), "別の端末")
+
+    def test_no_reply_reason(self):
+        self.assertIsNone(R.no_reply_reason({"from": "mac-a", "from_role": None}, ["main"]))  # 別の端末: 相手の設定は分からない
+        self.assertIsNone(R.no_reply_reason({"from": "local", "from_role": "dev"}, None))      # 設定が読めない: 今までどおり
+        self.assertIsNone(R.no_reply_reason({"from": "local", "from_role": "dev"}, ["main", "dev"]))
+        self.assertIn("dev は relay.receivers に無い", R.no_reply_reason({"from": "local", "from_role": "dev"}, ["main"]))
+        self.assertIn("分からない", R.no_reply_reason({"from": "local", "from_role": None}, ["main"]))
 
     def test_is_local(self):
         self.assertTrue(R.is_local("local", {"name": None}))
@@ -1628,6 +1695,19 @@ class DoctorRelay(unittest.TestCase):
             self.assertEqual(items[n]["status"], "ok", (n, items[n]))
         (self.w.home / ".ssh/authorized_keys").write_text(R.ak_line("m", fake_pub(1), "/gone/claude-relay") + "\n")
         self.assertEqual(self.items()["relay: 受け取りの登録"]["status"], "ng")
+
+    def test_reserved_peer_names_warn(self):
+        # 0.7.7 までの trust で local・自分の relay.name の相手を登録していたら注意
+        self.w.answers["sshd"] = (0, "active\n")
+        self.cfg.write_text(json.dumps({"relay": {"name": "desk", "peers": {"m": {"host": "m.lan", "user": "u"}}}}))
+        self.assertIn("relay: 送る相手", self.items())
+        self.assertNotIn("relay: 予約した名前", self.items())
+        self.cfg.write_text(json.dumps({"relay": {"name": "desk", "peers": {"local": {"host": "m.lan", "user": "u"}}}}))
+        (self.w.home / ".ssh").mkdir(mode=0o700)
+        (self.w.home / ".ssh/authorized_keys").write_text(R.ak_line("desk", fake_pub(1), str(RELAY)) + "\n")
+        it = self.items()["relay: 予約した名前"]
+        self.assertEqual(it["status"], "warn")
+        self.assertIn("desk, local", it["detail"])
 
     def test_mac_sshd_and_broken_config(self):
         self.cfg.write_text(json.dumps({"relay": {"max_bytes": "big"}}))

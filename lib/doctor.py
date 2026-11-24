@@ -660,6 +660,12 @@ def check_relay(ctx, rep):
         else:
             rep.ok("relay: 受け取りの登録", f"{len(names)} 人（{', '.join(names)}）。受け取りの役割: {', '.join(conf['receivers'])}"
                    + ("" if conf["enabled"] else "。ただし relay.enabled が false で、受け取りを止めている"))
+    # local と自分の relay.name は同じ端末への宛先（send は ssh を通さず、recv はその名前の送り元を断る）。
+    # 0.7.7 までの trust で登録した同じ名前の相手は、送っても受け取っても相手に届かない
+    clash = sorted(n for n in set(conf["peers"]) | set(names) if R.reserved_name(n, conf))
+    if clash:
+        rep.warn("relay: 予約した名前", f"相手の名前 {', '.join(clash)} は同じ端末への宛先と同じ（その相手とは送れない・受け取れない）",
+                 f"claude-relay untrust {clash[0]} し、相手に pair --name で別の名前を作り直してもらって trust をもう一度")
     import merge_hooks as M
     try:
         data = M.load(ctx.settings)

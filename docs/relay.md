@@ -92,9 +92,15 @@ claude-relay ping local
 
 - ssh・専用の鍵・`pair`・`trust` は要らない。同じ OS ユーザーのプロセスは受信箱に直接書けるので、登録で守るものが無い。
 - 受け取りの検査は recv と同じ処理を通す（コードを分けない）: `relay.enabled`、宛先の役割が `relay.receivers` にあるか、大きさ（`relay.max_bytes`、既定 16 KB）、通数の上限、ログ、拒否の理由。受信箱に置いたあとのペインの色と、止まっているセッションを起こすのも同じ。結果の 1 行・終了コードも ssh のときと同じ（`配達済み: local/main`・`受信箱に置いた: local/main`・`拒否: …`）。
-- 送り元の名前は `local` に決まる（受信箱のファイル名・ログの `from`・通数の上限も `local` で数える。同じ端末のセッションは全部で 1 つの送り元）。枠の `from` は `local/<送ったセッションの役割>` で、返事は枠の `reply` のとおり `claude-relay send local/<役割> --reply-to <id> -`。知らせと枠の 1 行目は「この端末の別のセッションから N 通」、ステータス行は「この端末から N 通」。
-- **自分宛ては送らない**: 宛先の役割（省けば `relay.receivers` の最初）が、送ったセッションの役割（claude-state の記録）と同じなら、終了コード 2 で止める（自分を起こすと、作業中の自分のターンに自分の知らせが割り込み、起こす回数の上限も自分で使い切るため）。`ping local` は自分にもできる（受信箱に置かず、起こさない）。役割は kitty のペインごとに別にしておく。
-- `local` と、設定の `relay.name` は相手の名前に使えない（`trust` が断る。`pair --name local` も断る）。
+- 送り元の名前は `local` に決まる（受信箱のファイル名・ログの `from`・通数の上限も `local` で数える。同じ端末のセッションは全部で 1 つの送り元）。枠の `from` は `local/<送ったセッションの役割>`。知らせと枠の 1 行目は「この端末の別のセッションから N 通」、ステータス行は「この端末から N 通」。
+- **往復するなら、送り手の役割も `relay.receivers` に足す**。受け取る側の設定も同じ設定ファイルなので、送り手の役割が `relay.receivers` に無ければ返事は拒否される。たとえば統括 `main` と、別のアカウントで動く `helper` が往復するなら:
+  ```json
+  "relay": {"receivers": ["left", "helper"]}
+  ```
+  返事が届くと分かるときだけ、枠に `reply="claude-relay send local/<役割> --reply-to <id> -"` を書く。送り手の役割が `relay.receivers` に無い・分からない（kitty の外など）ときは `reply` を書かず、`reply_note="返事は届かない（…）。返事が要るならユーザーに伝える"` にする。受け取らない役割へ送ったときの拒否の理由にも「受け取るなら設定の relay.receivers に <役割> を足す」を添える（別の端末からの拒否には添えない。相手の設定のことなので）。
+- **自分宛ては送らない**: 宛先の役割（省けば `relay.receivers` の最初）が、送ったセッションの役割と同じなら、終了コード 2 で止める（自分を起こすと、作業中の自分のターンに自分の知らせが割り込み、起こす回数の上限も自分で使い切るため）。送ったセッションの役割は claude-state の記録、まだ記録が無ければ kitty のペインの user var `role`（受け手の hook と同じ見分け方）で決める。kitty の外で動かしたもの（役割が分からない）は見分けられないので、自分宛てでも送ってしまう（そのときは枠に `reply` も付かない）。`ping local` は自分にもできる（受信箱に置かず、起こさない）。役割は kitty のペインごとに別にしておく。
+- `local` と、設定の `relay.name`（書いたときだけ）は相手の名前に使えない: `trust` が断り、`pair --name local` も断る。ssh から来た `recv --from local`（と自分の `relay.name`）も断る（同じ端末のセッションからのものと見分けられず、返信先も同じ端末になるため）。0.7.7 までの `trust` でそういう名前の相手を登録していたら、`claude-kitty doctor` の「relay: 予約した名前」が注意を出す（untrust して、相手に別の名前で pair し直してもらう）。
+- **守りの境界ではない**: 受け取りの検査は recv と同じ処理だが、送る側の環境の値（`XDG_STATE_HOME`・`CLAUDE_KITTY_CONFIG` など）とその設定ファイルをそのまま使う。同じ OS ユーザーのプロセスは受信箱にも socket にも直接書けるので、`relay.receivers`・上限は誤配や暴走の歯止めで、悪意のあるプロセスを止めるものではない。
 - 置き場は `CLAUDE_CONFIG_DIR` に依らない: 受信箱・ログ・起こすための socket の記録は `$XDG_STATE_HOME/claude-kitty/relay/`、受け手のペインと役割は claude-state の記録（`$XDG_RUNTIME_DIR/claude-state/`）、設定は `~/.config/claude-kitty/config.json`。受け手のセッションを `~/.claude/sessions` で探すことはしないので、置き場が別でも見つかる。
 - 受け手のアカウントの置き場にも hook が要る: `CLAUDE_CONFIG_DIR=<その置き場> tools/install.sh --hooks=state,relay` で、その置き場の `settings.json` に claude-state と claude-relay の hook を入れる（`claude-kitty doctor` も同じく `CLAUDE_CONFIG_DIR` を付けて確かめる）。止まっているセッションを、まだ 1 ターンもしていないうちから起こせるよう SessionStart の hook が socket を記録するのは、受け取りの登録（authorized_keys）があるか、設定に `relay` の節があるときだけ（同じ端末だけで使うなら `"relay": {}` を書いておく。無くても、最初のターンのあとからは起こせる）。
 - `XDG_STATE_HOME`・`XDG_RUNTIME_DIR`・`CLAUDE_KITTY_CONFIG` をアカウントごとに変えていると、受信箱や記録が別になって届かない（同じ値にしておく）。
