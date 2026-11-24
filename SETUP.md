@@ -8,7 +8,7 @@
 | もの | 用途 | 確認のしかた |
 |---|---|---|
 | kitty（作者は 0.51 で確認。`kitten @ ls` が `layout_state.pairs` を出す版が要る） | ペインを並べる・`kitten @` で外から操作する | `kitty --version` |
-| Python 3.9 以降（作者は 3.14。3.9 でもテストが通ることを確認している。macOS の `/usr/bin/python3` は 3.9） | `bin/` の道具とテスト。標準ライブラリだけを使う | `python3 --version` |
+| Python 3.9 以降（作者は 3.14。3.9 でもテストが通ることを確認している。macOS の `/usr/bin/python3` は 3.9） | `bin/` のツールとテスト。標準ライブラリだけを使う | `python3 --version` |
 | Node.js 22 以降 | `lib/cdp.mjs`（組み込みの `WebSocket` と `fetch` を使う CDP クライアント） | `node --version` |
 | Claude Code（`claude`） | 並べる中身 | `claude --version` |
 | Google Chrome か Chromium（ネイティブでも Flatpak でもよい。探す順と `browser.command` は [docs/config.md](docs/config.md#browserclaude-browserclaude-show-重ねる-chrome)） | `claude-browser` | `claude-kitty doctor` の「Chrome」の行 |
@@ -34,7 +34,7 @@ claude-kitty doctor                        # 足りないものと直し方
 | 部品 | 行うこと | 外す（`--uninstall`） |
 |---|---|---|
 | `--links` | `bin/` の全コマンドを `~/.local/bin`（`$CLAUDE_KITTY_BIN_DIR`）にリンク。既にある別のファイルは上書きしない | このリポジトリを指すリンクだけ消す |
-| `--hooks[=state,lang,guard,relay,suffix]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。`relay`（claude-relay。7.）と `suffix`（claude-prompt-suffix。5. の終わり）も `--hooks=relay` などと明示したときだけ。既存のキーと hook は残し、同じ道具・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じ道具の hook を外す（手で入れたものも）。`--all --uninstall` は lang・relay・suffix も外す |
+| `--hooks[=state,lang,guard,relay,suffix]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。`relay`（claude-relay。7.）と `suffix`（claude-prompt-suffix。5. の終わり）も `--hooks=relay` などと明示したときだけ。既存のキーと hook は残し、同じツール・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じツールの hook を外す（手で入れたものも）。`--all --uninstall` は lang・relay・suffix も外す |
 | `--kitty` | kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）を足し（末尾なので、自分の `listen_on`・`enabled_layouts`・`allow_remote_control`・`filter_notification` は上書きされる。あれば先に「!」で見せる）、`claude_state_watcher.py` と `claude3.session` のリンクを張る。kitty.conf がこのリポジトリの `kitty/kitty.conf` へのリンクなら触らない | 足した行とリンクだけ外す |
 | `--systemd` | `contrib/systemd/` のユニットを `~/.config/systemd/user/` に、パスを置き換えて写し、`daemon-reload` と `enable --now`（Linux だけ）。手で入れた中身の違うユニットは上書きしない | 自分が入れたユニットを止めて消す |
 | `--launchd` | `contrib/launchd/` の LaunchAgent を `~/Library/LaunchAgents/`（`$CLAUDE_KITTY_LAUNCH_AGENTS`）に、パス・PATH・HOME を置き換えて写し、`launchctl bootstrap gui/<uid>`（macOS だけ）。中身が変わったら `bootout` してから読み込み直す。手で入れた中身の違うものは上書きしない | 自分が入れたものを `launchctl bootout` して消す |
@@ -62,7 +62,7 @@ ln -sfn "$REPO/kitty/claude_state_watcher.py" ~/.config/kitty/claude_state_watch
 ```
 
 - `~/.local/bin` が PATH に入っていること（`claude-wait` はセッションファイルの `bash -lic` から呼ばれるので、ログインシェルの PATH）。
-- `bin/` の道具は `Path(__file__).resolve()` でリポジトリの `lib/` を見つけるので、リンク経由で動く。
+- `bin/` のツールは `Path(__file__).resolve()` でリポジトリの `lib/` を見つけるので、リンク経由で動く。
 
 kitty.conf を差し替えたくなければ、リンクの代わりに自分の kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf` の 1 行を足す（要る設定だけが入っている。macOS は `claude-kitty-macos.conf`）。
 
@@ -105,7 +105,7 @@ ln -sfn "$REPO/kitty/mine.session" ~/.config/kitty/mine.session
 # Claude Code の Bash ツールから kitten @ を使うため、ソケット経由のリモート操作だけを許す
 # （tty 経由は Bash ツールから使えないことがある。yes にするとペインの中の何でも操作できてしまう）
 allow_remote_control socket-only
-# kitty ごとに別のソケット。道具は $KITTY_LISTEN_ON か、$XDG_RUNTIME_DIR/kitty-<pid> を探す
+# kitty ごとに別のソケット。ツールは $KITTY_LISTEN_ON か、$XDG_RUNTIME_DIR/kitty-<pid> を探す
 listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}
 # 任意の位置に分割・移動できる splits（claude-view は splits の分割の木を前提にする）
 enabled_layouts splits,stack
@@ -149,7 +149,7 @@ claude-browser shot /tmp/shot.png && claude-browser close
 
 ## 5. 状態の色（claude-state）
 
-`~/.claude/settings.json` の `hooks` に足す（既存のキーは残す）。下の例は短く書くため素の名前だが、**command は絶対パスで書くのがよい**（`tools/install.sh --hooks` は `<リポジトリ>/bin/claude-state` の絶対パスで書く）。Claude Code を Dock・GUI・別のシェルから起動すると PATH に `~/.local/bin` が無いことがあり、そのとき素の名前の hook は黙って失敗する（`claude-kitty doctor` は、hook の道具が絶対パスでも PATH でも見つからなければ NG にする）。素の名前・`~/.local/bin/…`・絶対パスはどれも同じ hook と数えるので、`install.sh` が二重に足すことは無い。
+`~/.claude/settings.json` の `hooks` に足す（既存のキーは残す）。下の例は短く書くため素の名前だが、**command は絶対パスで書くのがよい**（`tools/install.sh --hooks` は `<リポジトリ>/bin/claude-state` の絶対パスで書く）。Claude Code を Dock・GUI・別のシェルから起動すると PATH に `~/.local/bin` が無いことがあり、そのとき素の名前の hook は黙って失敗する（`claude-kitty doctor` は、hook のツールが絶対パスでも PATH でも見つからなければ NG にする）。素の名前・`~/.local/bin/…`・絶対パスはどれも同じ hook と数えるので、`install.sh` が二重に足すことは無い。
 
 ```json
 {
@@ -222,7 +222,7 @@ printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 - **配置（並べ替え）は 1 つのセッションだけが行う。** 統括（`view.left`）だけが `claude-view` を呼ぶ。担当が自分で動かしてよいのは、自分のペインの中の `claude-browser --mode self` くらいにとどめる。同時に 2 か所から並べ替えると形が崩れる（`claude-view` は flock で 1 つずつにするが、意図がぶつかるのは防げない）。
 - kitty を Claude Code の Bash ツールから直接起動しない。`CLAUDE_*` を引き継いで、中の claude が子セッション扱いになり会話記録を残さない。`claude-kitty` がそれらを消してから起動する。
 - kitty を縮めたり、窓を動かしたりしない（全ペインの claude-code が再描画で崩れることがある）。`claude-browser` は kitty の上に重ねるだけ。
-- `bin/` の道具は動いているプロセスが読んでいることがある。更新するときは別のファイルに書いてから `mv` で差し替える（シェルスクリプトは実行中に読み進めるため）。
+- `bin/` のツールは動いているプロセスが読んでいることがある。更新するときは別のファイルに書いてから `mv` で差し替える（シェルスクリプトは実行中に読み進めるため）。
 
 ## 7. 端末をまたぐ連絡（claude-relay）
 
@@ -374,6 +374,6 @@ macOS で一度通して、結果（出力のコピーか、OK / NG）を返し�
 
 ### kitty.conf の差
 
-- `XDG_RUNTIME_DIR` は macOS には無い。`listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}` は正しいソケットの場所にならないので、`kitty/claude-kitty-macos.conf` は `listen_on unix:/tmp/kitty-{kitty_pid}` にしている。道具は `XDG_RUNTIME_DIR` が無ければ `/tmp` を探す（macOS では `XDG_RUNTIME_DIR` があっても `/tmp` も探す）。`tools/install.sh --kitty` は macOS では、この `claude-kitty-macos.conf` を include する。
-- 道具の記録（`claude-state` など）は `XDG_RUNTIME_DIR` が無ければ `/tmp/claude-kitty-<uid>`（0700）に置く。hook・LaunchAgent・kitty の watcher のどこから見ても同じ場所になるよう、起動のしかたで変わる `$TMPDIR` は使わない。シェルの rc で `XDG_RUNTIME_DIR` を決めているなら、`install.sh --launchd` を流すシェルでも同じ値にしておく（plist に写す）。
+- `XDG_RUNTIME_DIR` は macOS には無い。`listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}` は正しいソケットの場所にならないので、`kitty/claude-kitty-macos.conf` は `listen_on unix:/tmp/kitty-{kitty_pid}` にしている。ツールは `XDG_RUNTIME_DIR` が無ければ `/tmp` を探す（macOS では `XDG_RUNTIME_DIR` があっても `/tmp` も探す）。`tools/install.sh --kitty` は macOS では、この `claude-kitty-macos.conf` を include する。
+- ツールの記録（`claude-state` など）は `XDG_RUNTIME_DIR` が無ければ `/tmp/claude-kitty-<uid>`（0700）に置く。hook・LaunchAgent・kitty の watcher のどこから見ても同じ場所になるよう、起動のしかたで変わる `$TMPDIR` は使わない。シェルの rc で `XDG_RUNTIME_DIR` を決めているなら、`install.sh --launchd` を流すシェルでも同じ値にしておく（plist に写す）。
 - リポジトリの `kitty/kitty.conf` のフォント（`Adwaita Mono`・`Noto Sans Mono CJK JP`）は Linux の fontconfig の事情による作者の設定。macOS では使わない（`install.sh --kitty` は自分の kitty.conf に include の 1 行を足すだけ）。

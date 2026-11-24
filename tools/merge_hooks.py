@@ -3,14 +3,14 @@
 
   python3 tools/merge_hooks.py --settings PATH --repo DIR [--parts state,lang,guard,relay,model,suffix] [--uninstall] [--dry-run] [--check]
 
-- 既存のキーと既存の hook は消さない。同じ道具の同じ hook（下の「同じ」）が既にあれば足さない。
+- 既存のキーと既存の hook は消さない。同じツールの同じ hook（下の「同じ」）が既にあれば足さない。
 - 「同じ」は command の最初の語のファイル名と、残りの引数で比べる（`claude-state hook Stop` と
   `~/.local/bin/claude-state hook Stop` と `/x/claude-kitty/bin/claude-state hook Stop` は同じ）。
   手で入れた形（PATH の名前・リンク・リポジトリの絶対パス）をどれも「入っている」と数えるため。
 - 書く前に settings.json.bak-<日時> を作り、同じフォルダの一時ファイルに書いてから置き換える（途中で止まっても壊れない）。
   settings.json がシンボリックリンクなら、リンク先を書き換える（リンクは残す）。
 - JSON が読めない・形が違う（hooks がオブジェクトでないなど）ときは何も書かずに exit 2。
-- --uninstall は、同じ道具の hook を外す（手で入れたものも）。空になった組とイベントは消す。
+- --uninstall は、同じツールの hook を外す（手で入れたものも）。空になった組とイベントは消す。
 
 出力は 1 行 1 件で、頭に印: "+ " 足す、"- " 外す、"= " 入っている（または入っていない）、"! " 問題。
 終了コード: 0 = できた（--dry-run と --check では変えるものの有無を問わない）、2 = settings.json が壊れている、1 = 引数の誤り。
@@ -55,7 +55,7 @@ class Broken(Exception):
 
 
 def identity(command):
-    """command の (道具のファイル名, 引数のタプル)。読めない command は None。"""
+    """command の (ツールのファイル名, 引数のタプル)。読めない command は None。"""
     if not isinstance(command, str):
         return None
     try:
@@ -63,7 +63,7 @@ def identity(command):
     except ValueError:
         return None
     while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
-        words = words[1:]                 # 頭の VAR=値 は同じ道具の呼び方の違い
+        words = words[1:]                 # 頭の VAR=値 は同じツールの呼び方の違い
     if not words:
         return None
     return os.path.basename(words[0]), tuple(words[1:])
@@ -111,7 +111,7 @@ def check_shape(data, path="settings.json"):
 
 
 def present(data, event, tool, args):
-    """そのイベントに同じ道具・同じ引数の hook があるか（matcher は問わない）。"""
+    """そのイベントに同じツール・同じ引数の hook があるか（matcher は問わない）。"""
     for g in (data.get("hooks") or {}).get(event, []):
         for h in g.get("hooks", []):
             if isinstance(h, dict) and identity(h.get("command")) == (tool, tuple(args)):
@@ -120,7 +120,7 @@ def present(data, event, tool, args):
 
 
 def commands(data, part):
-    """その部品の道具を呼んでいる hook の command の文字列（重なりなし、出てきた順）。doctor が道具の有無を調べる用。"""
+    """その部品のツールを呼んでいる hook の command の文字列（重なりなし、出てきた順）。doctor がツールの有無を調べる用。"""
     tools = {tool for _ev, _m, tool, _a in PARTS[part]}
     out = []
     for groups in (data.get("hooks") or {}).values():

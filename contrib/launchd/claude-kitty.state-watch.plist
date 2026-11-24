@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- claude-state watch: done（完了・未読）のペインに 2 秒続けてフォーカスしたら idle に戻し、消えた色を塗り直す常駐（macOS の LaunchAgent）。
      tools/install.sh（launchd の部品）がパスを置き換えて ~/Library/LaunchAgents に写し、launchctl bootstrap gui/<uid> で始める。
-     PATH は hook と同じ道具（python3・kitten）が見つかるように渡す（launchd の既定の PATH には Homebrew も ~/.local/bin も無い）。 -->
+     PATH は hook と同じツール（python3・kitten）が見つかるように渡す（launchd の既定の PATH には Homebrew も ~/.local/bin も無い）。 -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>claude-kitty.state-watch</string>

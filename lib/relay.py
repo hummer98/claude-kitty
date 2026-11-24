@@ -143,7 +143,7 @@ def runtime_env(env, platform=None):
     return env
 
 
-# ---- 小さな道具 -------------------------------------------------------------------
+# ---- 小さな関数 ---------------------------------------------------------------------
 
 def now_iso(t=None):
     return datetime.fromtimestamp(time.time() if t is None else t).astimezone().isoformat(timespec="seconds")

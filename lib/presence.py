@@ -19,7 +19,7 @@ import time
 # 人が打ったものでない入力の見分け方（実測した形）。
 # 頭に来るもの: 背景の作業の完了の通知、Claude Code のセッション間メッセージ、サブエージェントの報告、システムの注記
 MACHINE_PREFIXES = ("<task-notification", "<cross-session-message", "<agent-message", "<system-reminder")
-# 中にあれば人でないもの。claude-kitty の道具が Claude Code の socket に直接送る文には、必ずこのどれかを入れる
+# 中にあれば人でないもの。claude-kitty のツールが Claude Code の socket に直接送る文には、必ずこのどれかを入れる
 # （claude-relay の起こす知らせ = lib/relay.py の wake_text、ディスクの見張り = lib/diskwatch.py の MARK。
 # 足したら tests の照合も足す）。
 # <cross-session-message は頭でなくても（前に空白・別の文があっても）人でないとみる（claude-state の判定と同じ）
@@ -168,7 +168,7 @@ def decide(payload, policy, last, now):
         return None
     ti = payload.get("tool_input")
     if not isinstance(ti, dict) or not isinstance(ti.get("prompt"), str):
-        return None  # Agent の形でない（同じ名前の別の道具など）
+        return None  # Agent の形でない（同じ名前の別のツールなど）
     if not is_away(last, now, policy):
         return None  # 在席か、一度も人が打っていない（記録が無い）
     if keep_reason(ti, policy):

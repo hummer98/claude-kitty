@@ -49,7 +49,7 @@ class Judge(unittest.TestCase):
         self.assertFalse(blocked(text))
 
     def test_japanese_quoting_english_phrase_passes(self):
-        text = ("英語のシステムの文（\"The task tools haven't been used recently\"）は、ToDo の道具をしばらく"
+        text = ("英語のシステムの文（\"The task tools haven't been used recently\"）は、ToDo のツールをしばらく"
                 "使っていないという促しです。その後に返答が英語になることがあるので、Stop hook で確認します。")
         self.assertFalse(blocked(text))
 

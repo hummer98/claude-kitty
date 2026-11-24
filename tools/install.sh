@@ -85,7 +85,7 @@ if [ -z "$hook_parts" ] && [ "$hooks_named" = 0 ]; then
 	if [ "$uninstall" = 1 ]; then hook_parts=state,lang,guard,relay,model,suffix; else hook_parts=state,guard; fi
 fi
 
-# 道具は python3 の 3.9 以降で動く（macOS の Command Line Tools の /usr/bin/python3 が 3.9）
+# ツールは python3 の 3.9 以降で動く（macOS の Command Line Tools の /usr/bin/python3 が 3.9）
 command -v python3 >/dev/null 2>&1 || {
 	echo "install.sh: python3 が要る（3.9 以降。macOS は xcode-select --install か brew install python）" >&2; exit 1; }
 if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
@@ -379,7 +379,7 @@ step_systemd() {
 AGENTS="claude-kitty.state-watch claude-kitty.roster-save claude-kitty.session-stats"
 
 # LaunchAgent の中身を作る: @@REPO@@ などを置き換え（XML の文字はエスケープ）、DOCTYPE の後に印の行を入れる。
-# PATH は hook と同じ道具が見つかるように: ~/.local/bin（$BIN_DIR）・Homebrew・システム。XDG_RUNTIME_DIR は、
+# PATH は hook と同じツールが見つかるように: ~/.local/bin（$BIN_DIR）・Homebrew・システム。XDG_RUNTIME_DIR は、
 # 入れたときのシェルにあれば渡す（hook と常駐で記録の置き場がずれないように。lib/rundir.py）
 gen_agent() {  # gen_agent SRC OUT
 	python3 - "$1" "$REPO" "$HOME" "$BIN_DIR" "$AGENT_LOG_DIR" "$AGENT_MARK" "${XDG_RUNTIME_DIR:-}" >"$2" <<'PY'

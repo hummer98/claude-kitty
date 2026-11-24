@@ -6,7 +6,7 @@
 記録のファイルは大きい（100MB を超える）ので、行ごとに読み、日ごとの集計と小さな値だけを持つ。
 書き出す前に、メールアドレスと、設定の redact・実行時のユーザー名・ホームのフォルダ名を伏せる。
 
-利用者ごとの値（役割名・言い直しの言葉・伏せる語・用語集の道具）はリポジトリに置かず、
+利用者ごとの値（役割名・言い直しの言葉・伏せる語・用語集のツール）はリポジトリに置かず、
 設定ファイル（lib/config.py の config_path）の "session_stats" の節から読む。書き方は docs/session-stats.md。
 """
 import difflib
@@ -38,7 +38,7 @@ DEFAULTS = {
     "rephrase": [],          # ユーザーの言い直し: [key, 表に出す名前, 正規表現]。発言の全文に re.search（re.M）
     "echo": [list(x) for x in DEFAULT_ECHO],
     "redact": [],            # 書き出しで伏せる語（実行時のユーザー名とホームのフォルダ名は必ず足す）
-    "glossary": None,        # {"module": 道具の .py, "file": 用語集, "scene": "reply"}。統括の返答にかける
+    "glossary": None,        # {"module": ツールの .py, "file": 用語集, "scene": "reply"}。統括の返答にかける
     "projects": "~/.claude/projects",
     "home_project": "",      # 統括の記録があるフォルダの名前。空ならホームのパスから作る
     "out_dir": "",           # 空なら $XDG_DATA_HOME/claude-kitty/stats
@@ -178,7 +178,7 @@ def default_out_dir(env):
 
 
 class Glossary:
-    """用語集の道具（設定の glossary.module）を包む。道具は parse_glossary(text) と
+    """用語集のツール（設定の glossary.module）を包む。ツールは parse_glossary(text) と
     check_text(text, rules, scene=...) を持つこと。読めなければ load が例外を投げる。"""
 
     def __init__(self, module, rules, scene):
@@ -190,10 +190,10 @@ class Glossary:
         return len(self.rules)
 
     def count(self, text):
-        """1 つの返答の件数。道具の中で例外が出たら 0 と数え、数を errors に残す（残りの数字は出すため）。"""
+        """1 つの返答の件数。ツールの中で例外が出たら 0 と数え、数を errors に残す（残りの数字は出すため）。"""
         try:
             return len(self.module.check_text(text, self.rules, scene=self.scene))
-        except Exception as e:  # noqa: BLE001  差し替えられる道具なので、何が出ても止まらない
+        except Exception as e:  # noqa: BLE001  差し替えられるツールなので、何が出ても止まらない
             self.errors += 1
             self.last_error = f"{type(e).__name__}: {e}"
             return 0
@@ -202,7 +202,7 @@ class Glossary:
     def load(cls, module_path, file_path, scene="reply"):
         spec = importlib.util.spec_from_file_location("_claude_session_stats_glossary", module_path)
         if spec is None or spec.loader is None:
-            raise ImportError(f"道具を読めない: {module_path}")
+            raise ImportError(f"ツールを読めない: {module_path}")
         mod = importlib.util.module_from_spec(spec)
         # dataclass などは読み込み中に sys.modules から自分のモジュールを引くので、先に登録する
         sys.modules[spec.name] = mod
@@ -256,7 +256,7 @@ def user_text(obj):
     if isinstance(content, str):
         s = content.strip()
     elif isinstance(content, list):
-        # tool_result を含む行は道具の結果。text だけの行（画像つきの発言）は発言とみなす
+        # tool_result を含む行はツールの結果。text だけの行（画像つきの発言）は発言とみなす
         if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
             return None
         s = "\n".join(b.get("text", "") for b in content
@@ -823,12 +823,12 @@ def build_report(result, gstats, prev_days, cur_days, generated, cfg):
              "送ったもの（1回と数える）。")
     L.append("- 他のセッションへのメッセージ: SendMessage のうち、宛先がサブエージェント（recipient_kind が agent）でないもの。")
     nrules = next((len(st.rules) for st in result.values() if st.rules is not None), None)
-    L.append("- 用語集: 設定の用語集の道具（`check_text(…, scene=…)`）を統括の返答ごとにかけた件数。"
+    L.append("- 用語集: 設定の用語集のツール（`check_text(…, scene=…)`）を統括の返答ごとにかけた件数。"
              + (f"作成の時点の用語集（{nrules} 語）で、前の期間も数え直している。用語集が変わると前の週の md とはずれる。"
                 if nrules is not None else "用語集が無いか読めなかったので数えていない（—）。"))
     gerr = next((st.rules.errors for st in result.values() if st.rules is not None), 0)
     if gerr:
-        L.append(f"- 用語集の道具が {gerr} 件の返答で例外を出した（その返答は 0 件と数えた）。")
+        L.append(f"- 用語集のツールが {gerr} 件の返答で例外を出した（その返答は 0 件と数えた）。")
     files = sum(len(st.files) for st in result.values())
     L.append(f"- 読んだ記録: {files} ファイル。読めなかった行: {gstats.get('bad_lines', 0)} 行。")
     L.append("")

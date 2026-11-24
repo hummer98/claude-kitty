@@ -3,11 +3,11 @@
 
   claude-kitty doctor [--json]
 
-行の頭: OK（よい）・NG（問題。直し方を → の後に）・注意（無くても主な道具は動く）・--（この環境では調べない）。
+行の頭: OK（よい）・NG（問題。直し方を → の後に）・注意（無くても主なツールは動く）・--（この環境では調べない）。
 終了コード: 0 = NG が無い、1 = NG がある。
 
 kitty には `kitten @ ls`（読むだけ）しか送らない。systemd は is-enabled / is-active だけ、launchd は launchctl print
-だけ。設定は各道具の読み込みの関数で読む。
+だけ。設定は各ツールの読み込みの関数で読む。
 """
 import json
 import os
@@ -325,8 +325,8 @@ def check_hooks(ctx, rep):
             fixes.append(f"tools/install.sh --hooks={part}")
         lost = hook_programs_missing(ctx, M, data, part)
         if lost:
-            # 道具が見つからない hook は、Claude Code の中で黙って失敗する（色が変わらない・ガードが効かない）
-            details.append(f"hook の道具が見つからない: {', '.join(lost)}")
+            # ツールが見つからない hook は、Claude Code の中で黙って失敗する（色が変わらない・ガードが効かない）
+            details.append(f"hook のツールが見つからない: {', '.join(lost)}")
             fixes.append("tools/install.sh --links でリンクを張り PATH に ~/.local/bin を入れるか、settings.json の command を"
                          f"このリポジトリの bin の絶対パス（{ctx.repo / 'bin'}/…）に書き直す")
         if details:
@@ -343,7 +343,7 @@ def check_hooks(ctx, rep):
 
 
 def hook_programs_missing(ctx, M, data, part):
-    """その部品の hook の command のうち、道具（最初の語）が絶対パスでも PATH でも見つからないもの。
+    """その部品の hook の command のうち、ツール（最初の語）が絶対パスでも PATH でも見つからないもの。
 
     PATH は doctor を動かしたシェルのもの（Claude Code を別の環境から起動すると違うことがある。素の名前の hook が
     ここで見つかっても、Claude Code の PATH に無ければ失敗する）。"""
@@ -358,7 +358,7 @@ def hook_programs_missing(ctx, M, data, part):
 
 
 def program_found(ctx, prog):
-    """command の最初の語の道具が、絶対パス（~・$HOME は調べる環境の HOME）でも PATH でも見つかるか。"""
+    """command の最初の語のツールが、絶対パス（~・$HOME は調べる環境の HOME）でも PATH でも見つかるか。"""
     p = prog.replace("${HOME}", str(ctx.home)).replace("$HOME", str(ctx.home))
     if p == "~" or p.startswith("~/"):
         p = str(ctx.home) + p[1:]       # 調べる環境の HOME（doctor を動かしたプロセスの HOME ではない）
@@ -371,7 +371,7 @@ def program_found(ctx, prog):
 
 def check_statusline(ctx, rep):
     """settings.json の statusLine が claude-statusline か・別のものか・無いか（読むだけ。どれも任意なので NG にしない。
-    claude-statusline なのに道具が見つからないときだけ NG: ステータス行が黙って空になるため）。"""
+    claude-statusline なのにツールが見つからないときだけ NG: ステータス行が黙って空になるため）。"""
     import merge_hooks as M
     import merge_statusline as MS
     try:
@@ -385,7 +385,7 @@ def check_statusline(ctx, rep):
         shown = sl.get("command") if isinstance(sl, dict) else sl
         rep.ok("statusLine", f"別のもの（{shown!r}。claude-statusline は使っていない）")
     elif not program_found(ctx, M.program(sl["command"])):
-        rep.ng("statusLine", f"claude-statusline だが道具が見つからない: {sl['command']}",
+        rep.ng("statusLine", f"claude-statusline だがツールが見つからない: {sl['command']}",
                "tools/install.sh --links でリンクを張るか、settings.json の command をこのリポジトリの "
                f"{ctx.repo / 'bin' / 'claude-statusline'} に書き直す")
     else:
@@ -709,7 +709,7 @@ def check_model_policy(ctx, rep):
     if hook == "none":
         rep.ng(name, f"{what}。だが hook が入っていない（切り替わらない）", "tools/install.sh --hooks=model")
     elif lost:
-        rep.ng(name, f"{what}。だが hook の道具が見つからない: {', '.join(lost)}", "tools/install.sh --links")
+        rep.ng(name, f"{what}。だが hook のツールが見つからない: {', '.join(lost)}", "tools/install.sh --links")
     elif "UserPromptSubmit" in st["state"][1]:
         rep.ng(name, f"{what}。だが claude-state の UserPromptSubmit の hook が無い（人が打った時刻を記録できず、切り替わらない）",
                "tools/install.sh --hooks=state")
@@ -813,7 +813,7 @@ def main(argv=None, ctx=None, out=None):
             if i["fix"] and i["status"] in ("ng", "warn"):
                 line += f"  → {i['fix']}"
             print(line, file=out)
-        print(f"\n問題 {rep.problems} 件、注意 {rep.warnings} 件" + ("" if rep.problems else "（主な道具は動く）"), file=out)
+        print(f"\n問題 {rep.problems} 件、注意 {rep.warnings} 件" + ("" if rep.problems else "（主なツールは動く）"), file=out)
     return 1 if rep.problems else 0
 
 

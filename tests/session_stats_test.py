@@ -41,7 +41,7 @@ REPHRASE = [
     ["progress", "進み具合の確認", r"^(?:(?:進捗|状況)は?)?どうですか[？?]?$|進捗|はまだ(?:ですか|？|\?)\s*$"],
 ]
 
-# 架空の用語集の道具（設定の glossary.module に置く .py と同じ形）
+# 架空の用語集のツール（設定の glossary.module に置く .py と同じ形）
 FAKE_GLOSSARY_TOOL = '''
 from dataclasses import dataclass
 
@@ -312,7 +312,7 @@ class TestReplies(Base):
         Path(broken).write_text("raise RuntimeError('boom')\n")
         with self.assertRaises(RuntimeError):
             ss.Glossary.load(broken, self.words)
-        self.assertNotIn("_claude_session_stats_glossary", sys.modules)  # 壊れた道具を残さない
+        self.assertNotIn("_claude_session_stats_glossary", sys.modules)  # 壊れたツールを残さない
         with self.assertRaises(OSError):
             ss.Glossary.load(self.tool, os.path.join(self.root, "missing.txt"))
         empty = os.path.join(self.root, "tool", "empty.txt")
@@ -846,7 +846,7 @@ class TestReviewFixes(TestCli):
         rc, out, err = self.run_cli(["--stdout", "--end", "2026-03-20"])
         self.assertEqual(rc, 0)
         self.assertIn("1 件の返答で例外", err)
-        self.assertIn("用語集の道具が 1 件の返答で例外を出した", out)
+        self.assertIn("用語集のツールが 1 件の返答で例外を出した", out)
         self.assertIn("用語集の検査の件数（統括の返答、場面 reply） | 0 | 1 |", out)
 
     def test_missing_explicit_config_returns_2(self):
@@ -863,7 +863,7 @@ class TestReviewFixes(TestCli):
 
 
 class TestPublicDefaults(unittest.TestCase):
-    """公開する既定値に、利用者ごとの値（役割名・言い直しの言葉・伏せる語・道具の場所）が入っていないこと。"""
+    """公開する既定値に、利用者ごとの値（役割名・言い直しの言葉・伏せる語・ツールの場所）が入っていないこと。"""
 
     def test_defaults_are_empty_or_generic(self):
         d = ss.DEFAULTS

@@ -136,7 +136,7 @@ for line in sys.stdin:
 
 
 class World:
-    """端末 a（user-a@a.lan）と b（user-b@b.lan）の一時の HOME と、偽の道具。"""
+    """端末 a（user-a@a.lan）と b（user-b@b.lan）の一時の HOME と、偽のツール。"""
 
     def __init__(self, root):
         self.root = Path(root)

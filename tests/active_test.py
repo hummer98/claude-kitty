@@ -110,7 +110,7 @@ class Lines(unittest.TestCase):
         self.assertIs(A.is_human_line(launch), False)
         self.assertIs(A.is_human_line(dict(launch, parentUuid="p", turnPosition={"promptIndex": 2})), True)
         # 前のある会話の 1 番目は人とみなす。`claude --resume <ID> "指示"` の引数の指示もこの形（promptIndex は 1 に
-        # 戻るが parentUuid がある）で人と数えてしまうが、いまの道具は resume に指示を付けない（docs/active.md の限界）
+        # 戻るが parentUuid がある）で人と数えてしまうが、いまのツールは resume に指示を付けない（docs/active.md の限界）
         self.assertIs(A.is_human_line(dict(launch, parentUuid="p")), True)
         # 新しい会話の最初でも、親がスラッシュコマンド（local_command の system の行）なら人が打ったもの。
         # Claude Code の形が変わって数えなくなったら、ここで気づく

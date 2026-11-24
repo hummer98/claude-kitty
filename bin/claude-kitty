@@ -47,8 +47,8 @@ if [ "$os" = Darwin ]; then
 	maximize=0 desktop=-
 fi
 if [ "${maximize:-0}" = 1 ]; then start_as=${CLAUDE_KITTY_START_AS:-maximized}; else start_as=${CLAUDE_KITTY_START_AS:-normal}; fi
-# この道具自身の設定（CLAUDE_KITTY_* / CLAUDE_VIEW_*）は残し、中の claude-view に届ける。
-# 呼んだ側の端末のものも消す（kitty は環境をそのまま各ペインに渡すので、中の道具が「まだその端末の中に居る」と読み違える）:
+# このツール自身の設定（CLAUDE_KITTY_* / CLAUDE_VIEW_*）は残し、中の claude-view に届ける。
+# 呼んだ側の端末のものも消す（kitty は環境をそのまま各ペインに渡すので、中のツールが「まだその端末の中に居る」と読み違える）:
 # - CMUX_* / C11_* / GHOSTTY_*: cmux（c11）の中から起動すると、中の claude が c11 用の hook を動かして失敗する
 #   （「SessionStart hook failed」）。シェルは ghostty 用のシェル統合を読み込む
 # - TMUX / TMUX_PANE / TERM_PROGRAM / TERM_PROGRAM_VERSION: tmux や別の端末の中に居ると読まれる（kitty は TERM_PROGRAM を置かない）

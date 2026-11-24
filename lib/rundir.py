@@ -1,4 +1,4 @@
-"""道具の記録の置き場と、kitty の socket を探す場所（claude-state・claude-browser・claude-wait・claude-view・claude-roster 共通）。
+"""ツールの記録の置き場と、kitty の socket を探す場所（claude-state・claude-browser・claude-wait・claude-view・claude-roster 共通）。
 
 - runtime_dir: $XDG_RUNTIME_DIR。無ければ（macOS、cron・ssh など）/tmp/claude-kitty-<uid>（0700 で作る）。
   /tmp はほかのユーザーと共有なので、名前に uid を入れて分ける。$TMPDIR は使わない（macOS では起動のしかたで

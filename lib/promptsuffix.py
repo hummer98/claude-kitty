@@ -31,7 +31,7 @@ import tempfile
 import time
 from pathlib import Path
 
-# 足す文の頭の目印（transcript に残ったとき、どの道具が足したか分かるように）
+# 足す文の頭の目印（transcript に残ったとき、どのツールが足したか分かるように）
 TAG = "[claude-prompt-suffix]"
 
 # 略号の名前: 英字で始まる短い語。大文字小文字は区別しないので、設定の名前は小文字にそろえる
@@ -110,7 +110,7 @@ DEFAULTS = {"enabled": True, "language": "ja", "suffixes": {}, "number_lists": F
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".avif"}
 # スクリーンショットらしい名前（大文字小文字は区別しない。置き場の直下の、写真などほかの画像を選ばないため）。
-# OS の道具の既定の名前（GNOME・KDE の Spectacle・macOS・Windows の各言語）と、Steam の YYYYMMDDhhmmss_N.jpg
+# OS のスクリーンショットのツールの既定の名前（GNOME・KDE の Spectacle・macOS・Windows の各言語）と、Steam の YYYYMMDDhhmmss_N.jpg
 DEFAULT_NAMES = ["screenshot*", "screen shot*", "スクリーンショット*", "bildschirmfoto*", "capture d’écran*",
                  "capture d'écran*", "captura de pantalla*", "captura de tela*", "schermafbeelding*", "schermata*",
                  "skärmbild*", "zrzut ekranu*", "снимок экрана*", "屏幕截图*", "螢幕截圖*", "截屏*", "스크린샷*",

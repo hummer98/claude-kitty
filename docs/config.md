@@ -1,13 +1,13 @@
 # 設定ファイル（config.json）
 
-claude-kitty の道具は、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`・`disk_watch`・`statusline`・`prompt_suffix`）から読みます。
+claude-kitty のツールは、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`・`disk_watch`・`statusline`・`prompt_suffix`）から読みます。
 **どの節も、どの項目も省けます。** ファイルが無ければ、すべて下の表の既定値で動きます。
 
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
 - 全項目の例: リポジトリの [config.example.json](../config.example.json)。JSON はコメントを書けないので、意味はこのファイルに書きます。
   - 使う節だけを写して、値を自分のものに変えてください。例をまるごと写しても動きますが、例のガード（`guard_hook.guards.presenting`）は `enabled: false` にしてあるので何も止めません。例の `lang.language` は `null`（何もしない）なので、使うなら `"ja"` などに変えます。
-- 書いたあとは `claude-kitty doctor` で、各道具がその設定を読めるかを確認できます（「設定: <節>」の行）。
-- 読み直すのは道具を呼ぶたび（hook は毎回）。常駐の `claude-state watch` だけは起動時に読むので、`state` を変えたら `systemctl --user restart claude-state-watch`（macOS は `launchctl kickstart -k gui/$(id -u)/claude-kitty.state-watch`）。
+- 書いたあとは `claude-kitty doctor` で、各ツールがその設定を読めるかを確認できます（「設定: <節>」の行）。
+- 読み直すのはツールを呼ぶたび（hook は毎回）。常駐の `claude-state watch` だけは起動時に読むので、`state` を変えたら `systemctl --user restart claude-state-watch`（macOS は `launchctl kickstart -k gui/$(id -u)/claude-kitty.state-watch`）。
 
 役割名（role）は、kitty のセッションファイルの `--var role=<名前>` でペインに付けた名前です（[SETUP.md](../SETUP.md#自分のセッション配置)）。例の `main`・`dev-a`・`dev-b` は [kitty/example.session](../kitty/example.session) の名前です。
 
@@ -136,7 +136,7 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `rephrase` | `[]` | ユーザーの言い直しの数え方: `[key, 表に出す名前, 正規表現]` のリスト |
 | `echo` | Claude Code のシステム文 1 つ | 返答の冒頭に写ってしまう文: `[key, 表に出す名前, 正規表現]` のリスト |
 | `redact` | `[]` | 書き出しで伏せる語（ユーザー名とホームのフォルダ名は必ず伏せる） |
-| `glossary` | `null` | 用語集の道具 `{"module": ".py", "file": "用語集", "scene": "reply"}`。`null` なら使わない（例でも `null`。写すときは実在のファイルを書く） |
+| `glossary` | `null` | 用語集のツール `{"module": ".py", "file": "用語集", "scene": "reply"}`。`null` なら使わない（例でも `null`。写すときは実在のファイルを書く） |
 | `projects` | `"~/.claude/projects"` | Claude Code の会話の記録の場所 |
 | `home_project` | `""`（ホームのパスから作る） | 統括の記録があるフォルダの名前 |
 | `out_dir` | `""`（`~/.local/share/claude-kitty/stats`） | 書き出すフォルダ |
@@ -181,7 +181,7 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `away_model` | `"haiku"` | 離席中の実装のサブエージェントの `model`。Agent ツールの `model` に書ける別名（`haiku`・`sonnet`・`opus` など）を書く |
 | `keep` | `["review", "レビュー", "評価", "verify", "検証", "調べ", "guide"]` | Agent の呼び出しの `description` か `prompt` にこのどれかがあれば変えない（レビュー・評価・調べもの）。英数字だけの語は単語として探す（大文字・小文字を区別しない。`guide` は `guideline` に当たらない）。ほかは部分一致。prompt の全体を見るので、実装の依頼に「検証してからコミット」などと書くと変わらない |
 
-- 人の入力の記録: `<置き場>/claude-presence/last.json`（置き場は `$XDG_RUNTIME_DIR`、無ければ `/tmp/claude-kitty-<uid>`）。全セッション共通の 1 つで、時刻・セッション・役割（claude-state の記録の `role`）・cwd。人の入力でないものは書かない: 頭が `<task-notification`（背景の作業の完了）・`<agent-message`（サブエージェントの報告）・`<system-reminder` のもの、`<cross-session-message`（Claude Code のセッション間メッセージ）か `[relay-wake ids=`（claude-relay の起こす知らせ）を含むもの、`state.notice` に当たるもの、`CLAUDE_KITTY_STATE=off` のセッション、入れ子の claude（ツールから動かした `claude -p` など）。印の一覧は `lib/presence.py` の `MACHINE_PREFIXES`・`MACHINE_MARKS`（claude-kitty の道具が socket に直接送る文には、このどれかを入れる）。
+- 人の入力の記録: `<置き場>/claude-presence/last.json`（置き場は `$XDG_RUNTIME_DIR`、無ければ `/tmp/claude-kitty-<uid>`）。全セッション共通の 1 つで、時刻・セッション・役割（claude-state の記録の `role`）・cwd。人の入力でないものは書かない: 頭が `<task-notification`（背景の作業の完了）・`<agent-message`（サブエージェントの報告）・`<system-reminder` のもの、`<cross-session-message`（Claude Code のセッション間メッセージ）か `[relay-wake ids=`（claude-relay の起こす知らせ）を含むもの、`state.notice` に当たるもの、`CLAUDE_KITTY_STATE=off` のセッション、入れ子の claude（ツールから動かした `claude -p` など）。印の一覧は `lib/presence.py` の `MACHINE_PREFIXES`・`MACHINE_MARKS`（claude-kitty のツールが socket に直接送る文には、このどれかを入れる）。
 - 止めるのは離席中の実装の呼び出しだけ。変えないもの（呼び出しどおりに通す）: 在席中、記録が無い（一度も人が打っていない）、`keep` の語を含む、`subagent_type` が `claude-code-guide`・`Explore`・`Plan`・`web-fetch`・`fork`、`model` が `fable` か既に `away_model`、設定が壊れている、hook の途中で何かが失敗した。
 - 切り替えの仕方: 入力は書き換えない。PreToolUse の `hookSpecificOutput.permissionDecision: "deny"` で呼び出しを断り、`permissionDecisionReason` で「離席中なので model を `away_model` にして同じ呼び出しを出し直してください（ほかの項目はそのまま）」と頼む。Claude が `model: "haiku"` で出し直したものは、既に `away_model` なので通る。`updatedInput` で書き換えないのは、auto mode では hook が入力を変えると判定が「a hook changed this call's input after auto mode reviewed it」で無効になって断られ、同じ返答のほかの呼び出し（Bash など）まで「another call in this response was changed after auto mode reviewed it」で断られたため（実測）。deny は判定なので入力の書き換えにはならず、ほかの呼び出しを巻き込まない見込み（実機の auto mode ではまだ確かめていない）。
 - 2 度は断らない: 同じセッションの同じ `prompt` を 300 秒以内に断っていたら、元の model のまま（または model を外して）出し直したものも通す（Claude が従わなかったとき・人が model を指定したときに、断りをくり返して作業を止めないため）。断りの文ではこのことを知らせない（毎回そう出し直されると切り替わらないため）。
@@ -260,4 +260,4 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `CLAUDE_GUARD_ALLOW` | claude-guard のガードを名前で通す（[guard-hook.md](guard-hook.md#通す道)） |
 | `CLAUDE_KITTY_LAUNCH_AGENTS` | macOS: `tools/install.sh --launchd` と `claude-kitty doctor` が見る LaunchAgent の場所（既定 `~/Library/LaunchAgents`） |
 | `CLAUDE_BROWSER_MAC_TITLEBAR` | macOS: claude-browser が kitty の窓から差し引くタイトルバーの高さ（ポイント。既定は kitty.conf の `hide_window_decorations` が `titlebar-only` などなら 0、それ以外は 28） |
-| `XDG_RUNTIME_DIR` | 道具の記録（claude-state・claude-browser・claude-wait など）と kitty の socket の置き場。無ければ（macOS など）記録は `/tmp/claude-kitty-<uid>`、socket は `/tmp/kitty-<pid>`（macOS は両方を探す） |
+| `XDG_RUNTIME_DIR` | ツールの記録（claude-state・claude-browser・claude-wait など）と kitty の socket の置き場。無ければ（macOS など）記録は `/tmp/claude-kitty-<uid>`、socket は `/tmp/kitty-<pid>`（macOS は両方を探す） |

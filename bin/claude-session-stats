@@ -9,7 +9,7 @@
   claude-session-stats --out DIR/stats_{end}.md   {end} は直近の期間の最後の日に置き換わる
   claude-session-stats --stdout                 ファイルに書かず、標準出力に出す
 
-役割名・言い直しの言葉・伏せる語・用語集の道具は、設定ファイル（~/.config/claude-kitty/config.json）の
+役割名・言い直しの言葉・伏せる語・用語集のツールは、設定ファイル（~/.config/claude-kitty/config.json）の
 "session_stats" の節から読む。書き出しの前に、メールアドレスとユーザー名を伏せる。詳しくは docs/session-stats.md。
 終了コード: 0 = 書けた、2 = 引数か設定が正しくない、1 = 書けない。
 """
@@ -32,7 +32,7 @@ def parse_args(argv):
     ap.add_argument("--config", help="設定ファイル（既定 $CLAUDE_KITTY_CONFIG か ~/.config/claude-kitty/config.json）")
     ap.add_argument("--projects", help="記録のフォルダ（既定は設定の projects、無ければ ~/.claude/projects）")
     ap.add_argument("--home-project", help="統括の記録があるフォルダの名前（既定はホームのパスから作る）")
-    ap.add_argument("--glossary", help="用語集のファイル（設定の glossary.file の代わり。道具は glossary.module）")
+    ap.add_argument("--glossary", help="用語集のファイル（設定の glossary.file の代わり。ツールは glossary.module）")
     ap.add_argument("--no-glossary", action="store_true", help="用語集の検査をしない")
     out = ap.add_mutually_exclusive_group()
     out.add_argument("--out", help="書くファイル（{end} は直近の期間の最後の日）")
@@ -93,20 +93,20 @@ def main(argv=None, env=None, now=None):
 
     glossary = None
     g = cfg["glossary"]
-    # 用語集は統括の返答にだけかけるので、統括が無ければ道具を読まない（使わない道具を走らせない）
+    # 用語集は統括の返答にだけかけるので、統括が無ければツールを読まない（使わないツールを走らせない）
     if not args.no_glossary and cfg["master"] and (g or args.glossary):
         if not g:
-            print("claude-session-stats: --glossary には設定の glossary.module（道具）が要る（用語集の件数は出さない）",
+            print("claude-session-stats: --glossary には設定の glossary.module（ツール）が要る（用語集の件数は出さない）",
                   file=sys.stderr)
         else:
             try:
                 glossary = ss.Glossary.load(g["module"], os.path.expanduser(args.glossary or g["file"]), g["scene"])
-            except Exception as e:  # noqa: BLE001  道具の中の例外でも、残りの数字は出す
+            except Exception as e:  # noqa: BLE001  ツールの中の例外でも、残りの数字は出す
                 print(f"claude-session-stats: 用語集を読めない（用語集の件数は出さない）: {e}", file=sys.stderr)
 
     result, gstats = ss.collect(cfg, prev_days[0], end + timedelta(days=1), glossary)
     if glossary is not None and glossary.errors:
-        print(f"claude-session-stats: 用語集の道具が {glossary.errors} 件の返答で例外を出した（0 件と数えた）: "
+        print(f"claude-session-stats: 用語集のツールが {glossary.errors} 件の返答で例外を出した（0 件と数えた）: "
               f"{glossary.last_error}", file=sys.stderr)
     generated = now.strftime("%Y-%m-%d %H:%M")
     md = ss.build_report(result, gstats, prev_days, cur_days, generated, cfg)

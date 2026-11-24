@@ -163,7 +163,7 @@ class Doctor(unittest.TestCase):
         self.assertEqual(items["hook: claude-lang-check の言語"]["status"], "warn")
 
     def test_prompt_suffix_rows(self):
-        # suffix は任意: 入っていなくても OK（注意も出さない）。入っていて道具が無ければ NG。設定の誤りは NG
+        # suffix は任意: 入っていなくても OK（注意も出さない）。入っていてツールが無ければ NG。設定の誤りは NG
         name = "hook: claude-prompt-suffix（文の最後の略号）"
         settings = self.w.home / ".claude/settings.json"
         items = self.by_name(self.w.ctx())                       # FakeWorld は全部入れる
@@ -322,7 +322,7 @@ class Doctor(unittest.TestCase):
 
 
     def test_statusline_row(self):
-        # statusLine は任意: 無し・別のもの・claude-statusline のどれでも ok。claude-statusline の道具が無いときだけ NG
+        # statusLine は任意: 無し・別のもの・claude-statusline のどれでも ok。claude-statusline のツールが無いときだけ NG
         sp = self.w.home / ".claude/settings.json"
         base = json.loads(sp.read_text())
 
@@ -348,7 +348,7 @@ class Doctor(unittest.TestCase):
 
 
 class ConfigExample(unittest.TestCase):
-    """config.example.json の全部の節が、各道具の読み込みで問題なく読め、docs/config.md に全部の項目がある。"""
+    """config.example.json の全部の節が、各ツールの読み込みで問題なく読め、docs/config.md に全部の項目がある。"""
 
     PATH = ROOT / "config.example.json"
 

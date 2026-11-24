@@ -114,7 +114,7 @@ def cmd_pair(a, env):
 
 def _write_checked(relay, env, before, writes):
     """ロックを取ってから、読んだときの中身（before: パス → 文字列）と今が同じか確かめ、同じなら writes を順に行う。
-    確認を待っている間にほかの道具・手で変わっていたら、黙って上書きしないよう何も書かずに 1 を返す。"""
+    確認を待っている間にほかのツール・手で変わっていたら、黙って上書きしないよう何も書かずに 1 を返す。"""
     try:
         with relay.locked(relay.conf_dir(env), timeout=5.0):
             for p, text in before.items():

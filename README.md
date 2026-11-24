@@ -11,15 +11,15 @@ Claude Code のセッションを何人も並べ、役割を分けて働かせ�
 - **画面を並べ直すのが人の仕事になる。** 話す相手が変わるたびに、マウスでペインを動かすのは手間です。統括のセッションが役割名で並べ替えるので、「この 2 人を右に出して」と頼むだけで済みます（`claude-view`）。
 - **別の端末のセッションと話せない。** 別のプロジェクトへの導入の手伝いのように、端末をまたいで、別の claude.ai アカウントのセッションとも連絡したい場面が出てきました。Claude Code 自身のセッション間の連絡は、同じアカウントの中に限られます。そこで、互いに承認した端末の間でだけ、ssh でメッセージを渡すようにしました（`claude-relay`）。止まって入力を待っているセッションも起こして渡すので、人を介さずにやりとりできます。
 
-どれも、人がペインを見張ったり、手で動かしたり、伝言したりしていたことです。それを道具に任せ、人は判断が要るところだけを見ればよいようにする。それがこの道具の集まりの目的です。
+どれも、人がペインを見張ったり、手で動かしたり、伝言したりしていたことです。それをツールに任せ、人は判断が要るところだけを見ればよいようにする。それがこのツールの集まりの目的です。
 
-おまけとして、セッションが自分のペインの上に Chrome を重ねて Web アプリを確かめる道具（`claude-browser`・`claude-show`）も入っています。
+おまけとして、セッションが自分のペインの上に Chrome を重ねて Web アプリを確かめるツール（`claude-browser`・`claude-show`）も入っています。
 
 ## 概要
 
 版の番号は [VERSION](VERSION)（各コマンドの `--version` も同じ）。変更の履歴は [CHANGELOG.md](CHANGELOG.md)（上げるときに手で行うことも版ごとに書いている）、issue と PR の出し方は [CONTRIBUTING.md](CONTRIBUTING.md)。
 運用の約束（体制・注意の守り方・安全・レビュー・略号）は [PRACTICES.md](PRACTICES.md)。
-複数の [Claude Code](https://docs.claude.com/en/docs/claude-code) セッションを、[kitty](https://sw.kovidgoyal.net/kitty/) の 1 つの窓にペインとして並べて動かすための小さな道具の集まり。
+複数の [Claude Code](https://docs.claude.com/en/docs/claude-code) セッションを、[kitty](https://sw.kovidgoyal.net/kitty/) の 1 つの窓にペインとして並べて動かすための小さなツールの集まり。
 
 - 1 つのセッション（たとえば左の列の「統括」）が、ほかのセッションのペインを `kitten @`（kitty のリモート操作）で並べ替える。人がマウスで直さなくても、「この 2 人を右に出して」「全員を等分に」ができる。1 人で使う・並べるだけでもよい（体制の例は [PRACTICES.md](PRACTICES.md)）。
 - ほかの端末で動いているセッションを、kitty のペインへ安全に移す（同じセッションを 2 か所で同時に開かない）。
@@ -43,7 +43,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 - 役割名などの設定は `~/.config/claude-kitty/config.json`（無くても既定値で動く）。全項目の例は [config.example.json](config.example.json)、意味と既定値は [docs/config.md](docs/config.md)。
 - 手作業で入れる手順と、各部品の中身は [SETUP.md](SETUP.md)。
 
-| 道具 | 何をするか | OS 依存 |
+| ツール | 何をするか | OS 依存 |
 |---|---|---|
 | `bin/claude-kitty` | kitty を `CLAUDE_*` 環境変数なしで起動し、セッションファイルどおりにペインを開く | 仮想デスクトップへの移動と最大化だけ KWin（macOS では行わない） |
 | `bin/claude-view` | 統括用。ペインを役割名で並べ替える（等分割にそろえる） | 「保護する窓が前面か」の確認だけ KWin（macOS は `lsappinfo`） |
@@ -89,7 +89,7 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
 
 `claude-kitty [session]` — kitty を CLAUDE_* 環境変数なしで起動し（Claude Code の中から起動すると、中の claude が子セッション扱いになり会話記録が残らなくなるのを避ける）。設定の `kitty.maximize` で最大化し、`kitty.desktop` で KDE Plasma の仮想デスクトップへ移す（どちらも既定はしない。[docs/config.md](docs/config.md#kittyclaude-kitty-kitty-の起動)）。既定の配置は `kitty/claude3.session`（左 1/4 + 右上下）。
 
-- `claude-kitty doctor [--json]`: 入っているもの・動くもの（kitty の版とリモート操作、`layout_state.pairs`、python3・node、コマンドのリンク、hook とその道具が見つかるか、kitty.conf の watcher、systemd（macOS は launchd）、設定ファイル、KWin（macOS は `lsappinfo`）、Chrome）を 1 行ずつ調べ、足りなければ直し方を出す。読むだけ。NG があれば終了コード 1。
+- `claude-kitty doctor [--json]`: 入っているもの・動くもの（kitty の版とリモート操作、`layout_state.pairs`、python3・node、コマンドのリンク、hook とそのツールが見つかるか、kitty.conf の watcher、systemd（macOS は launchd）、設定ファイル、KWin（macOS は `lsappinfo`）、Chrome）を 1 行ずつ調べ、足りなければ直し方を出す。読むだけ。NG があれば終了コード 1。
 - `kitty/example.session`: 統括 1 + 担当 5 の例（各ペインが `claude-wait` で待ってから resume する）。手元の版は `kitty/<名前>.session` に置けば git に入らない（`.gitignore`）。
 
 ## claude-view（統括用の配置）

@@ -8,7 +8,7 @@ claude-presence の last.json は hook が書くもので、hook が入ってい
 - 別のセッションからの知らせ（claude-relay の起こす知らせも）: origin.kind == "peer"、turnOrigin == "peer"
 - 定期の見回り（CronCreate / ScheduleWakeup）: turnOrigin == "scheduled"、origin 無し、isMeta
 - 背景の仕事の知らせ: origin.kind == "task-notification"
-- 画像などの付き物: isMeta、turnCompanion。道具の結果: content がリスト
+- 画像などの付き物: isMeta、turnCompanion。ツールの結果: content がリスト
 人とみなすのは、content が文字列で、origin.kind か turnOrigin が "human" の行だけ。origin も turnOrigin も無い行は
 古い形式かもしれないので数えず、ほかに人の発話が無いときの「分からない」の材料にする。
 自動の要約（isCompactSummary・isVisibleInTranscriptOnly。turnOrigin は要約を起こしたターンのものを引き継ぎ human になりうる）と、
@@ -44,7 +44,7 @@ def is_human_line(d):
     msg = d.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
     if not isinstance(content, str):
-        return False  # 道具の結果（リスト）など
+        return False  # ツールの結果（リスト）など
     if d.get("isMeta") or d.get("turnCompanion") or d.get("isCompactSummary") or d.get("isVisibleInTranscriptOnly"):
         return False
     pos = d.get("turnPosition")

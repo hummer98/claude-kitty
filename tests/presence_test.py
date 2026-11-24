@@ -59,7 +59,7 @@ class HumanInput(unittest.TestCase):
         self.assertTrue(P.is_human("【通知】と書いたのは人", notice))  # 通知の印は他のセッションからのメッセージだけに効く
 
     def test_relay_wake_text_carries_a_machine_mark(self):
-        # claude-kitty の道具が socket に直接送る文は、MACHINE_MARKS のどれかを含む（印の一覧を 1 か所に保つ）
+        # claude-kitty のツールが socket に直接送る文は、MACHINE_MARKS のどれかを含む（印の一覧を 1 か所に保つ）
         import relay as R
         text = R.wake_text("main", [{"id": "20261122T000000Z-abcd", "from": "mac-a", "body": "x", "t": 0}])
         self.assertTrue(any(m in text for m in P.MACHINE_MARKS))

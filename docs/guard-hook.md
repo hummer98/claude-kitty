@@ -58,7 +58,7 @@
 - 前に付くもの（`VAR=値`、`env`、`nohup`、`timeout 30`、`sudo` など。値をとるオプションはラッパーごとに持つ）は外して見る。`bash -c` / `-lc` / `-ec` の中も読む。`--help` の付いたコマンドは止めない。
 - パスの比べ方: 書かれたままを正規化した形と、シンボリックリンクを解いた形（`/home` → `/var/home` など）の両方で比べる。`files_backup` は `files` の下と数えない（名前の頭が同じだけの別のフォルダ）。
 
-読むだけのもの（`cat`、`ls`、`grep`、`git status` / `log` / `diff`）は止めない。シェルの静的な読みなので、スクリプトの中で書き込むもの（`python3 tool.py` が中でファイルを書く）、alias、`eval` は見えない。「うっかり」を止める道具で、悪意のある回避は防がない。
+読むだけのもの（`cat`、`ls`、`grep`、`git status` / `log` / `diff`）は止めない。シェルの静的な読みなので、スクリプトの中で書き込むもの（`python3 tool.py` が中でファイルを書く）、alias、`eval` は見えない。「うっかり」を止めるツールで、悪意のある回避は防がない。
 
 ## 待つシェル自身に一致する pgrep -f のループ
 
@@ -119,7 +119,7 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 
 ### 起動した担当だけ通す（allow_owner）
 
-道具（例: ゲームを外から動かす `svcctl`）が「誰が起動したか」をファイルに記録するなら、起動した担当だけは、ガードが働いている間もその項目の形（`quit` など）を使える。ほかの担当は今までどおり止まる。
+ツール（例: ゲームを外から動かす `svcctl`）が「誰が起動したか」をファイルに記録するなら、起動した担当だけは、ガードが働いている間もその項目の形（`quit` など）を使える。ほかの担当は今までどおり止まる。
 
 ```json
 {"program": "^svcctl(\\.py)?$", "value_options": ["--owner"], "block": ["quit", "restart"],
@@ -128,7 +128,7 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 
 | 項目 | 中身 |
 |---|---|
-| `file` | 起動の記録。絶対パス・`~/…`・`$XDG_RUNTIME_DIR/<フォルダ>/…`（`${XDG_RUNTIME_DIR}` も可）。`XDG_RUNTIME_DIR` が無い（か空）なら `/tmp/<フォルダ>-<uid>/…`（記録を書く道具も同じ決まりにする） |
+| `file` | 起動の記録。絶対パス・`~/…`・`$XDG_RUNTIME_DIR/<フォルダ>/…`（`${XDG_RUNTIME_DIR}` も可）。`XDG_RUNTIME_DIR` が無い（か空）なら `/tmp/<フォルダ>-<uid>/…`（記録を書くツールも同じ決まりにする） |
 | `option` | コマンドが担当の名前を渡すオプション。サブコマンドより前の `--owner X` か `--owner=X`（最後のもの）。`value_options` に自動で足す |
 | `env` | 担当の名前の環境変数。`option` が無いときに見る: 前に付けた `SVCCTL_OWNER=X`（`env SVCCTL_OWNER=X` も）、同じコマンドの中で `export` したもの、hook の環境にあるもの。`export` しない代入（`SVCCTL_OWNER=X; svcctl …`）は子に渡らないので見ない。`env -u` / `unset` で消したものも見ない |
 | `same_role` | 既定 `true`: セッションの役割（kitty のペインの user var `role`）も X と同じことを求める。`false` で見ない |
@@ -158,9 +158,9 @@ stdout に次の JSON を出して exit 0（PreToolUse の decision control。�
 - 照合は `allow_owner` と同じ（`file`・`option`・`env`・`same_role`）で、`owner` の代わりに `with` の担当と照らす: コマンドが名乗る担当 X が `with` にあり、`same_role` なら役割も X。記録の形と pid の照合（allow_owner の条件の 2・3）もそのまま要る（記録の pid が今のゲームでなければ共同作業ではない）。`owner` の担当は今までどおり通る。
 - 人が `--owner` なしで起動したときは、`owner` の無い（か `null` の）記録に `coop` だけが付く。`coop`（`null` でない値。形の誤りの印も含む）があるときに限り、この形を読む（`owner` としては誰とも合わない）。`owner` も `coop` も無い記録は今までどおり形の誤り。
 - **旗・ロックの間は使わない**（`allow_owner` と同じ）。**保護したパスへの書き込みと git は、共同作業でも止める**（例外が外すのは項目の形の理由だけ。ゲームが動いている間に MOD のフォルダを書くと落ちるため）。
-- `coop.modified`（`true`）と `coop.changes`（正の整数）は、記録を書く道具が「プレイ用のセーブを担当が変えた回数」を残す欄。判定には使わず、`status` に添えるだけ（無い・形が違えば黙って省く）。
+- `coop.modified`（`true`）と `coop.changes`（正の整数）は、記録を書くツールが「プレイ用のセーブを担当が変えた回数」を残す欄。判定には使わず、`status` に添えるだけ（無い・形が違えば黙って省く）。
 - 例外は項目の `block` 全部に効く（`quit`・`load` なども）。人のゲームで担当に使わせたくないサブコマンドがあれば、`allow_owner` と同じく項目を 2 つに分け、`allow_owner` は通してよい項目にだけ書く。
-- 記録を書く道具は、一時ファイルに書いてから置き換える（読みかけの壊れた記録で例外を外さない）。
+- 記録を書くツールは、一時ファイルに書いてから置き換える（読みかけの壊れた記録で例外を外さない）。
 
 `claude-guard status` は、印が生きている間 `共同作業: aom-probe, aom-ui、16:15（JST）まで（一緒にダイヤを組む）、プレイ用のセーブを 3 回変えた` のように出す（時刻は JST で固定。旗の間は「（旗（ロック）の間は使わない）」を添える）。期限切れの印は `共同作業: 期限切れ（16:15）。ユーザーがいる扱いで、担当の命令は止める`、形の誤りの印は `共同作業: 印の形が正しくない。ユーザーがいる扱いで、担当の命令は止める` と出す。`claude-show` も同じ印を見る（[docs/config.md の playtest_guard](config.md#viewclaude-viewclaude-showclaude-roster)）。
 
@@ -192,7 +192,7 @@ game: 働いている（プロセス ^\./game）、条件 process/旗、止め�
 
 ## 例
 
-### 例 1: 発表中のアプリが動いている間は、画面を動かす道具とその設定を止める
+### 例 1: 発表中のアプリが動いている間は、画面を動かすツールとその設定を止める
 
 ```json
 {"guard_hook": {"guards": {"presenting": {
@@ -231,7 +231,7 @@ claude-guard release deploy-prod
 
 ## 限界
 
-- 止めるのは Claude Code のツール呼び出し（Bash / Edit / Write / NotebookEdit）だけ。人の手、CI、cron、ほかの道具は止めない。ロックは、ほかの道具も `claude-guard acquire` を呼ぶときだけ排他になる。
+- 止めるのは Claude Code のツール呼び出し（Bash / Edit / Write / NotebookEdit）だけ。人の手、CI、cron、ほかのプログラムは止めない。ロックは、ほかのプログラムも `claude-guard acquire` を呼ぶときだけ排他になる。
 - サブエージェントの中のツール呼び出しにも効く（設定ファイルの hook はサブエージェントの中でも同じように動き、入力に `agent_id` / `agent_type` が付く。公式の hooks の説明）。
 - Bash はシェルの静的な読みなので、見えない書き込み（スクリプトの中、alias、`eval`）がある。コマンドの名前を変数に入れた形は、同じコマンドの中で代入したものだけ読む（上の「コマンドの位置の変数」）。
 - `allow_owner` と共同作業の担当の名前は自己申告（`--owner`）と役割の照合で、なりすましは防がない（うっかり別の担当のものを止めることを防ぐ）。

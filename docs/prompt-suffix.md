@@ -69,7 +69,7 @@ CLAUDE.md に略号の意味を書いてモデルに任せるだけだと、効�
 
 - 一番新しいものが `screenshot_max_age_min`（既定 120 分）より古ければ「新しいスクリーンショットは無い（120 分以内のもの。最新は <パス>、<時刻>、<何日前>）。ユーザーに確認する」。前の画像を今のものと取り違えないため。`null` で古さを問わない。
 - 見つからなければ「見つからなかった（探した場所: …）。ユーザーに置き場を確認する」。
-- 名前（`screenshot_names`、大文字小文字は区別しない glob。名前も型も NFC にそろえて比べる）の既定: `Screenshot*`・`Screen Shot*`（古い macOS）・`スクリーンショット*`・`Bildschirmfoto*`・`Capture d’écran*`・`Captura de pantalla*`・`Schermafbeelding*`・`屏幕截图*`・`스크린샷*` など OS の道具の既定の名前と、Steam の `YYYYMMDDhhmmss_N.jpg`。拡張子は png・jpg・webp など画像だけ。ほかの名前で保存するなら `screenshot_names` に書く（`["*"]` で全部）。
+- 名前（`screenshot_names`、大文字小文字は区別しない glob。名前も型も NFC にそろえて比べる）の既定: `Screenshot*`・`Screen Shot*`（古い macOS）・`スクリーンショット*`・`Bildschirmfoto*`・`Capture d’écran*`・`Captura de pantalla*`・`Schermafbeelding*`・`屏幕截图*`・`스크린샷*` など OS のスクリーンショットのツールの既定の名前と、Steam の `YYYYMMDDhhmmss_N.jpg`。拡張子は png・jpg・webp など画像だけ。ほかの名前で保存するなら `screenshot_names` に書く（`["*"]` で全部）。
 - 1 つの置き場で見る、名前の合う画像は 2 万個まで（`SCAN_LIMIT`）。フォルダの中の並びは OS 任せなので、それを超えるフォルダでは一番新しいものを取りこぼしうる。
 
 置き場（どれも glob を使える。`~`・`$HOME` も可）は、次の順で 1 つを使う。

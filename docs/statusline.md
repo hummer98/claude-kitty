@@ -1,6 +1,6 @@
 # claude-statusline（ステータス行）
 
-Claude Code のステータス行（`settings.json` の `statusLine`）に入れる 1 行の道具です。**入れるかは任意**で、`tools/install.sh` は既定では入れません（`--all` でも入れない）。
+Claude Code のステータス行（`settings.json` の `statusLine`）に入れる 1 行のツールです。**入れるかは任意**で、`tools/install.sh` は既定では入れません（`--all` でも入れない）。
 
 ```
 dev-a | Opus | ctx 380k | sub: 2 | 2d4h 41.2%
@@ -45,7 +45,7 @@ stdin の `context_window` から読みます（[公式の説明](https://code.c
 
 - `statusLine` が無いときだけ入れる。別の `statusLine` があれば置き換えず、`!` の行で知らせて何もしない。
 - `tools/install.sh --uninstall --statusline`（`--all --uninstall` でも）は、claude-statusline の `statusLine` だけを外す（別のものは触らない）。
-- 入れたか・設定が読めるかは `claude-kitty doctor`（「statusLine」の行に claude-statusline か・別のものか・無しか、「設定: statusline」の行に設定が読めるか。statusLine は任意なので、claude-statusline なのに道具が見つからないときだけ NG）。
+- 入れたか・設定が読めるかは `claude-kitty doctor`（「statusLine」の行に claude-statusline か・別のものか・無しか、「設定: statusline」の行に設定が読めるか。statusLine は任意なので、claude-statusline なのにツールが見つからないときだけ NG）。
 
 ## 確かめる
 

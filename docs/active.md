@@ -27,7 +27,7 @@ $ claude-active --minutes 30 --json
 
 `type: "user"` の行のうち、次の両方を満たすものだけを数える。
 
-- `message.content` が文字列（道具の結果のリストでない）で、`isMeta`・`turnCompanion`（画像などの付き物）でない。
+- `message.content` が文字列（ツールの結果のリストでない）で、`isMeta`・`turnCompanion`（画像などの付き物）でない。
 - `origin.kind` か `turnOrigin` が `"human"`（片方でも別の値なら数えない）。
 
 数えないもの: 別のセッションからの知らせ（`peer`。claude-relay の起こす知らせも）、定期の見回り（`turnOrigin: "scheduled"`）、背景の仕事の知らせ（`task-notification`）。本文が `<task-notification`・`<cross-session-message`・`<agent-message`・`<system-reminder` で始まるもの、`[relay-wake ids=`・`[claude-kitty disk]` を含むものも念のため除く（lib/presence.py と同じ印）。
@@ -45,8 +45,8 @@ $ claude-active --minutes 30 --json
 
 ## 限界
 
-- ほかのプロセスが kitty の `send-text` で担当の入力欄に打った文は、人の入力と見分けられない（claude-kitty の道具は send-text を使わない）。
-- `claude --resume <ID> "指示"` の引数で渡した指示は、人と数える（`promptIndex` は 1 に戻るが `parentUuid` があり、resume のあとに人が打ったものと見分けられない）。claude-kitty の道具は resume に指示を付けない。
+- ほかのプロセスが kitty の `send-text` で担当の入力欄に打った文は、人の入力と見分けられない（claude-kitty のツールは send-text を使わない）。
+- `claude --resume <ID> "指示"` の引数で渡した指示は、人と数える（`promptIndex` は 1 に戻るが `parentUuid` があり、resume のあとに人が打ったものと見分けられない）。claude-kitty のツールは resume に指示を付けない。
 - 分は切り捨てて出す（20.9 分は「20分前」。判定は小数のまま比べる）。
 
 claude-presence（hook が書く last.json）とは別に、記録そのものを読む。hook が入っていない・落ちたときにも使えるようにするため。

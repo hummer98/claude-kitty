@@ -45,7 +45,7 @@
 3. 両方が trust したときだけ双方向に話せる（片方だけなら一方通行）。
 4. **`claude-relay untrust <名前> [--yes]`**: authorized_keys のその名前の行と、`relay.peers` と、ほかの相手が使っていなければ host key を外す。即座に効く（次の ssh から入れない）。
 
-受け取る側の前提: sshd が動いていること（macOS は「リモートログイン」、Linux は sshd のサービス）。`claude-kitty doctor` が調べる。**sshd をインターネットに出さないこと**（ルーターのポート転送をしない）。この道具は LAN の中だけを考えている。
+受け取る側の前提: sshd が動いていること（macOS は「リモートログイン」、Linux は sshd のサービス）。`claude-kitty doctor` が調べる。**sshd をインターネットに出さないこと**（ルーターのポート転送をしない）。このツールは LAN の中だけを考えている。
 
 ## 送る
 
