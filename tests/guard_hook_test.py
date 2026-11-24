@@ -1445,6 +1445,48 @@ class WaitLoop(Base):
         self.assertIn("pgrep -f '[l]uajit tests/run.lua'", r)
         self.assertIn("'\"'\"'", gh.wait_loop_text(["it's"]))       # 一重引用符の中の ' を閉じて書く
 
+    def test_judged_by_matching_the_shell_line(self):
+        # 形で決め打ちせず、待つシェルのコマンド行を模したもの（bash -c と Claude Code の包み）に当てて決める
+        launch = "luajit tests/run.lua > log & until ! pgrep -f '[l]uajit tests/run.lua'; do sleep 1; done"
+        r = self.bash(launch)
+        self.assertIsNotNone(r)                       # 同じコマンドで字のまま起動していれば [l]uajit も当たる
+        self.assertIn("claude-waitfor proc '[l]uajit tests/run.lua'", r)
+        self.assertNotIn("ループのまま書くなら", r)    # 当たる形は勧めない
+        for pat in ("^bash", "^/bin/bash -c", "source.*snapshot", "eval '", "^.*app"):
+            cmd = f"while pgrep -f {gh._sq(pat)}; do sleep 1; done"
+            self.assertEqual(gh.self_match_waits(cmd), [pat], cmd)
+        self.assertEqual(gh.self_match_waits("while pgrep -f 'a('; do :; done"), [])   # 読めない正規表現は判定しない
+        self.assertEqual(gh.self_matches("a(", ["a("]), None)
+        self.assertTrue(gh.self_matches("x.y", ["/bin/bash -c x\ny"]))            # . は改行にも当たる（regexec と同じ）
+
+    def test_bracket_form_suggested_only_when_it_works(self):
+        r = self.bash("until ! pgrep -f 'luajit tests/run.lua'; do sleep 2; done")
+        self.assertIn("ループのまま書くなら pgrep -f '[l]uajit tests/run.lua'", r)
+        self.assertEqual(gh.bracket_form("^luajit"), "^[l]uajit")
+        self.assertIsNone(gh.bracket_form(".*x"))
+
+    def test_ignore_ancestors_passes(self):
+        for cmd in ("while pgrep -Af foo; do sleep 1; done", "while pgrep -f --ignore-ancestors foo; do :; done",
+                    "while pgrep -f -A foo; do :; done"):
+            self.assertIsNone(self.bash(cmd), cmd)
+
+    def test_not_judged_on_macos(self):
+        # BSD の pgrep は自分と祖先を除くので、自分に一致しない
+        with mock.patch.object(gh, "PLATFORM", "darwin"):
+            self.assertIsNone(self.bash("while pgrep -f foo; do sleep 1; done"))
+        with mock.patch.object(gh, "PLATFORM", "linux"):
+            self.assertIsNotNone(self.bash("while pgrep -f foo; do sleep 1; done"))
+
+    def test_only_the_switch_without_guards_is_not_a_problem(self):
+        for v in (True, False):
+            self.cfg.write_text(json.dumps({"guard_hook": {"wait_loop_check": v}}))
+            guards, problems = gh.load_guard_config(self.env)
+            self.assertEqual((guards, problems), ([], []))
+            lines, bad = gh.status_lines(self.env, fake_probe())
+            self.assertFalse(bad, lines)
+        self.cfg.write_text(json.dumps({"guard_hook": {"guards": []}}))     # guards を書いて形が違うのは今までどおり問題
+        self.assertTrue(gh.load_guard_config(self.env)[1])
+
     def test_guard_allowances_do_not_release_it(self):
         # CLAUDE_GUARD_ALLOW・許可のファイルはガードの名前ごとの通す道で、この判定は外さない
         gh.write_state(self.env, "all", "allow", 30, "e2e")

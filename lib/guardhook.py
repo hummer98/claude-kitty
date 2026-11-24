@@ -37,6 +37,7 @@ PreToolUse hook（Bash / Edit / Write / NotebookEdit）から呼ぶ。判定は 
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -330,6 +331,8 @@ def load_guard_config(env, path=None):
     sec = data.get("guard_hook") if isinstance(data, dict) else None
     if sec is None:
         return [], problems
+    if isinstance(sec, dict) and "guards" not in sec:
+        return [], problems                # wait_loop_check だけを書いた形（ガードは無い）
     guards = sec.get("guards") if isinstance(sec, dict) else None
     if not isinstance(guards, dict):
         return [], [f"{path} の guard_hook.guards がオブジェクトでない。何も止めない"]
@@ -1950,14 +1953,39 @@ PGREP_VALUE_SHORT = set("dgGPstuUFr")
 PGREP_VALUE_LONG = {"--delimiter", "--pgroup", "--group", "--parent", "--session", "--terminal", "--euid", "--uid",
                     "--pidfile", "--ns", "--nslist", "--runstates", "--signal", "--cgroup", "--env"}
 LOOP_START = {"while", "until"}
-# 自分のコマンド行に一致しない形: 頭の文字を [x] で囲んだもの（[l]uajit。^ の後でも）と、^ の後に文字そのものが
-# 続くもの（^\./app・^./app・^luajit。シェルのコマンド行は /bin/bash -c … で始まるので一致しない。^/bin/bash の
-# ように、シェルの頭そのものを書いたパターンは見逃す）
-PGREP_SAFE = re.compile(r"^\^?\[[^\]]+\]|^\^(?:\\?\.)?(?:[A-Za-z0-9_/~-]|\\[./-])")
+# 自分に一致するかは、パターンの形で決め打ちせず、待つシェルのコマンド行を模したものに実際に re.search して決める
+# （[l]uajit の形でも、同じコマンドの中で luajit tests/run.lua を字のまま起動していれば一致する。^bash のような形も
+# 拾う）。模すのは bash -c <コマンド> と、Claude Code の実際の包み（source <snapshot> … && eval '<コマンド>' …）
+CC_WRAP_HEAD = ("source /home/user/.claude/shell-snapshots/snapshot-bash-0-x.sh 2>/dev/null || true && "
+                "\\builtin shopt -u extglob 2>/dev/null || true && eval ")
+CC_WRAP_TAIL = " < /dev/null && pwd -P >| /tmp/claude-0000-cwd"
+SHELL_PATHS = ("/bin/bash", "/usr/bin/bash", "bash")
+PLATFORM = sys.platform   # macOS（BSD）の pgrep は自分と祖先を除くので、そこでは判定しない（テストでは差し替える）
+
+
+def shell_lines(script, argv0=None):
+    """script を動かすシェルのコマンド行（引数を空白でつないだもの）の候補。"""
+    out = []
+    for sh in ([argv0] if argv0 else SHELL_PATHS):
+        out.append(f"{sh} -c {script}")
+        out.append(f"{sh} -c {CC_WRAP_HEAD}{_sq(script)}{CC_WRAP_TAIL}")
+    return out
+
+
+def self_matches(pattern, lines):
+    """pattern（pgrep -f の正規表現）が lines のどれかに当たるか。読めない正規表現は None（判定しない）。
+
+    POSIX の regexec（REG_NEWLINE なし）と同じく、. は改行にも当たり、^ と $ は全体の頭と終わりだけ。"""
+    try:
+        r = re.compile(pattern, re.S)
+    except (re.error, OverflowError, RecursionError):
+        return None
+    return any(r.search(line) for line in lines)
 
 
 def _pgrep_full_pattern(args):
-    """pgrep の引数から、-f（--full）付きのときのパターン。-f が無い・-x（全体の一致）・パターンが無いなら None。"""
+    """pgrep の引数から、-f（--full）付きのときのパターン。-f が無い・-x（全体の一致）・-A（祖先を除く）・
+    パターンが無いなら None。"""
     full = exact = False
     pattern = None
     i = 0
@@ -1968,12 +1996,16 @@ def _pgrep_full_pattern(args):
             break
         if a.startswith("--"):
             name = a.split("=", 1)[0]
+            if name == "--ignore-ancestors":
+                return None             # procps-ng 4 の -A: 祖先（待つシェル）を除くので自分に一致しない
             full = full or name == "--full"
             exact = exact or name == "--exact"
             i += 2 if (name in PGREP_VALUE_LONG and "=" not in a) else 1
             continue
         if a.startswith("-") and len(a) > 1:
             for j, c in enumerate(a[1:], 1):
+                if c == "A":
+                    return None         # --ignore-ancestors
                 if c == "f":
                     full = True
                 elif c == "x":
@@ -1989,15 +2021,18 @@ def _pgrep_full_pattern(args):
     return pattern if (full and not exact and pattern) else None
 
 
-def self_match_waits(command, in_loop=False, depth=0):
+def self_match_waits(command, in_loop=False, depth=0, lines=None):
     """until / while のループの中の、待つシェル自身に一致する pgrep -f のパターンのリスト（字句で読む）。
 
-    ループでない単発の pgrep -f、-x、頭を [x] で囲んだパターン、^ で頭を決めたパターンは数えない。
+    ループでない単発の pgrep -f、-x、-A は数えない。パターンは、待つシェルのコマンド行を模したもの（lines。
+    既定は bash -c <command> と Claude Code の包み）に実際に当てて、当たるものだけを数える。
     同じコマンドの中で代入した変数（P="…"; until ! pgrep -f "$P"）はその値で見る（代入の字もシェルのコマンド行に
     残るので一致する）。値の分からない変数は数えない。bash -c の中身とコマンド置換の中も読む。"""
     found = []
     if depth > 4 or not isinstance(command, str) or "pgrep" not in command:
         return found
+    if lines is None:
+        lines = shell_lines(command)
     subs = []
     stack = []
     vars_ = {}
@@ -2030,7 +2065,7 @@ def self_match_waits(command, in_loop=False, depth=0):
             for m in list(SUB_IN_WORD.finditer(w)) + list(SUB_LINE.finditer(w)):
                 n = int(m.group(1))
                 if n < len(subs):
-                    add(self_match_waits(subs[n][0], looping, depth + 1))
+                    add(self_match_waits(subs[n][0], looping, depth + 1, lines))
         if not words:
             continue
         assigns, rest = _split_assignments(words)
@@ -2044,8 +2079,8 @@ def self_match_waits(command, in_loop=False, depth=0):
         name = os.path.basename(rest[0])
         if name in SHELLS:
             script = _shell_c(rest[1:])
-            if script:
-                add(self_match_waits(script, looping, depth + 1))
+            if script:   # 中のシェルのコマンド行（bash -c <中身>）も、外のシェルのものと並べて当てる
+                add(self_match_waits(script, looping, depth + 1, lines + shell_lines(script, rest[0])))
             continue
         if name != "pgrep" or not looping:
             continue
@@ -2056,9 +2091,8 @@ def self_match_waits(command, in_loop=False, depth=0):
         value = _expand(pat, vars_)
         if VAR.search(value) or "$(" in value or "`" in value:
             continue                              # 値の分からない変数（シェルのコマンド行には $P の字しかない）
-        if PGREP_SAFE.match(value):
-            continue
-        add([value])
+        if self_matches(value, lines):
+            add([value])
     return found
 
 
@@ -2066,14 +2100,27 @@ def _sq(text):
     return "'" + text.replace("'", "'\"'\"'") + "'"
 
 
-def wait_loop_text(patterns):
+def bracket_form(pattern):
+    """頭の字を [x] で囲んだ形（字のまま書いた自分のコマンド行には当たらない形）。作れなければ None。"""
+    m = re.match(r"(\^?)([A-Za-z0-9_/~-])", pattern)
+    return f"{m.group(1)}[{m.group(2)}]{pattern[m.end():]}" if m else None
+
+
+def wait_loop_text(patterns, command=None):
+    """断りの文。claude-waitfor を第一に勧め、[x] の形は、同じコマンドに字のまま書いても当たらないときだけ添える。"""
     pat = patterns[0]
     more = f"（ほか {len(patterns) - 1} 件）" if len(patterns) > 1 else ""
-    bracket = f"[{pat[0]}]{pat[1:]}" if pat[:1].isalnum() else "[l]uajit …"
-    return (f"{TAG} until/while のループの中の pgrep -f {_sq(pat)}{more} は、待つシェル自身に一致して終わらない"
+    text = (f"{TAG} until/while のループの中の pgrep -f {_sq(pat)}{more} は、待つシェル自身に一致して終わらない"
             f"（Claude Code は bash -c '<コマンド>' で動かすので、シェルのコマンド行にパターンの字が入る）。"
-            f"claude-waitfor proc {_sq(pat)} を使う（上限時間付き。既定 30 分）。"
-            f"ループのまま書くなら、頭の文字を囲んだ pgrep -f {_sq(bracket)} の形にする")
+            f"claude-waitfor proc {_sq(pat)} を使う（自分と呼んだシェルを数えない。上限時間付きで既定 30 分）")
+    alt = bracket_form(pat)
+    if alt and command is not None and command.count(pat) == 1:
+        # パターンの字が pgrep の引数の 1 か所だけのとき、そこを書き換えたシェルの行に当たらなければ勧める
+        # （同じコマンドで luajit tests/run.lua を字のまま起動していれば、[l]uajit も当たるので勧めない）
+        fixed = command.replace(pat, alt)
+        if self_matches(alt, shell_lines(fixed)) is False:
+            text += f"。ループのまま書くなら pgrep -f {_sq(alt)} の形でも自分には当たらない"
+    return text
 
 
 def load_wait_loop_check(env, path=None):
@@ -2121,9 +2168,9 @@ def evaluate(data, env, probe=Probe, now=None, path=None, assume=False):
         enabled, problem = load_wait_loop_check(env, path)
         if problem:
             log_error(env, problem, once=True)
-        pats = self_match_waits(cmd) if enabled else []
+        pats = self_match_waits(cmd) if enabled and PLATFORM != "darwin" else []
         if pats:
-            texts.append(wait_loop_text(pats))
+            texts.append(wait_loop_text(pats, cmd))
     guards, problems = load_guard_config(env, path)
     for p in problems:
         log_error(env, p, once=True)

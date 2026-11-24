@@ -67,29 +67,34 @@
 Claude Code は Bash のコマンドを `bash -c '<コマンド>'` で動かす。`until ! pgrep -f "luajit tests/run.lua"; do sleep 2; done` と書くと、
 `pgrep -f` が待つシェル自身のコマンド行（パターンの字を含む）に一致して、ループが終わらない（2026-11 に 15〜19 時間残り、
 セッションの status が `shell` のままで `claude-roster restart` が断った。[waitfor.md](waitfor.md#なぜ)）。
-この形を止め、理由に「待つシェル自身に一致して終わらない。`claude-waitfor proc '<パターン>'` を使う」と、頭の文字を囲んだ形（`pgrep -f '[l]uajit tests/run.lua'`）を返す。
+この形を止め、理由で `claude-waitfor proc '<パターン>'` を第一に勧める。頭の文字を囲んだ形（`pgrep -f '[l]uajit tests/run.lua'`）は、それで本当に自分に当たらなくなるとき（下の当て方で確かめたとき）だけ添える。
 
 止める形（字句で読む。ガードの判定と同じ字句の分け方）:
 
-- `while` / `until` のループの中（条件でも本体でも。`done` までの間）の `pgrep` で、`-f`（`--full`、`-af` などの組も）があるもの。
+- `while` / `until` のループの中（条件でも本体でも。`done` までの間）の `pgrep` で、`-f`（`--full`、`-af` などの組も）があり、そのパターンが**待つシェルのコマンド行に実際に当たる**もの。
+- 当て方: パターンの形では決めず、待つシェルのコマンド行を模したものに `re.search`（POSIX の regexec と同じく `.` は改行にも当たる）。模すのは `/bin/bash -c <コマンド全体>`（`/usr/bin/bash`・`bash` も）と、Claude Code の実際の包み `… -c source <snapshot> … && eval '<コマンド全体>' < /dev/null && pwd -P >| …`。`bash -c '…'` の中のループは、中のシェルのコマンド行も並べて当てる。
+  - たとえば `luajit tests/run.lua > log & until ! pgrep -f '[l]uajit tests/run.lua'; …` は、同じコマンドに `luajit tests/run.lua` を字のまま書いているので `[l]uajit` でも当たり、止める。`^bash`・`^/bin/bash -c`・`source.*snapshot` も当たるので止める。
 - `$(...)`・`` `...` ``・`bash -c '…'` の中も、外のループの中にあれば数える。`bash -c` の中のループも読む。
 - 同じコマンドの中で代入した変数（`P="luajit t"; until ! pgrep -f "$P"`）は値で見る（代入の字もシェルのコマンド行に残るので一致する）。
 
 通す形（誤って止めない）:
 
 - ループでない単発の `pgrep -f`（`pgrep -f x && echo running`）。`for` のループ、ループの後の `pgrep -f`。
-- パターンの頭の文字を `[x]` で囲んだもの（`[l]uajit tests/run.lua`、`^[l]uajit`）。正規表現 `[l]uajit` はシェルのコマンド行の字 `[l]uajit` に一致しない。
-- `^` の後に文字そのもの（英数字・`/`・`_`・`-`・`~`、`\.`、`.` の後の文字）が続くもの（`^\./TransportFever3`、`^luajit`）。シェルのコマンド行は `/bin/bash -c …` で始まるので一致しない。
-- `-x`（`--exact`。全体の一致）、`-f` の無いもの（プロセスの名前だけを見る）。
+- パターンがシェルのコマンド行に当たらないもの（`until ! pgrep -f '[l]uajit tests/run.lua'` だけのコマンド、`^\./TransportFever3`、`^luajit`）。
+- `-x`（`--exact`。全体の一致）、`-A`（`--ignore-ancestors`。procps-ng 4 で祖先を除く）、`-f` の無いもの（プロセスの名前だけを見る）。
+- 読めない正規表現（pgrep の側でも誤りになるので判定しない）。
 - 値の分からない変数（`while read p; do pgrep -f "$p"; done`。シェルのコマンド行には `$p` の字しかない）。
 - 引用符の中・ヒアドキュメントの本文（`echo "while pgrep -f x; do"`、`git commit -m '…'`）。
+- macOS では判定しない（BSD の pgrep は自分と祖先を除くので、自分に一致しない）。
 
-見逃すもの: `^/bin/bash` のようにシェルの頭そのものを書いたパターン、`eval`・関数・スクリプトの中のループ、`grep -q` で
-ファイルを待つループ（`until grep -q … $F` は自分に一致しないが、目印が出なければ終わらない。`claude-waitfor file` を勧めるだけで止めない）。
+見逃すもの: `eval`・関数・スクリプトの中のループ、模した包みと違うコマンド行で動かしたもの（Claude Code の包みが変わったときなど）、
+Python の `re` と ERE の違いで当たり方が変わるパターン、`grep -q` でファイルを待つループ（`until grep -q … $F` は自分に
+一致しないが、目印が出なければ終わらない。`claude-waitfor file` を勧めるだけで止めない）。
 
 - `pgrep` の字が無いコマンドでは、この判定のために設定も読まない。
 - 設定の値が true / false でないときは有効のまま、`claude-guard status` の「問題:」に出す（そのとき exit 1）。`status` には「待つシェル自身に一致する pgrep -f のループ: 常に止める」の行が出る。
-- `CLAUDE_GUARD_ALLOW`・許可のファイルでは外れない（ガードの名前ごとの通す道なので）。どうしてもループで書くなら `[x]` の形にする。
+- `CLAUDE_GUARD_ALLOW`・許可のファイルでは外れない（ガードの名前ごとの通す道なので）。どうしてもループで書くなら、自分に当たらない形（`[x]` の形で、同じコマンドに字のまま書かない）にする。
+- 設定に `guard_hook.wait_loop_check` だけを書き、`guards` を書かない形も問題にしない（ガードは無い）。
 - ガードの止める理由と同時に当たれば、両方を並べて返す。
 
 ## 止め方

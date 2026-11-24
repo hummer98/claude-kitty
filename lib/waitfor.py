@@ -170,29 +170,46 @@ def _head(line, n=100):
 class _Reader:
     """ファイルを前回の続きから読み、文字列が現れたかを調べる（大きなログを毎回頭から読まない）。
 
-    境目で切れた文字列も見つけるよう、前の読みの末尾（文字列の長さ - 1 バイト）を残す。ファイルが縮んだ・
-    置き換わった（inode が変わった）ときは頭から読み直す。"""
+    境目で切れた文字列も見つけるよう、前の読みの末尾（文字列の長さ - 1 バイト）を残す。次のときは頭から読み直す:
+    置き換わった（inode が変わった）、縮んだ、mtime が戻った、頭の HEAD バイトが前に読んだものと違う（同じ inode に
+    書き直した: `>` で開き直して前より長く書いたなど）。頭の HEAD バイトまで同じで、その後ろだけを同じ長さ以上に
+    書き直したものは見分けられない（docs/waitfor.md の限界）。"""
 
     CHUNK = 1 << 20
+    HEAD = 4096
 
     def __init__(self, path, needle):
         self.path = path
         self.needle = needle.encode("utf-8")
-        self.pos = 0
-        self.tail = b""
-        self.ino = None
+        self.reset(None)
+
+    def reset(self, st):
+        self.ino = st.st_ino if st else None
+        self.mtime = st.st_mtime_ns if st else None
+        self.pos, self.tail, self.head = 0, b"", b""
+
+    def rewritten(self, f, st):
+        if st.st_ino != self.ino or st.st_size < self.pos or (self.mtime is not None and st.st_mtime_ns < self.mtime):
+            return True
+        if self.head:
+            f.seek(0)
+            return f.read(len(self.head)) != self.head
+        return False
 
     def found(self):
         try:
             with open(self.path, "rb") as f:
                 st = os.fstat(f.fileno())
-                if st.st_ino != self.ino or st.st_size < self.pos:
-                    self.ino, self.pos, self.tail = st.st_ino, 0, b""
+                if self.rewritten(f, st):
+                    self.reset(st)
+                self.mtime = st.st_mtime_ns
                 f.seek(self.pos)
                 while True:
                     chunk = f.read(self.CHUNK)
                     if not chunk:
                         return False
+                    if len(self.head) < self.HEAD:
+                        self.head += chunk[:self.HEAD - len(self.head)]
                     buf = self.tail + chunk
                     if self.needle in buf:
                         return True

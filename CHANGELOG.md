@@ -16,7 +16,7 @@
 - `claude-waitfor`（新しい道具）: 上限時間付きで待つ。`proc <パターン>` は一致するプロセスが無くなるまで、`file <path> <文字列>` はファイルに文字列が現れるまで（ファイルがまだ無くてもよい）。Claude Code のセッションが `until ! pgrep -f "luajit tests/run.lua"; do sleep 2; done` で待ち、pgrep が待つシェル自身（`bash -c '…'` のコマンド行）に一致して 15〜19 時間残ったため。`until grep -q … $F` で目印が出ずに 24 時間残ったこともあった（[docs/waitfor.md](docs/waitfor.md)）。
   - 一致は `pgrep -f` と同じ（完全なコマンド行に正規表現）。自分・祖先（呼んだシェル）・祖先から fork しただけの子（パイプやサブシェル）と、ほかの claude-waitfor とそれを呼んだシェル（同じものを待つ 2 つが待ち合わないように）は数えない。
   - 既定の上限 30 分（`--timeout 90s` / `2h`、24 時間まで。0 = 無制限は受けない）、間隔 2 秒（`--interval`）。時間切れは終了コード 124 と 1 行の文、引数の誤りは 2。
-- `claude-guard`: until / while のループの中の `pgrep -f` を、ガードの設定・保護するプロセスに関係なく常に止め、「待つシェル自身に一致して終わらない。claude-waitfor proc '<パターン>' を使う」を返す（[docs/guard-hook.md](docs/guard-hook.md#待つシェル自身に一致する-pgrep--f-のループ)）。単発の `pgrep -f`、頭を `[l]uajit` の形で囲んだもの、`^` で頭を決めたもの、`-x`、値の分からない変数は通す。設定 `guard_hook.wait_loop_check`（既定 `true`）で切れる。`claude-guard status` に 1 行足した。
+- `claude-guard`: until / while のループの中の `pgrep -f` を、ガードの設定・保護するプロセスに関係なく常に止め、「待つシェル自身に一致して終わらない。claude-waitfor proc '<パターン>' を使う」を返す（[docs/guard-hook.md](docs/guard-hook.md#待つシェル自身に一致する-pgrep--f-のループ)）。自分に当たるかは、パターンの形で決めず、待つシェルのコマンド行を模したもの（`bash -c <コマンド>` と Claude Code の包み `source … && eval '<コマンド>'`）に実際に当てて決める（同じコマンドで `luajit tests/run.lua` を起動していれば `[l]uajit` も止める。`^bash` も止める）。単発の `pgrep -f`、`-x`、`-A`（`--ignore-ancestors`）、値の分からない変数、読めない正規表現は通し、macOS（BSD の pgrep は自分と祖先を除く）では判定しない。`[x]` の形は、それで当たらなくなるときだけ勧める。設定 `guard_hook.wait_loop_check`（既定 `true`）で切れる。`claude-guard status` に 1 行足した。
 - `claude-roster status`・`claude-kitty doctor`: 各セッション（claude の pid）の子の背景のシェルのうち、2 時間を超えて続くものを 1 行ずつ出す（pid・経過時間・コマンドの先頭。止めない）。背景のシェルが残るとセッションの status が `shell` のままになり、`claude-roster restart` が断るため。`restart` の断りの文（status=shell のとき）にも `claude-roster status` で見るよう添えた。
 - `claude-roster`: プロジェクトごとに `CLAUDE_CONFIG_DIR` で設定の置き場を分けている（direnv の `.envrc` など）ときに、名簿と復元が効くようにした（[docs/roster.md](docs/roster.md#プロジェクトごとの設定の置き場と包み)）。
   - `save` はペインの claude の `CLAUDE_CONFIG_DIR` を読み、既定でなければ役割に `config_dir` を残す。セッションの記録・モデルもその置き場から読む。
@@ -39,6 +39,10 @@
   - `claude-show`（`view.playtest_guard`）: 呼んだペインの役割が `coop.with` にあれば、人がいても開く（見せるのが目的）。ゲームの窓が前面なら断る（exit 2）。
   - 期限が切れた印（`until` を過ぎた `coop` のキーが残っている記録）と形の誤りの印（`until` が NaN・Infinity・7 日より先など）は「ユーザーがいる」扱いにした（前は印が無いのと同じで、owner の担当が通り、`claude-show` も e2e で開いていた）。期限が切れても人がまだ操作しているかもしれず、誤った印で例外が開かないようにするため。`claude-guard` は owner の担当も `with` の担当も `allow_owner` の例外を使えず、断りの文に「共同作業の期限（HH:MM JST）が切れた。続けるなら coop start で延ばす。終えるなら coop end」（形の誤りは「共同作業の印の形が正しくない」）を添える。`claude-show` は誰が呼んでも断る。`claude-guard status` は「共同作業: 期限切れ（HH:MM）。ユーザーがいる扱いで、担当の命令は止める」。`coop end`（キーが消える。`coopChanges` だけの記録は印でない）かゲームの終わり（pid 違い）で元の判定に戻る。
   - `claude-show`: 印を owner より先に見る（`launch --coop` の最中に、`with` に無い担当まで担当の e2e として開いていた）。印が効いていれば `with` の担当だけが開け、ほかは owner が役割でも断る。共同作業の HTML は `claude-browser --no-above`（新設。keepAbove を付けない・外す）と `--focus none` で開く（ユーザーがゲームに戻ったとき Chrome を上に残さない）。
+
+### 上げるときに手で行うこと
+
+- `tools/install.sh --links`（新しい `claude-waitfor` を `~/.local/bin` にリンクする。`git pull` だけではリンクされない）。
 
 ## [0.7.6] - 2026-11-23
 

@@ -109,7 +109,7 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 
 | 項目（`guard_hook` の直下） | 既定 | 意味 |
 |---|---|---|
-| `wait_loop_check` | `true` | `false` で、ループの中の `pgrep -f` を止める判定を切る（[guard-hook.md](guard-hook.md#待つシェル自身に一致する-pgrep--f-のループ)）。true / false でない値は有効のまま「問題:」に出す |
+| `wait_loop_check` | `true` | `false` で、ループの中の `pgrep -f` を止める判定を切る（[guard-hook.md](guard-hook.md#待つシェル自身に一致する-pgrep--f-のループ)）。true / false でない値は有効のまま「問題:」に出す。これだけを書いて `guards` を書かなくてもよい |
 
 ガードごとの項目:
 

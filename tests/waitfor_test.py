@@ -186,6 +186,26 @@ class File(unittest.TestCase):
         self.path.write_text("OK")              # 縮んだ → 頭から
         self.assertTrue(r.found())
 
+    def test_rewritten_in_place_is_read_again(self):
+        # 同じ inode に前より長く書き直した（> で開き直した）: 頭のバイトが違うので頭から読み直す
+        r = W._Reader(str(self.path), "DONE")
+        self.path.write_text("old line 1\n")
+        self.assertFalse(r.found())
+        ino = os.stat(self.path).st_ino
+        with open(self.path, "w") as f:
+            f.write("new DONE and a longer body\n")
+        self.assertEqual(os.stat(self.path).st_ino, ino)
+        self.assertTrue(r.found())
+
+    def test_mtime_going_back_is_read_again(self):
+        r = W._Reader(str(self.path), "DONE")
+        self.path.write_text("abc DONE"[:3])
+        self.assertFalse(r.found())
+        self.path.write_text("abcDONE")              # 頭は同じ・長くなった
+        os.utime(self.path, ns=(1, 1))              # mtime が戻った
+        r.pos = len("abcDONE")                       # 続きから読むと見えない位置にいるとする
+        self.assertTrue(r.found())
+
     def test_utf8_needle_and_empty(self):
         self.path.write_text("完了しました\n", encoding="utf-8")
         self.assertEqual(W.wait_file(str(self.path), "完了", 1, 1, sys_=FakeSys({}))[0], W.EXIT_DONE)
