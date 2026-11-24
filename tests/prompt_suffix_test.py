@@ -49,7 +49,7 @@ class Base(unittest.TestCase):
 
 class Find(Base):
     def test_each_default(self):
-        for name in ("wdt", "opt", "pre", "desc", "next", "ss", "aq"):
+        for name in ("wdt", "opt", "pre", "desc", "next", "ss", "aq", "sub", "htpre"):
             self.assertEqual(self.find(f"これはどう？ {name}"), [(name, None)], name)
 
     def test_case_insensitive_and_alone(self):
@@ -129,6 +129,17 @@ class Find(Base):
         self.assertIn("質問なし", self.hook("これを直して aq")["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(self.find("これを直してaq"), [("aq", None)])
 
+    def test_sub_and_htpre(self):
+        # 語の一部（sub-agent・subagent・htpre2・pre）では拾わない。並べると両方
+        for text in ("sub-agent", "subagent", "a/sub", "htpre2", "xhtpre"):
+            self.assertEqual(self.find(text), [], text)
+        self.assertEqual(self.find("調べてsub htpre"), [("sub", None), ("htpre", None)])
+        self.assertIn("サブエージェント", self.hook("調べて sub")["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("HTML", self.hook("まとめて htpre")["hookSpecificOutput"]["additionalContext"])
+        # htpre を設定で消しても、中の pre を拾わない
+        self.write_cfg({"suffixes": {"htpre": None}})
+        self.assertIsNone(self.hook("まとめて htpre"))
+
     def test_english_sentence_middle_next(self):
         self.assertEqual(self.find("do the next step and commit"), [])
         self.assertEqual(self.find("next we should fix it"), [])
@@ -194,7 +205,7 @@ class Config(Base):
     def test_defaults_without_file(self):
         cfg, problems = self.cfg()
         self.assertEqual(problems, [])
-        self.assertEqual(set(cfg["table"]), {"wdt", "opt", "pre", "desc", "next", "ss", "aq"})
+        self.assertEqual(set(cfg["table"]), {"wdt", "opt", "pre", "desc", "next", "ss", "aq", "sub", "htpre"})
         self.assertTrue(cfg["enabled"] and cfg["notice"])
         self.assertFalse(cfg["number_lists"])
 
@@ -250,6 +261,8 @@ class Config(Base):
         self.assertIn("Treated the trailing \"wdt\"", out["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(out["systemMessage"], "Shorthand wdt applied")
         self.assertIn("No questions", self.hook("ok aq")["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("subagents", self.hook("ok sub")["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("HTML page", self.hook("ok htpre")["hookSpecificOutput"]["additionalContext"])
         self.assertIsNone(self.hook("what comes next"))       # en の既定に next は無い（英語の文の終わりと重なる）
         self.write_cfg({"language": "en", "suffixes": {"next": "List decisions."}})
         self.assertIsNotNone(self.hook("ok next"))

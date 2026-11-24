@@ -59,6 +59,11 @@ BUILTIN = {
         "aq": "作業を始める前に、分からない点や決めておきたい前提を番号を振って聞き、答えを待つ。"
               "自分で決められる小さな選択は決めて、その内容を書いておく。聞くことが無ければ「質問なし」と書いて進める。"
               "ほかの略号の指示は、答えを受けてから従う。",
+        "sub": "作業はサブエージェントにさせ、自分は依頼・確認・報告にとどめる。コードを書かせたら、別のサブエージェントに"
+               "差分と目的だけを渡してレビューさせる。wdt・desc と並べたときは、読むだけの調べものをさせる。",
+        "htpre": "結果を人が読める HTML のページにまとめてファイルに保存し、開いて見せる（kitty 上なら claude-show <file>）。"
+                 "置き場は作業中のリポジトリのコミットに紛れない所（作業ツリーの外など）。"
+                 "見せるための HTML の保存は、wdt・desc の「変更しない」に数えない。",
     },
     "en": {
         "wdt": "The user is asking for an opinion only, not for work. Do not change files, commit, or ask other sessions or "
@@ -75,6 +80,12 @@ BUILTIN = {
         "aq": "Before starting, ask numbered questions about anything unclear or any assumption worth settling, and wait "
               "for the answers. Settle minor choices yourself and state them. If there is nothing to ask, say \"No questions\" "
               "and go ahead. Follow any other shorthand only after the answers.",
+        "sub": "Have subagents do the work; limit yourself to briefing, checking, and reporting. When a subagent writes "
+               "code, have a separate subagent review it, given only the diff and the goal. Combined with wdt or desc, "
+               "have them do read-only investigation only.",
+        "htpre": "Put the result into a human-readable HTML page, save it to a file, and open it for the user (on kitty, "
+                 "claude-show <file>). Save it where it will not slip into a commit of the repository you are working in "
+                 "(e.g. outside the working tree). Saving this HTML does not count as a change under wdt or desc.",
     },
 }
 LANGUAGES = tuple(BUILTIN)
