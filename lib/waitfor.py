@@ -8,7 +8,7 @@ Claude Code は Bash のコマンドを `bash -c '<コマンド>'` で動かす�
 ほかの claude-waitfor と、それを呼んだシェルも数えない（同じものを待つ 2 つが、互いに一致して待ち合わないように）。
 
 一致の決まりは pgrep -f と同じ: 引数を空白でつないだ完全なコマンド行に、パターンを正規表現として re.search
-（lib/guardhook.py の allow_owner と同じ。Python の re で、ERE と細部は違いうる）。
+（re.S。pgrep の regexec と同じく . は改行にも当たる。lib/guardhook.py の判定と同じ。Python の re で、ERE と細部は違いうる）。
 
 テストでは processes・ppid・argv・clock・sleep を差し替える。
 """
@@ -141,7 +141,7 @@ def matching(regex, me, sys_=Sys):
 def wait_proc(pattern, timeout=DEFAULT_TIMEOUT, interval=DEFAULT_INTERVAL, me=None, sys_=Sys, out=None):
     """(終了コード, 1 行の文)。パターンが正規表現として読めなければ ValueError。"""
     try:
-        regex = re.compile(pattern)
+        regex = re.compile(pattern, re.S)   # regexec（REG_NEWLINE なし）と同じく . は改行にも当たる（guard の判定と揃える）
     except re.error as e:
         raise ValueError(f"パターンが正規表現として読めない: {e}") from None
     me = os.getpid() if me is None else me

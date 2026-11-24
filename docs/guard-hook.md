@@ -73,8 +73,9 @@ Claude Code は Bash のコマンドを `bash -c '<コマンド>'` で動かす�
 
 - `while` / `until` のループの中（条件でも本体でも。`done` までの間）の `pgrep` で、`-f`（`--full`、`-af` などの組も）があり、そのパターンが**待つシェルのコマンド行に実際に当たる**もの。
 - 当て方: パターンの形では決めず、待つシェルのコマンド行を模したものに `re.search`（POSIX の regexec と同じく `.` は改行にも当たる）。模すのは `/bin/bash -c <コマンド全体>`（`/usr/bin/bash`・`bash` も）と、Claude Code の実際の包み `… -c source <snapshot> … && eval '<コマンド全体>' < /dev/null && pwd -P >| …`。`bash -c '…'` の中のループは、中のシェルのコマンド行も並べて当てる。
-  - たとえば `luajit tests/run.lua > log & until ! pgrep -f '[l]uajit tests/run.lua'; …` は、同じコマンドに `luajit tests/run.lua` を字のまま書いているので `[l]uajit` でも当たり、止める。`^bash`・`^/bin/bash -c`・`source.*snapshot` も当たるので止める。
+  - たとえば `luajit tests/run.lua > log & until ! pgrep -f '[l]uajit tests/run.lua'; …` は、同じコマンドに `luajit tests/run.lua` を字のまま書いているので `[l]uajit` でも当たり、止める。`^/bin/bash -c`・`source.*snapshot` も当たるので止める。`^bash` は実際のコマンド行（`/bin/bash -c …`）には当たらないが、シェルを `bash` の名前で起動した行も模しているので止める（止めすぎる側に倒している。`claude-waitfor` を使えば済むため）。
 - `$(...)`・`` `...` ``・`bash -c '…'` の中も、外のループの中にあれば数える。`bash -c` の中のループも読む。
+- 上限のある待ち（`timeout 60 bash -c "while pgrep -f …; do …; done"`）も止める（意図どおり）。上限までは必ず自分に当たり続け、待つ意味が無いため。
 - 同じコマンドの中で代入した変数（`P="luajit t"; until ! pgrep -f "$P"`）は値で見る（代入の字もシェルのコマンド行に残るので一致する）。
 
 通す形（誤って止めない）:

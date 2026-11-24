@@ -331,8 +331,8 @@ def load_guard_config(env, path=None):
     sec = data.get("guard_hook") if isinstance(data, dict) else None
     if sec is None:
         return [], problems
-    if isinstance(sec, dict) and "guards" not in sec:
-        return [], problems                # wait_loop_check だけを書いた形（ガードは無い）
+    if isinstance(sec, dict) and sec and set(sec) <= {WAIT_LOOP_KEY}:
+        return [], problems                # wait_loop_check だけを書いた形（ガードは無い）。{} や綴りの誤りは下で問題にする
     guards = sec.get("guards") if isinstance(sec, dict) else None
     if not isinstance(guards, dict):
         return [], [f"{path} の guard_hook.guards がオブジェクトでない。何も止めない"]
@@ -1949,9 +1949,9 @@ def find_reasons(guard, tool, tool_input, cwd, env, session=None, owner_ok=True,
 
 WAIT_LOOP_KEY = "wait_loop_check"
 # 値をとる pgrep のオプション（procps-ng と BSD）。パターンの位置を取り違えないため
-PGREP_VALUE_SHORT = set("dgGPstuUFr")
+PGREP_VALUE_SHORT = set("dgGPstuUFrO")   # -O は procps-ng 4 の --older <秒>
 PGREP_VALUE_LONG = {"--delimiter", "--pgroup", "--group", "--parent", "--session", "--terminal", "--euid", "--uid",
-                    "--pidfile", "--ns", "--nslist", "--runstates", "--signal", "--cgroup", "--env"}
+                    "--pidfile", "--ns", "--nslist", "--runstates", "--signal", "--cgroup", "--env", "--older"}
 LOOP_START = {"while", "until"}
 # 自分に一致するかは、パターンの形で決め打ちせず、待つシェルのコマンド行を模したものに実際に re.search して決める
 # （[l]uajit の形でも、同じコマンドの中で luajit tests/run.lua を字のまま起動していれば一致する。^bash のような形も

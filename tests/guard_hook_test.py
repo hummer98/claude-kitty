@@ -1486,6 +1486,12 @@ class WaitLoop(Base):
             self.assertFalse(bad, lines)
         self.cfg.write_text(json.dumps({"guard_hook": {"guards": []}}))     # guards を書いて形が違うのは今までどおり問題
         self.assertTrue(gh.load_guard_config(self.env)[1])
+        # 空の節・綴りの誤り（guards が無い）は今までどおり問題に出す（ガードを書いたつもりで何も止めないのに気づけるよう）
+        for sec in ({}, {"gaurds": {"x": {"process": "^a", "paths": ["/x"]}}},
+                    {"wait_loop_check": True, "gaurds": {}}):
+            self.cfg.write_text(json.dumps({"guard_hook": sec}))
+            self.assertTrue(gh.load_guard_config(self.env)[1], sec)
+            self.assertTrue(gh.status_lines(self.env, fake_probe())[1], sec)
 
     def test_guard_allowances_do_not_release_it(self):
         # CLAUDE_GUARD_ALLOW・許可のファイルはガードの名前ごとの通す道で、この判定は外さない
@@ -1541,6 +1547,10 @@ class WaitLoop(Base):
         self.assertEqual(gh._pgrep_full_pattern(["-f", "a"]), "a")
         self.assertEqual(gh._pgrep_full_pattern(["-l", "-f", "a"]), "a")
         self.assertEqual(gh._pgrep_full_pattern(["-cf", "a"]), "a")          # -c は数だけ（値をとらない）
+        self.assertEqual(gh._pgrep_full_pattern(["-f", "-O", "60", "a"]), "a")   # -O / --older は値をとる（procps-ng 4）
+        self.assertEqual(gh._pgrep_full_pattern(["-fO", "60", "a"]), "a")
+        self.assertEqual(gh._pgrep_full_pattern(["-f", "--older", "60", "a"]), "a")
+        self.assertEqual(gh._pgrep_full_pattern(["-f", "--older=60", "a"]), "a")
         self.assertEqual(gh._pgrep_full_pattern(["-f", "-n", "--", "-a"]), "-a")
         self.assertEqual(gh._pgrep_full_pattern(["--full", "--uid=me", "a"]), "a")
         self.assertIsNone(gh._pgrep_full_pattern(["-f"]))

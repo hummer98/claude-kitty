@@ -130,6 +130,13 @@ class Proc(unittest.TestCase):
         with self.assertRaises(ValueError):
             W.wait_proc("x(", 5, 1, me=300, sys_=s)
 
+    def test_dot_matches_newline_like_pgrep(self):
+        # 引数に改行があっても . が当たる（pgrep -f の regexec と、claude-guard の判定と同じ re.S）
+        s = FakeSys({250: (1, ["bash", "-c", "echo a\nluajit x"])})
+        s.steps = [lambda fs: fs.table.pop(250)]
+        code, _msg = W.wait_proc("a.luajit", 10, 1, me=300, sys_=s)
+        self.assertEqual((code, s.sleeps), (W.EXIT_DONE, [1]))   # 一度は一致して待った
+
     def test_unreadable_processes_are_skipped(self):
         s = FakeSys({250: (1, None), 251: (1, [])})
         self.assertEqual(W.matching(re.compile(""), 300, s), [])
