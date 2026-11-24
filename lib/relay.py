@@ -1318,7 +1318,7 @@ def send(env, target, body, reply_to=None, ping=False, now=None, run=subprocess.
     if rc == 0 and m:
         res = m.group(1)
         entry.update(result=res, role=m.group(2))
-        msg_ = {"delivered": f"配達済み: {where}（相手のペインに知らせた）",
+        msg_ = {"delivered": f"配達済み: {where}（受信箱に置き、ペインに印を付けた。起こせたかは claude-relay log）",
                 "queued": f"受信箱に置いた: {where}（相手の受け取りのペインがいない）",
                 "ping": f"届く: {where} は受け取れる"}[res]
         code = 0
