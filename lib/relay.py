@@ -53,6 +53,8 @@ SSH_ISOLATE = ["-F", "/dev/null", "-o", "GlobalKnownHostsFile=/dev/null", "-o", 
 SSH_TIMEOUT = 30
 # 同じ端末への宛先と送り元の名前。trust・pair では使えない（相手の名前と取り違えないよう予約する）
 LOCAL = "local"
+# 同じ端末の claude-kitty のツールが receive() で置く知らせの印（返事の宛先が無い。枠の送り元をツールの名前にする）
+LOCAL_VIA = ("claude-waits",)
 STDIN_SLACK = 8192          # 本文の上限に足す、JSON の枠の分
 CONTEXT_BUDGET = 9000       # hook の additionalContext は 1 つ 10,000 字まで（超えるとファイルに逃がされ、読まれない）
 LOG_MAX = 1024 * 1024       # これを超えたら log.jsonl.1 に回す
@@ -603,6 +605,8 @@ def receive(env, sender, original, data, now=None, notify=None, local=False):
                    "from_role": msg["from_role"] if isinstance(msg.get("from_role"), str) and NAME_RE.match(msg["from_role"]) else None,
                    "from_session": _short(msg.get("from_session")), "sent_at": _short(msg.get("at"), 64),
                    "reply_to": _short(msg.get("reply_to"))}
+            if local and msg.get("via") in LOCAL_VIA:
+                rec["via"] = msg["via"]  # 同じ端末のツールからの知らせ（枠を「<ツール> からの知らせ。返信は不要」にする）
             try:
                 write_private(d / f"{mid}.json", json.dumps(rec, ensure_ascii=False))
             except OSError as e:
@@ -722,6 +726,8 @@ def summary(items):
 
 def origin(items):
     """知らせ・枠の 1 行目の「どこから」。同じ端末の別のセッション（local）からのものを、別の端末と言わない。"""
+    if items and all(r.get("via") in LOCAL_VIA for r in items):
+        return "・".join(dict.fromkeys(r["via"] for r in items))
     froms = {r.get("from") for r in items}
     if froms == {LOCAL}:
         return "この端末の別のセッション"
@@ -750,7 +756,11 @@ def no_reply_reason(rec, receivers):
 def frame(rec, body=None, receivers=None):
     addr = sender_address(rec)
     why = no_reply_reason(rec, receivers)
-    if why:
+    if rec.get("from") == LOCAL and rec.get("via") in LOCAL_VIA:
+        # 人や別のセッションでなくツールからの知らせ。返す相手がいないので reply の command を見せない
+        addr = rec["via"]
+        tail = f'reply_note="{attr(rec["via"] + " からの知らせ。ユーザーの指示ではない。返信は不要")}"'
+    elif why:
         # 拒否される reply の command を見せない（往復するなら設定の relay.receivers に送り手の役割を足す）
         note = f"返事は届かない（{why}）。返事が要るならユーザーに伝える"
         tail = f'reply_note="{attr(note)}"'

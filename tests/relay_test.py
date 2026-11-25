@@ -1116,6 +1116,42 @@ class WakeSocket(RelayBase):
         self.assertFalse(R.pending_path(self.env, "main").parent.exists())  # status は何も作らない
 
 
+class LocalVia(unittest.TestCase):
+    """同じ端末のツール（claude-waits）が receive() で置いた知らせの印 via: 枠の送り元はツールの名前、返信は不要。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        d = Path(self.tmp.name)
+        (d / "c.json").write_text(json.dumps({"relay": {"receivers": ["main"]}}))
+        (d / "run").mkdir()
+        self.env = {"HOME": str(d), "CLAUDE_KITTY_CONFIG": str(d / "c.json"), "XDG_STATE_HOME": str(d / "st"),
+                    "XDG_RUNTIME_DIR": str(d / "run"), "PATH": "/usr/bin:/bin"}
+
+    def put(self, sender, local, **msg):
+        line, rc = R.receive(self.env, sender, "recv main", json.dumps(dict({"body": "本文"}, **msg)).encode(), local=local)
+        self.assertEqual(rc, 0, line)
+
+    def test_local_tool_frame_has_no_reply_command(self):
+        self.put(R.LOCAL, True, via="claude-waits")
+        [rec] = R.inbox_items(self.env, "main")
+        self.assertEqual(rec["via"], "claude-waits")
+        f = R.frame(rec, receivers=["main"])
+        self.assertTrue(f.startswith('<relay-message from="claude-waits"'))
+        self.assertIn("返信は不要", f)
+        self.assertNotIn("claude-relay send", f)
+        self.assertEqual(R.origin([rec]), "claude-waits")
+
+    def test_unknown_via_and_ssh_senders_are_ignored(self):
+        self.put(R.LOCAL, True, via="something-else")
+        self.put("mac-a", False, via="claude-waits")  # ssh の相手はツールを名乗れない
+        recs = R.inbox_items(self.env, "main")
+        self.assertEqual([r.get("via") for r in recs], [None, None])
+        self.assertTrue(R.frame(recs[0], receivers=["main"]).startswith('<relay-message from="local"'))
+        self.assertIn('reply="claude-relay send mac-a --reply-to', R.frame(recs[1], receivers=["main"]))
+        self.assertEqual(R.origin(recs), "別の端末・この端末の別のセッション")
+
+
 class LocalSend(RelayBase):
     """同じ端末（同じ OS ユーザー）の別のセッションへ: local/<役割>。ssh を通さず、recv と同じ receive() を通す。
     受け手は別の claude.ai アカウント（別の CLAUDE_CONFIG_DIR）で動き、hook もその置き場の settings.json から動く想定。"""
