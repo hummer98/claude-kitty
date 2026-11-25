@@ -1142,6 +1142,26 @@ class LocalVia(unittest.TestCase):
         self.assertNotIn("claude-relay send", f)
         self.assertEqual(R.origin([rec]), "claude-waits")
 
+    def test_notice_for_tool_only_deliveries(self):
+        self.put(R.LOCAL, True, via="claude-waits")
+        text, _n = R.compose(R.inbox_items(self.env, "main"))
+        self.assertIn(R.NOTICE_TOOL, text)
+        self.assertNotIn(R.NOTICE, text)
+        self.put(R.LOCAL, True)  # 普通の local 送りが混ざれば今までの注意（枠ごとの注記で区別する）
+        text, _n = R.compose(R.inbox_items(self.env, "main"))
+        self.assertIn(R.NOTICE, text)
+        self.assertNotIn(R.NOTICE_TOOL, text)
+
+    def test_tool_counted_apart_and_name_reserved(self):
+        self.put(R.LOCAL, True, via="claude-waits")
+        [rec] = R.inbox_items(self.env, "main")
+        self.assertTrue(rec["id"].endswith("-local.claude-waits"))
+        self.assertEqual(R.recent_count(self.env, R.LOCAL, 0), 0)
+        self.assertEqual(R.recent_count(self.env, "local.claude-waits", 0), 1)
+        self.assertIn("予約", R.reserved_name("local.claude-waits", {}))
+        line, rc = R.receive(self.env, "local.claude-waits", "recv main", json.dumps({"body": "x"}).encode())
+        self.assertEqual(rc, 1, line)
+
     def test_unknown_via_and_ssh_senders_are_ignored(self):
         self.put(R.LOCAL, True, via="something-else")
         self.put("mac-a", False, via="claude-waits")  # ssh の相手はツールを名乗れない
@@ -1345,12 +1365,15 @@ class LocalSend(RelayBase):
 
     def test_local_is_not_a_peer_name(self):
         self.w.set_relay("b", name="b")
-        for name in ("local", "b"):
+        for name in ("local", "b", "local.claude-waits"):
             r = self.w.cli("b", "trust", name, "x.lan", "u", fake_pub(7), "--yes", "--no-keyscan")
             self.assertEqual(r.returncode, 2, name)
             self.assertIn(f"端末名に {name} は使えない", r.stderr)
         self.assertEqual(self.w.config("b")["relay"].get("peers"), None)
         r = self.w.cli("b", "pair", "--name", "local")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("予約", r.stderr)
+        r = self.w.cli("b", "pair", "--name", "local.x")  # 同じ端末のツールの知らせを数える名前
         self.assertEqual(r.returncode, 2)
         self.assertIn("予約", r.stderr)
         self.assertFalse(R.key_path(self.env).exists())

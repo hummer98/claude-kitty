@@ -88,9 +88,9 @@ def cmd_pair(a, env):
     if not relay.NAME_RE.match(name):
         print(f"claude-relay: 端末名に使えない: {name!r}（--name で英数字と . _ - の名前を）", file=sys.stderr)
         return 2
-    if name == relay.LOCAL:
-        # 相手の端末では local が「その端末自身」になり、この端末へ送れない
-        print(f"claude-relay: 端末名に {relay.LOCAL} は使えない（同じ端末への宛先として予約している。--name で別の名前を）",
+    if name == relay.LOCAL or name.startswith(relay.LOCAL + "."):
+        # 相手の端末では local が「その端末自身」になり、この端末へ送れない。local. はツールの知らせを数える名前
+        print(f"claude-relay: 端末名に {name} は使えない（{relay.reserved_name(name, {})}。--name で別の名前を）",
               file=sys.stderr)
         return 2
     try:
