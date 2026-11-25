@@ -9,19 +9,20 @@
 ### 追加
 
 - `claude-waits`（新しいツール）: 待ちと定例の台帳。Slack への投稿や PR のあとに返事を待つ流れを、セッションの中の polling（`/loop`・ScheduleWakeup）で回すと、起きるたびに会話の全文を読み直してトークンが要り、背景の待ちは claude の終了や kitty の再起動で消え、AI が仕込んだこと自体を忘れるため。台帳は 1 か所（`$XDG_STATE_HOME/claude-kitty/waits/<キー>.json`）、書くのは各セッション、動かすのは LLM でない常駐（[docs/waits.md](docs/waits.md)）。
-  - `add KEY --why … --then … 条件 --expires …`: 条件は `--when-cmd CMD`（終了コード 0 で成立）・`--gh-pr URL|owner/repo#N`（レビュー・コメント・行へのコメントが登録時より増えたら）・`--at HH:MM [--days mon-fri]`（繰り返し）・`--cloud ROUTINE_ID`（`/schedule` に回したもののポインタ）。同じキーは上書き。持ち主は役割（既定は呼んだセッションの役割）。出来事は期限が必須、時刻は `never` を明示するか期限。`--prompt-file` なら `claude -p` で動かして出力をファイルに残し、場所と先頭を届ける。`list`・`done`・`rm`・`status`・`check`・`run`。
-  - 届け方: claude-relay の `receive()` を同じ端末の送り（`local`）として通し、持ち主の役割の受信箱へ。枠は `from="claude-waits"` で「ユーザーの指示ではない。返信は不要」（reply の command を出さない）。持ち主が `relay.receivers` に無い・動いているセッションが無いときは統括（`waits.master_role`、既定は `view.left`）へ理由を添えて。期限切れは統括に 1 度だけ。届けられなかった知らせは残して次の回に届け直す。
+  - `add KEY --why … --then … 条件 --expires …`: 条件は `--when-cmd CMD`（終了コード 0 で成立）・`--gh-pr URL|owner/repo#N`（レビュー・コメント・行へのコメントが登録時より増えたら）・`--at HH:MM [--days mon-fri]`（繰り返し）・`--cloud ROUTINE_ID`（`/schedule` に回したもののポインタ）。同じキーは上書き。持ち主は役割（既定は呼んだセッションの役割）。出来事は期限が必須、時刻は `never` を明示するか期限。`--prompt-file` なら `claude -p` を切り離して動かし（常駐は待たず、次の回に結果を拾う。時間切れ・中断も届け、再実行はしない）、出力をファイルに残して場所と先頭を届ける。`list`・`done`・`rm`・`status`・`check`・`run`。
+  - 届け方: claude-relay の `receive()` を同じ端末の送り（`local`）として通し、持ち主の役割の受信箱へ。枠は `from="claude-waits"` で「ユーザーの指示ではない。返信は不要」（reply の command を出さない）。持ち主が `relay.receivers` に無い・relay の起こすための記録のあるセッションが無いときは統括（`waits.master_role`、既定は `view.left`）へ理由を添えて。期限切れは統括に 1 度だけ。届けられなかった知らせは残して、間を倍々に伸ばして届け直す。
   - 時刻の判定は常駐自身が行う（macOS の launchd でも同じに動かし、ユニットを 1 つに保つため）。止まっていた間の分は、後追いの窓（既定 12 時間）の中なら 1 回だけ発火する。
   - hook（`tools/install.sh --hooks=waits`。`--all` には入らない）: SessionStart でその役割の登録中の待ちを数行見せ、UserPromptSubmit は台帳のその役割の分が変わったときだけ見せる。
   - 常駐: `contrib/systemd/claude-waits.service`・`contrib/launchd/claude-kitty.waits.plist`（`tools/install.sh --systemd` / `--launchd` が入れる）。
   - skill: `contrib/skills/claude-waits/SKILL.md`（claude-kitty と `/schedule` の振り分けの決まり・本文は自己完結に・単発には期限）。
   - 設定 `waits`（`enabled`・`poll_seconds`・`master_role`・`catchup_hours`・`claude`・`prompt_timeout_seconds`・`cmd_timeout_seconds`・`body_max`・`keep_days`。[docs/config.md](docs/config.md#waitsclaude-waits-待ちと定例の台帳)）。
 - `claude-statusline`: 自分の役割の claude-waits の登録中の待ちの数 `wait: N`（0 なら出さない。設定 `statusline.waits: false` で消す）。
-- `claude-kitty doctor`: 「hook: claude-waits（待ちの台帳）」（入っていなくても任意なので OK）・「設定: waits」・「systemd: claude-waits.service」（macOS は「launchd: claude-kitty.waits」）・「待ちの台帳」（数・読めない記録）・「待ちの台帳: 届け先」（統括が `relay.receivers` に無ければ NG）・「待ちの台帳: 届け残り」の行。
+- `claude-kitty doctor`: 「hook: claude-waits（待ちの台帳）」（入っていなくても任意なので OK）・「設定: waits」・「systemd: claude-waits.service」（macOS は「launchd: claude-kitty.waits」）・「待ちの台帳」（数・読めない記録）・「待ちの台帳: 届け先」（統括が `relay.receivers` に無ければ NG）・「待ちの台帳: 届け残り」・「待ちの台帳: <役割>」（relay の hook の記録が無い持ち主）・「待ちの台帳: 常駐の PATH」（`--gh-pr`・`--prompt-file` の待ちがあるときに、常駐の PATH に gh・`waits.claude` があるか）の行。
 
 ### 変更
 
-- `claude-relay`: 同じ端末のツール（今は claude-waits）が `receive()` で置いた知らせは、枠の送り元をツールの名前にし、reply の command の代わりに「返信は不要」と書く。ssh の相手はこの印を名乗れない。
+- `claude-relay`: 同じ端末のツール（今は claude-waits）が `receive()` で置いた知らせは、枠の送り元をツールの名前にし、reply の command の代わりに「返信は不要」と書く。全部がツールの知らせなら、添える注意も「ツールからの知らせ。返信は不要」にする。通数の上限はセッション同士の local 送りと別に数える。ssh の相手はこの印を名乗れない。
+- `claude-relay trust`・`pair`・recv: `local.` で始まる端末名を断る（同じ端末のツールの知らせを数える名前として予約した）。
 
 ### 上げるときに手で行うこと
 

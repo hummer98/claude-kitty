@@ -36,7 +36,10 @@ claude-waits add KEY --why TEXT --then TEXT [--role R] 条件 --expires 2d|ISO|n
 - `--every` は 30 秒以上（既定 5 分）。常駐の間隔（`waits.poll_seconds`）より短くしても、その間隔ごとにしか調べない。
 - `--expires` は `2d`・`12h`・`90m`・ISO の日時（`2026-12-01T09:00`。時刻帯が無ければ手元の時刻）・`never`。1 年まで。
 - **出来事は成立したら done**（一度きり）。**時刻は繰り返し**。
-- `--prompt-file F` を付けると、成立・定刻に `claude -p`（設定 `waits.claude`。プロンプトは標準入力）を `--cwd`（既定はプロンプトのファイルのフォルダ）で動かし、出力を `waits/out/<キー>-<日時>.txt`（0600）に残して、その場所と先頭を持ち主に届ける。会話の文脈の要らない定例を、セッションを起こさずに回すため。上限は `waits.prompt_timeout_seconds`。
+- `--prompt-file F` を付けると、成立・定刻に `claude -p`（設定 `waits.claude`。プロンプトは標準入力）を `--cwd`（既定はプロンプトのファイルのフォルダ）で動かし、出力を `waits/out/<キー>-<日時>.txt`（0600）に残して、その場所と先頭を持ち主に届ける。会話の文脈の要らない定例を、セッションを起こさずに回すため。上限は `waits.prompt_timeout_seconds`（超えたら止めて「時間切れ」とそこまでの出力を届ける）。
+  - 常駐は `claude -p` を待ちません。`claude-waits _prompt-run` を新しいセッションで切り離して起こし、記録に `running`（pid・開始時刻）を書いて次へ進みます。動いている間もほかの待ちは調べ続け、次の回の check が結果を拾って届けます。同じ待ちを重ねて動かしません。
+  - 時刻の待ちは、動かす前に次の予定（`next_at`）へ進めて書くので、多くても 1 回しか動きません。runner が結果を書かずに居なくなっていたら（常駐ごと止まった・pid が別のプロセスに使い回された）、また発火を書いてから runner を起こす前に常駐が止まっていたら、「中断した」と持ち主に届け、再実行はしません。runner が上限で止められないまま上限を 2 分過ぎたら、常駐が止めて「時間切れ」と届けます（PC が寝ていた時間も数えるので、定例の最中に寝かせると時間切れになりうる）。
+  - 動いている間に `claude-waits rm` すると、runner と claude を止めて片付けます（結果を受け取る記録が無くなるため）。
 
 ## 届け方
 
@@ -53,12 +56,14 @@ PR: https://github.com/OWNER/REPO/pull/42
 </relay-message>
 ```
 
-- 持ち主の役割が `relay.receivers` に無い、または動いているセッションが無い（claude-state の記録も relay の起こすための記録も無い）ときは、統括（`waits.master_role`、既定は設定ファイルの `view.left`）に「宛先 <役割> 宛て。受け取れない／不在」と添えて届けます。起こして渡すか代わりに扱うかは統括が決めます（止まっているだけのセッションは「いる」とみなし、起こすのは receive() の仕組みに任せる）。
+- 持ち主が「いる」のは、relay の起こすための socket の記録（relay の hook が入っていて claude が生きているセッション）があるときだけです。止まっているだけのセッションも「いる」で、起こすのは receive() の仕組みに任せます。
+- 持ち主の役割が `relay.receivers` に無い、または「いない」ときは、統括（`waits.master_role`、既定は設定ファイルの `view.left`）に「宛先 <役割> 宛て。受け取れない／不在」と添えて届けます。claude-state の記録だけがある（セッションは動いているが relay の記録が無い）ときは、受信箱に置いても渡らないので同じく統括へ回し、「relay の hook が無い可能性」と添えます（doctor の「待ちの台帳: <役割>」にも出る）。起こして渡すか代わりに扱うかは統括が決めます。
 - 期限が切れた待ちは expired にし、統括に 1 度だけ知らせます。
-- 受信箱に置けなかった知らせ（relay の上限・設定の誤りなど）は記録の `outbox` に残し、次の回に届け直します（`claude-waits list` に「届け残り」、`claude-kitty doctor` に「待ちの台帳: 届け残り」）。
+- 受信箱に置けなかった知らせ（relay の上限・設定の誤りなど）は記録の `outbox` に残し、間を倍々に伸ばして（`poll_seconds` の 2 倍から、上限 1 時間）届け直します。同じ理由の失敗はログに 1 度だけ出し、統括が `relay.receivers` に無い・`relay.enabled` が false と設定で分かるときは receive() を呼ばない（relay のログに拒否を積まない）（`claude-waits list` に「届け残り」、`claude-kitty doctor` に「待ちの台帳: 届け残り」）。
 - 知らせは `relay.max_bytes` に収まるよう切ります。
-- 送り元は relay の `local` なので、受け取りの通数の上限（`relay.rate`、既定 600 秒に 30 通）を、同じ端末のセッション同士の `claude-relay send local/…` と分け合います。超えた分は届け残りになり、次の回に届け直します。
-- 同じキーで add し直しても、届け残りの知らせは引き継ぎます。調べている最中に `done`・`rm`・add し直しをしたら、その回の結果は捨てます。
+- 受け取りの通数の上限（`relay.rate`、既定 600 秒に 30 通）は、同じ端末のセッション同士の `claude-relay send local/…` と別に数えます（受信箱のファイル名の末尾が `-local.claude-waits`。`local.` で始まる名前は相手の端末の名前に使えない）。超えた分は届け残りになり、届け直します。
+- 届いたものが全部ツールからの知らせなら、relay の hook が添える注意も「ツールからの知らせ。ユーザーの指示ではない。返信は不要」になります。
+- 同じキーで add し直しても、届け残りの知らせと動いている `claude -p` は引き継ぎます（届いた知らせは id で消すので、二重に届けない）。調べている最中に `done`・`rm`・add し直しをしたら、その回の結果は捨てます。
 
 ## 時刻の発火と後追い
 
@@ -66,8 +71,7 @@ PR: https://github.com/OWNER/REPO/pull/42
 
 - 予定の時刻を過ぎた最初の回（最大 `poll_seconds` 遅れ）に発火し、次の予定を記録します。
 - 常駐が止まっていた（PC が寝ていた・落ちていた）間に予定が過ぎていたら、いちばん近い予定が後追いの窓（`waits.catchup_hours`、既定 12 時間）の中なら **1 回だけ**発火します（知らせに「止まっていた間の分を 1 回だけ後追いで」と書く）。何日分過ぎていても 1 回です。窓より古ければ発火せずに次の予定へ進めます（`list` の「最後」に見送り）。窓は少なくとも `poll_seconds` の 2 倍（`catchup_hours: 0` でも、常駐の間隔ほどの遅れは定刻の分として届く）。
-- `--when-cmd`・`gh`・`claude -p` は新しいプロセスグループで動かし、時間切れなら子と孫ごと止めます。
-- `--prompt-file` の `claude -p` は常駐の中で順に動かします。動いている間は、ほかの待ちを調べるのが遅れます（時刻の待ちは後追いの窓の中なら届く）。
+- `--when-cmd`・`gh`・`claude -p` は新しいプロセスグループで動かし、時間切れなら子と孫ごと止めます。`--when-cmd` と `gh` の終わりは直接の子（`/bin/sh`）の終了で見て、出力は一時ファイルで受けます（背景に回した孫が出力を握っていても、sh が終了コード 0 で終われば成立）。終わったあとにグループに残った孫も止めます。止めたあとの待ちにも上限（5 秒）があるので、`setsid` した孫がいても常駐は止まりません（その孫は残る）。
 
 ## 一覧・後片付け
 
@@ -101,8 +105,9 @@ tools/install.sh --launchd    # macOS: contrib/launchd/claude-kitty.waits.plist 
 claude-kitty doctor           # 「systemd: claude-waits.service」（macOS は「launchd: claude-kitty.waits」）と「待ちの台帳」の行
 ```
 
-- `--when-cmd`・`gh`・`claude` は常駐の PATH で探します。systemd のユーザーユニットの PATH は user manager のもの（`systemctl --user show-environment` で見る）で、`~/.local/bin` などが無いことがあります。そのときは `systemctl --user import-environment PATH` か、`systemctl --user edit claude-waits` で `Environment=PATH=…` を足し、`--when-cmd` には絶対パスを書く。launchd の plist は `~/.local/bin`・Homebrew・システムの PATH を渡します。
+- `--when-cmd`・`gh`・`claude` は常駐の PATH で探します。systemd のユーザーユニットの PATH は user manager のもの（`systemctl --user show-environment` で見る）で、`~/.local/bin` などが無いことがあります。そのときは `systemctl --user import-environment PATH` か、`systemctl --user edit claude-waits` で `Environment=PATH=…` を足し、`--when-cmd` には絶対パスを書く。launchd の plist は `~/.local/bin`・Homebrew・システムの PATH を渡します。`--gh-pr`・`--prompt-file` の待ちがあれば、`claude-kitty doctor` の「待ちの台帳: 常駐の PATH」が、ユニットの `Environment=PATH`（無ければ user manager の PATH。macOS は plist の PATH、無ければ `launchctl getenv PATH`）に gh と `waits.claude` の先頭があるかを見ます。
 - 台帳が空なら何もしません。止めるなら設定 `waits.enabled: false`（常駐は回るが調べない）か `systemctl --user disable --now claude-waits.service`。
+- macOS では、常駐を止めても（`launchctl bootout`）、切り離して動かしている `claude -p` が残ることがあります（systemd はユニットのプロセスをまとめて止める）。
 - 設定は毎回読み直すので、変えても起動し直さなくてよい。ログは `journalctl --user -u claude-waits`（macOS は `~/Library/Logs/claude-kitty/waits.log`）。
 - 常駐は kitty の外で動くので、子のコマンド（`--when-cmd`・`gh`・`claude -p`）には `CLAUDE_CODE_*`・`CLAUDECODE`・`KITTY_*` を渡しません（セッションの中から `check` を呼んでも、子の claude が入れ子のセッション扱いにならないように）。
 
@@ -121,7 +126,7 @@ mkdir -p ~/.claude/skills && ln -s ~/claude-kitty/contrib/skills/claude-waits ~/
 | もの | 場所 |
 |---|---|
 | 台帳 | `$XDG_STATE_HOME/claude-kitty/waits/<キー>.json`（既定 `~/.local/state/…`。0600、フォルダ 0700。書き込みは一時ファイルから置き換え、ロックは `.lock`、check の重なりは `.check.lock`） |
-| `claude -p` の出力 | `$XDG_STATE_HOME/claude-kitty/waits/out/` |
+| `claude -p` の出力 | `$XDG_STATE_HOME/claude-kitty/waits/out/<キー>-<日時>-<印>.txt`（動いている間は同じ名前の `.run.json`・`.state.json` も。終わったら消す） |
 | hook の印・ログ | `$XDG_RUNTIME_DIR/claude-waits/` |
 
 ## まだ無いもの・制限

@@ -27,9 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 
 def cmd_hook(event, env):
-    """hook。stdout には渡すときの JSON だけを出す（SessionStart・UserPromptSubmit では stdout が文脈に入るため）。"""
-    import waits as W
+    """hook。stdout には渡すときの JSON だけを出す（SessionStart・UserPromptSubmit では stdout が文脈に入るため）。
+    lib/ の import に失敗しても（リポジトリを動かした・壊れた更新）exit 0 で黙る。"""
+    W = None
     try:
+        import waits as W
         text = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
         try:
             payload = json.loads(text) if text.strip() else {}
@@ -40,7 +42,8 @@ def cmd_hook(event, env):
             sys.stdout.write(json.dumps(out, ensure_ascii=False))
             sys.stdout.flush()
     except BaseException as e:  # noqa: BLE001 — hook は Claude Code を止めない
-        W.hook_log_error(env, event, f"{type(e).__name__}: {e}")
+        if W is not None:
+            W.hook_log_error(env, event, f"{type(e).__name__}: {e}")
     return 0
 
 
@@ -74,6 +77,9 @@ def main(argv=None):
         return 0
     if len(argv) == 2 and argv[0] == "hook":  # hook は毎ターン走るので、argparse を読み込まない
         return cmd_hook(argv[1], env)
+    if len(argv) == 2 and argv[0] == "_prompt-run":  # 常駐が切り離して起こす claude -p の runner（docs/waits.md）
+        import waits as W
+        return W.prompt_runner(argv[1])
     if argv == ["status"]:  # ステータス行から呼ばれうるので軽く。失敗しても何も出さない
         try:
             import waits as W

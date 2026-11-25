@@ -762,7 +762,8 @@ def check_disk(ctx, rep):
 # ---- 待ちの台帳（claude-waits） ------------------------------------------------------------------
 
 def check_waits(ctx, rep):
-    """台帳の数と、知らせの届け先（統括が relay.receivers にいるか）・届け残り・読めない記録（読むだけ）。"""
+    """台帳の数と、知らせの届け先（統括が relay.receivers にいるか）・届け残り・読めない記録。台帳は読むだけ
+    （持ち主がいるかを見るときに、relay の起こすための記録のうち、もう届かないもの（claude が終わった）は relay と同じく消す）。"""
     from config import load_relay_config, load_waits_config
     import waits as W
     try:
@@ -789,11 +790,85 @@ def check_waits(ctx, rep):
         why = "relay.enabled が false" if not rconf["enabled"] else f"統括 {master} が relay.receivers に無い"
         rep.ng("待ちの台帳: 届け先", f"{why}（期限切れ・不在の知らせを受信箱に置けない）",
                f"設定の relay.receivers に {master} を足す（waits.master_role で統括を変えられる）")
+    # 持ち主の役割が受け取りの役割でも、relay の起こすための記録が無ければ受信箱が渡らない（hook が無い疑い）
+    for role in roles:
+        if role in rconf["receivers"] and W.role_alive(ctx.env, role) == "state":
+            rep.warn(f"待ちの台帳: {role}", "セッションは動いているが relay の起こすための記録が無い（relay の hook が無い疑い。"
+                     "知らせは統括へ回る）", "その役割の置き場に tools/install.sh --hooks=relay")
+    check_waits_path(ctx, rep, conf, act)
     stuck = [r for r in recs if r.get("outbox")]
     if stuck:
         r = stuck[0]
         rep.warn("待ちの台帳: 届け残り", f"{len(stuck)} 件（{r['key']}: {W.one_line(r.get('last_error') or '?', 120)}）",
                  "claude-waits check で届け直す。受け取りの役割は relay.receivers と relay の hook（tools/install.sh --hooks=relay）")
+
+
+def daemon_path(ctx):
+    """常駐 claude-waits run が動く PATH（読めなければ None）。Linux は systemd の user manager の環境、macOS は
+    入っている plist の EnvironmentVariables（無ければ launchctl getenv PATH）。"""
+    if ctx.os_name == "Darwin":
+        import plistlib
+        agent_dir = Path(ctx.env.get("CLAUDE_KITTY_LAUNCH_AGENTS") or ctx.home / "Library" / "LaunchAgents")
+        try:
+            with open(agent_dir / "claude-kitty.waits.plist", "rb") as f:
+                v = (plistlib.load(f).get("EnvironmentVariables") or {}).get("PATH")
+            if isinstance(v, str) and v:
+                return v
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            pass
+        lc = ctx.which("launchctl")
+        if not lc:
+            return None
+        rc, out = ctx.run([lc, "getenv", "PATH"])
+        return (out or "").strip() or None if rc == 0 else None
+    sc = ctx.which("systemctl")
+    if not sc:
+        return None
+    # ユニットに書いた Environment=PATH=…（systemctl --user edit で足したもの）が user manager の環境より先に効く
+    rc, out = ctx.run([sc, "--user", "show", "claude-waits.service", "-p", "Environment", "--value"])
+    if rc == 0:
+        import shlex
+        try:
+            words = shlex.split(out or "")
+        except ValueError:
+            words = []
+        for w in words:
+            if w.startswith("PATH="):
+                return w[5:]
+    rc, out = ctx.run([sc, "--user", "show-environment"])
+    if rc != 0:
+        return None
+    for line in (out or "").splitlines():
+        if line.startswith("PATH="):
+            return line[5:]
+    return None
+
+
+def check_waits_path(ctx, rep, conf, act):
+    """使う待ちがあるときだけ: 常駐の PATH に gh（--gh-pr）と waits.claude の先頭（--prompt-file）があるか。"""
+    import shutil
+    need = []
+    if any(r["kind"] == "gh_pr" for r in act):
+        need.append("gh")
+    if any((r.get("action") or {}).get("kind") == "prompt" for r in act):
+        need.append(conf["claude"][0])
+    if not need:
+        return
+    path = daemon_path(ctx)
+    name = "待ちの台帳: 常駐の PATH"
+    if path is None:
+        rep.skip(name, "常駐の PATH を読めない（systemd / launchd が無い・入っていない）")
+        return
+    missing = [n for n in need if not ((os.path.isabs(n) and os.access(n, os.X_OK)) or (not os.path.isabs(n) and shutil.which(n, path=path)))]
+    if not missing:
+        rep.ok(name, f"{', '.join(need)} が見つかる")
+        return
+    if ctx.os_name == "Darwin":
+        fix = "plist の PATH は tools/install.sh --launchd が作る（~/.local/bin・Homebrew・システム）。ほかの場所なら waits.claude に絶対パスを書く"
+    else:
+        fix = ("systemctl --user import-environment PATH && systemctl --user restart claude-waits"
+               "（または systemctl --user edit claude-waits で Environment=PATH=…。waits.claude に絶対パスでもよい）")
+    rep.warn(name, f"常駐の PATH に {', '.join(missing)} が無い（使う待ちが失敗する）: {path}", fix)
 
 
 def check_bg_shells(ctx, rep):

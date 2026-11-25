@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,10 +46,13 @@ print(n // 2); print(n - n // 2)
 '''
 
 FAKE_CLAUDE = r'''#!{py}
-# 偽の claude -p: 標準入力のプロンプトを受け、cwd と頭を返す
-import os, sys
+# 偽の claude -p: 標準入力のプロンプトを受け、cwd と頭を返す。プロンプトに「sleep N」があれば N 秒待つ
+import os, re, sys, time
 p = sys.stdin.read()
-print("cwd=" + os.getcwd())
+print("cwd=" + os.getcwd(), flush=True)
+m = re.search(r"sleep ([0-9.]+)", p)
+if m:
+    time.sleep(float(m.group(1)))
 print("prompt=" + p.strip())
 '''
 
@@ -142,6 +145,24 @@ class Ledger(Base):
         self.assertTrue(self.check(time.time()))  # 壊れた記録で止まらない
         self.assertEqual(len(self.inbox("dev-a")), 1)
 
+    def test_wrong_types_are_bad_and_logged_once(self):
+        self.add()
+        d = W.ledger_dir(self.env)
+        good = json.loads((d / "k1.json").read_text())
+        for name, change in (("r1", {"rev": 5}), ("r2", {"action": "deliver"}), ("r3", {"expires": "soon"}),
+                             ("r4", {"cond": {"cmd": 1}}), ("r5", {"status": "maybe"}), ("r6", {"outbox": {}}),
+                             ("r7", {"fired": "1"}), ("r8", {"running": {"started": 1, "timeout": "30"}}),
+                             ("r9", {"cond": {"cmd": "true", "cwd": 3}})):
+            (d / f"{name}.json").write_text(json.dumps(dict(good, key=name, **change)))
+        recs, bad = W.all_records(self.env)
+        self.assertEqual([r["key"] for r in recs], ["k1"])
+        self.assertEqual(bad, [f"r{i}.json" for i in range(1, 10)])
+        W._REPORTED_BAD.clear()
+        self.check(time.time())
+        self.check(time.time() + 600)
+        self.assertEqual(len([x for x in self.logs if "読めない記録" in x]), 9)
+        self.assertEqual([x for x in self.logs if "調べる途中で失敗" in x], [])
+
     def test_usage_errors(self):
         with self.assertRaises(W.Usage):
             self.add(expires="never")                     # 出来事に never は無い
@@ -181,6 +202,52 @@ class Ledger(Base):
             W.parse_pr("o/r/12")
         self.assertEqual(W.parse_duration("2d"), 172800)
         self.assertEqual(W.parse_expires("never", 0), None)
+        # Python 3.9・3.10 の fromisoformat は末尾の Z を読めない
+        z = datetime(2030, 1, 1, tzinfo=timezone.utc).timestamp()
+        self.assertEqual(W.parse_expires("2030-01-01T00:00:00Z", z - 86400), z)
+
+    def test_role_alive(self):
+        import proc
+        sd = self.d / "run" / "claude-state"
+        sd.mkdir()
+        self.assertIsNone(W.role_alive(self.env, "dev-a"))
+        (sd / "s1.json").write_text(json.dumps({"role": "dev-a", "session_id": "s1"}))  # pid の分からない記録は動いている扱い
+        self.assertEqual(W.role_alive(self.env, "dev-a"), "state")
+        wd = R.wake_dir(self.env, "dev-a")
+        wd.mkdir(parents=True)
+        (wd / "s1.json").write_text(json.dumps({"role": "dev-a", "session_id": "s1", "socket": "/nonexistent/sock",
+                                                "claude_pid": os.getpid(), "claude_start": proc.start_time(os.getpid())}))
+        self.assertEqual(W.role_alive(self.env, "dev-a"), "socket")
+        self.assertIsNone(W.role_alive(self.env, "main"))
+
+    def test_state_only_owner_goes_to_master_with_hook_note(self):
+        self.add(when_cmd="true")
+        W.check(self.env, now=time.time(), alive=lambda env, role: "state")
+        body = self.inbox("main")[0]["body"]
+        self.assertIn("relay の hook が無い可能性", body)
+        self.assertEqual(self.inbox("dev-a"), [])
+
+    def test_next_occurrence_across_dst(self):
+        # 夏時間の終わり（米国東部 2026-11-01）をまたいでも、手元の 9:00 になる
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("America/New_York")
+        except Exception:  # noqa: BLE001
+            self.skipTest("zoneinfo の America/New_York が無い")
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        try:
+            now = datetime(2026, 10, 31, 10, 0, tzinfo=tz).timestamp()
+            got = W.next_occurrence(now, 9, 0, list(range(7)))
+            self.assertEqual(got, datetime(2026, 11, 1, 9, 0, tzinfo=tz).timestamp())
+            self.assertEqual(got - datetime(2026, 10, 31, 9, 0, tzinfo=tz).timestamp(), 25 * 3600)
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
 
     def test_done_and_rm(self):
         self.add()
@@ -290,7 +357,7 @@ class Events(Base):
         self.assertEqual(len(rec["outbox"]), 1)
         self.assertIn("受け取らない", rec["last_error"])
         self.config()
-        self.check(now + 60)
+        self.check(now + 121)  # 届け直しは間を置いて（1 回目の失敗のあとは poll の 2 倍）
         self.assertEqual(W.get_record(self.env, "k1")["outbox"], [])
         self.assertEqual(len(self.inbox("main")), 1)
 
@@ -320,7 +387,7 @@ class Events(Base):
         self.add(when_cmd="false")  # 届く前に登録し直す
         self.assertEqual(len(W.get_record(self.env, "k1")["outbox"]), 1)
         self.config()
-        self.check(now + 60)
+        self.check(now + 121)
         self.assertEqual(len(self.inbox("main")), 1)
         self.assertEqual(W.get_record(self.env, "k1")["status"], "active")
 
@@ -353,6 +420,95 @@ class Events(Base):
         with W.ledger_lock(self.env, name=".check.lock"):
             self.assertFalse(self.check(time.time()))
         self.assertTrue(self.check(time.time()))
+
+    def test_background_child_does_not_turn_success_into_timeout(self):
+        # 回帰: パイプで受けると、背景の孫が stdout を握る間 communicate が返らず、成功が時間切れに見えた
+        self.config(waits={"cmd_timeout_seconds": 2})
+        self.add(when_cmd="sleep 30 & true")
+        t0 = time.monotonic()
+        self.check(time.time())
+        self.assertLess(time.monotonic() - t0, 1.5)
+        self.assertEqual(W.get_record(self.env, "k1")["status"], "done")
+
+    def test_setsid_grandchild_does_not_block_after_timeout(self):
+        self.config(waits={"cmd_timeout_seconds": 1})
+        self.add(when_cmd="setsid sleep 4 & sleep 30")
+        t0 = time.monotonic()
+        self.check(time.time())
+        self.assertLess(time.monotonic() - t0, 1 + W.KILL_WAIT)
+        self.assertIn("時間切れ", W.get_record(self.env, "k1")["last_result"])
+
+    def test_background_left_after_success_is_stopped(self):
+        mark = self.d / "late"
+        self.add(when_cmd=f"(sleep 1; touch {mark}) & true")
+        self.check(time.time())
+        time.sleep(1.5)
+        self.assertFalse(mark.exists())
+
+    def test_readd_during_flush_does_not_duplicate(self):
+        # 回帰: 届けたあとの outbox からの消し方が rev 付きで、届ける間に add し直すと、引き継いだ知らせを 2 度届けた
+        now = time.time()
+        self.add(when_cmd="true")
+        orig = W.deliver
+
+        def d(env, conf, owner, body, now=None, alive=None):
+            r = orig(env, conf, owner, body, now=now, alive=alive)
+            W.add(env, "k1", role="dev-a", why="x", then="y", when_cmd="false", expires="2d")
+            return r
+        W.deliver = d
+        try:
+            self.check(now)
+        finally:
+            W.deliver = orig
+        self.check(now + 600)
+        self.assertEqual(len(self.inbox("dev-a")), 1)
+
+    def test_retry_backs_off_and_does_not_log_rejections(self):
+        self.config(relay={"receivers": ["dev-a"]})
+        self.alive_roles = set()
+        now = time.time()
+        self.add(when_cmd="true")
+        self.check(now)
+        item = W.get_record(self.env, "k1")["outbox"][0]
+        self.assertEqual(item["tries"], 1)
+        self.assertEqual(item["next_try"], now + 120)
+        self.check(now + 60)  # 間の前: 試さない
+        self.assertEqual(W.get_record(self.env, "k1")["outbox"][0]["tries"], 1)
+        self.check(now + 121)
+        item = W.get_record(self.env, "k1")["outbox"][0]
+        self.assertEqual((item["tries"], item["next_try"]), (2, now + 121 + 240))
+        for _ in range(30):
+            W._commit(self.env, "k1", None, lambda r: r["outbox"][0].update(next_try=0, tries=30))
+            self.check(now + 200)
+        self.assertEqual(W.get_record(self.env, "k1")["outbox"][0]["next_try"], now + 200 + W.RETRY_MAX)
+        self.assertEqual(len([x for x in self.logs if "届かない" in x]), 1)  # 同じ理由はログに 1 度だけ
+        # 統括が受け取らないと設定で分かるので receive() を呼ばない（relay のログに拒否を積まない）
+        self.assertEqual([x for x in R.read_log(self.env) if x.get("result") == "rejected"], [])
+
+    def test_rate_is_counted_apart_from_local_sends(self):
+        self.config(relay={"receivers": ["left", "dev-a"], "rate": {"count": 2, "per_seconds": 600}})
+        for _ in range(2):  # セッション同士の local 送りで上限まで
+            R.receive(self.env, R.LOCAL, "recv main", json.dumps({"body": "x"}).encode(), local=True)
+        self.add(when_cmd="true")
+        self.check(time.time())
+        self.assertEqual(len(self.inbox("dev-a")), 1)
+        self.assertTrue(self.inbox("dev-a")[0]["id"].endswith("-local.claude-waits"))
+        self.assertIsNotNone(R.reserved_name("local.claude-waits", {}))  # ssh の相手はこの数え方を名乗れない
+
+    def test_body_is_clipped_under_max_bytes(self):
+        self.config(relay={"receivers": ["left", "dev-a"], "max_bytes": 300})
+        self.add(when_cmd="true", why="長い" * 400)
+        self.check(time.time())
+        [item] = self.inbox("dev-a")
+        self.assertLessEqual(len(item["body"].encode()), 300)
+        self.assertEqual(W.clip_bytes("あ" * 10, 5).encode().__len__() <= 5, True)
+
+    def test_expired_routine_says_finished(self):
+        self.add(at="09:00", expires="1h")
+        self.check(time.time() + 7200)
+        body = self.inbox("main")[0]["body"]
+        self.assertIn("が来たので終えた", body)
+        self.assertNotIn("成立しないまま", body)
 
     def test_prune_old_done(self):
         now = time.time()
@@ -463,32 +619,210 @@ class Times(Base):
         self.check(at_local(1, 9, 1))  # 次の予定は届く
         self.assertEqual(len(self.inbox("dev-a")), 1)
 
-    def test_prompt_file_runs_claude_and_saves_output(self):
-        fake = self.d / "fake-claude"
-        fake.write_text(FAKE_CLAUDE.format(py=sys.executable))
-        fake.chmod(0o755)
-        self.config(waits={"claude": [str(fake)]})
-        work = self.d / "work"
-        work.mkdir()
-        pf = work / "morning.md"
-        pf.write_text("朝のまとめを作る")
-        self.add(at="09:00", now=at_local(0, 8), prompt_file=str(pf))
-        self.check(at_local(0, 9, 1))
-        body = self.inbox("dev-a")[0]["body"]
-        self.assertIn("claude -p で実行した（終了コード 0）", body)
-        self.assertIn("prompt=朝のまとめを作る", body)
-        out = sorted(W.out_dir(self.env).glob("k1-*.txt"))
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].stat().st_mode & 0o777, 0o600)
-        self.assertIn(f"cwd={work}", out[0].read_text())
-        self.assertIn(str(out[0]), body)
-
     def test_cloud_is_only_a_pointer(self):
         self.add(cloud="trig_abc", desc="毎朝の PR まとめ", then="")
         self.check(time.time())
         self.assertEqual(self.inbox("dev-a"), [])
         self.assertEqual(W.status_line(self.env, "dev-a"), "wait: 1")
         self.assertIn("クラウド（/schedule）のルーティン trig_abc", W.short_line(W.get_record(self.env, "k1")))
+
+
+class Prompt(Base):
+    """--prompt-file: claude -p は check の外で切り離して動かし、次の回の check で結果を届ける。"""
+
+    def setUp(self):
+        super().setUp()
+        fake = self.d / "fake-claude"
+        fake.write_text(FAKE_CLAUDE.format(py=sys.executable))
+        fake.chmod(0o755)
+        self.config(waits={"claude": [str(fake)], "prompt_timeout_seconds": 30})
+        self.work = self.d / "work"
+        self.work.mkdir()
+
+    def prompt(self, text):
+        pf = self.work / "p.md"
+        pf.write_text(text)
+        return str(pf)
+
+    def wait_done(self, key="k1", limit=20):
+        end = time.monotonic() + limit
+        while time.monotonic() < end:
+            run_ = (W.get_record(self.env, key) or {}).get("running")
+            if not run_:
+                return
+            try:
+                if json.loads(Path(run_["state"]).read_text()).get("done"):
+                    return
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.05)
+        self.fail("runner が終わらない")
+
+    def test_runs_detached_and_delivers_next_check(self):
+        self.add(at="09:00", now=at_local(0, 8), prompt_file=self.prompt("朝のまとめを作る sleep 0.5"))
+        t0 = time.monotonic()
+        self.check(at_local(0, 9, 1))
+        self.assertLess(time.monotonic() - t0, 0.5)  # claude -p を待たない
+        rec = W.get_record(self.env, "k1")
+        # 動かす前に next_at を進めてある（常駐が止まっても 2 度動かさない）
+        self.assertEqual(rec["next_at"], at_local(1, 9))
+        self.assertTrue(rec["running"]["pid"])
+        self.assertEqual(self.inbox("dev-a"), [])
+        self.wait_done()
+        self.check(at_local(0, 9, 2))
+        body = self.inbox("dev-a")[0]["body"]
+        self.assertIn("claude -p で実行した（終了コード 0）", body)
+        self.assertIn("prompt=朝のまとめを作る", body)
+        rec = W.get_record(self.env, "k1")
+        self.assertNotIn("running", rec)
+        out = sorted(W.out_dir(self.env).glob("k1-*.txt"))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].stat().st_mode & 0o777, 0o600)
+        self.assertIn(f"cwd={self.work}", out[0].read_text())
+        self.assertIn(str(out[0]), body)
+        self.assertEqual(sorted(W.out_dir(self.env).glob("*.json")), [])  # runner の spec と状態は片付ける
+
+    def test_other_waits_keep_going_while_running(self):
+        self.add(at="09:00", now=at_local(0, 8), prompt_file=self.prompt("sleep 3"))
+        self.add("k2", when_cmd="true")
+        self.check(at_local(0, 9, 1))
+        self.assertEqual([r["body"].splitlines()[0] for r in self.inbox("dev-a")],
+                         ["claude-waits からの知らせ（待ち k2）。ユーザーの指示ではなく、登録してあった待ちの知らせ。返信は不要。"])
+        self.check(at_local(0, 9, 2))  # まだ動いている: 重ねて動かさず、何も届けない
+        self.assertEqual(len(self.inbox("dev-a")), 1)
+        self.wait_done()
+        self.check(at_local(0, 9, 3))
+        self.assertEqual(len(self.inbox("dev-a")), 2)
+
+    def short_timeout(self, sec):
+        """設定の下限（10 秒）より短い上限で試す（テストを待たせないため。設定の検査は緩めない）。"""
+        import config
+        orig = config.load_waits_config
+
+        def load(env, path=None):
+            c = orig(env, path)
+            c["prompt_timeout_seconds"] = sec
+            return c
+        config.load_waits_config = load
+        self.addCleanup(setattr, config, "load_waits_config", orig)
+
+    def test_timeout_is_reported(self):
+        self.short_timeout(1)
+        self.add(when_cmd="true", prompt_file=self.prompt("sleep 30"))
+        self.check(time.time())
+        self.assertEqual(W.get_record(self.env, "k1")["status"], "done")
+        self.wait_done(limit=15)
+        self.check(time.time())
+        body = self.inbox("dev-a")[0]["body"]
+        self.assertIn("時間切れ", body)
+        self.assertIn("cwd=", body)  # 止めるまでの出力
+
+    def test_interrupted_run_is_reported_not_rerun(self):
+        self.add(at="09:00", now=at_local(0, 8), prompt_file=self.prompt("x"))
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        rec = W.get_record(self.env, "k1")
+        W._commit(self.env, "k1", None, lambda r: r.update(next_at=at_local(1, 9), running={
+            "pid": dead.pid, "start": None, "started": at_local(0, 9), "out": str(self.d / "none.txt"),
+            "state": str(self.d / "none.state.json"), "spec": str(self.d / "none.run.json"), "timeout": 30,
+            "what": "予定の時刻", "extra": [], "tail": "次", "label": "発火"}))
+        self.check(at_local(0, 10))
+        body = self.inbox("dev-a")[0]["body"]
+        self.assertIn("中断した", body)
+        self.assertIn("再実行はしない", body)
+        rec = W.get_record(self.env, "k1")
+        self.assertNotIn("running", rec)
+        self.assertEqual(rec["next_at"], at_local(1, 9))
+
+    def test_daemon_side_timeout_stops_runner(self):
+        # runner が上限で止められない（固まった）ときは、常駐が上限 + 猶予を過ぎて止める
+        self.add(when_cmd="true", prompt_file=self.prompt("sleep 30"))
+        self.check(time.time())
+        run_ = W.get_record(self.env, "k1")["running"]
+        self.check(time.time() + 30 + W.RUN_GRACE + 1)
+        body = self.inbox("dev-a")[0]["body"]
+        self.assertIn("常駐が止めた", body)
+        end = time.monotonic() + 10
+        import relay
+        while relay.same_process(run_["pid"], run_["start"]) and time.monotonic() < end:
+            W._reap(run_["pid"])
+            time.sleep(0.05)
+        self.assertFalse(relay.same_process(run_["pid"], run_["start"]))
+
+    def test_rm_stops_running_and_cleans_up(self):
+        self.add(when_cmd="true", prompt_file=self.prompt("sleep 30"))
+        self.check(time.time())
+        run_ = W.get_record(self.env, "k1")["running"]
+        end = time.monotonic() + 10
+        while time.monotonic() < end:  # runner が claude（子）を起こして状態に書くまで
+            try:
+                child = json.loads(Path(run_["state"]).read_text())["child"]
+                break
+            except (OSError, ValueError, KeyError):
+                time.sleep(0.05)
+        self.assertTrue(W.remove(self.env, "k1"))
+        end = time.monotonic() + 10
+        while time.monotonic() < end and Path(f"/proc/{child}").exists() and \
+                Path(f"/proc/{child}/stat").read_text().split()[2] != "Z":
+            time.sleep(0.05)
+        alive = Path(f"/proc/{child}").exists() and Path(f"/proc/{child}/stat").read_text().split()[2] != "Z"
+        if sys.platform.startswith("linux"):
+            self.assertFalse(alive)  # 別のグループの claude も止めた
+        self.assertFalse(Path(run_["spec"]).exists())
+        self.assertFalse(Path(run_["state"]).exists())
+
+    def test_finished_runner_is_reaped(self):
+        self.add(at="09:00", now=at_local(0, 8), prompt_file=self.prompt("x"))
+        self.check(at_local(0, 9, 1))
+        pid = W.get_record(self.env, "k1")["running"]["pid"]
+        self.wait_done()
+        time.sleep(0.3)
+        self.check(at_local(0, 9, 2))
+        self.check(at_local(0, 9, 3))
+        self.assertNotIn(pid, W._RUNNERS)
+        if sys.platform.startswith("linux"):
+            self.assertFalse(Path(f"/proc/{pid}").exists())  # ゾンビも残さない
+
+    def test_pending_without_runner_is_interrupted(self):
+        # 発火を書いてから runner を起こすまでに常駐が止まった
+        self.add(at="09:00", now=at_local(0, 8), prompt_file=self.prompt("x"))
+        W._commit(self.env, "k1", None, lambda r: r.update(next_at=at_local(1, 9), running={
+            "pending": True, "started": at_local(0, 9), "what": "予定の時刻", "extra": [], "tail": "次", "label": "発火"}))
+        self.check(at_local(0, 9, 0) + 30)
+        self.assertEqual(self.inbox("dev-a"), [])  # 起こしている最中かもしれない間は待つ
+        self.check(at_local(0, 10))
+        body = self.inbox("dev-a")[0]["body"]
+        self.assertIn("起こす前に常駐が止まった", body)
+        self.assertNotIn("running", W.get_record(self.env, "k1"))
+
+    def test_reused_pid_is_interrupted(self):
+        self.add(at="09:00", now=at_local(0, 8), prompt_file=self.prompt("x"))
+        W._commit(self.env, "k1", None, lambda r: r.update(next_at=at_local(1, 9), running={
+            "pid": os.getpid(), "start": "0", "started": at_local(0, 9), "out": "", "state": str(self.d / "no.json"),
+            "spec": str(self.d / "no.run.json"), "timeout": 30, "what": "w", "extra": [], "tail": "t", "label": "発火"}))
+        self.check(at_local(0, 10))  # 生きている pid だが起動時刻が違う（使い回し）
+        self.assertIn("中断した", self.inbox("dev-a")[0]["body"])
+
+    def test_start_failure_is_reported(self):
+        self.add(when_cmd="true", prompt_file=self.prompt("x"))
+        orig = W.start_prompt
+        W.start_prompt = lambda *a: (_ for _ in ()).throw(OSError("書けない"))
+        try:
+            self.check(time.time())
+        finally:
+            W.start_prompt = orig
+        body = self.inbox("dev-a")[0]["body"]
+        self.assertIn("claude -p を動かせなかった: OSError: 書けない", body)
+        self.assertNotIn("running", W.get_record(self.env, "k1"))
+
+    def test_event_with_prompt(self):
+        self.add(when_cmd="echo 来た", prompt_file=self.prompt("まとめる"))
+        self.check(time.time())
+        self.wait_done()
+        self.check(time.time())
+        body = self.inbox("dev-a")[0]["body"]
+        self.assertIn("出力の先頭: 来た", body)
+        self.assertIn("prompt=まとめる", body)
 
 
 class Hook(Base):
@@ -563,6 +897,17 @@ class Hook(Base):
         self.assertEqual(buf.getvalue(), "")
         self.assertIn("RuntimeError: こわれた", (W.hook_dir(self.env) / "errors.log").read_text())
 
+    def test_hook_import_failure_exits_zero(self):
+        # lib/ が読めない（リポジトリを動かした・壊れた更新）ときも exit 0・stdout 空
+        fake = self.d / "repo"
+        (fake / "bin").mkdir(parents=True)
+        (fake / "lib").mkdir()
+        (fake / "bin" / "claude-waits").write_text(BIN.read_text())
+        for ev in ("SessionStart", "UserPromptSubmit"):
+            r = subprocess.run([sys.executable, str(fake / "bin" / "claude-waits"), "hook", ev], input="{}", env=self.env,
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
     def test_hook_cli_with_garbage_stdin(self):
         self.add()
         for stdin in ("not json", "[1, 2]", ""):
@@ -609,6 +954,31 @@ class Cli(Base):
 
     def test_version(self):
         self.assertTrue(self.run_cli("--version").stdout.startswith("claude-waits "))
+
+
+class Loop(Base):
+    def test_run_loop_survives_errors(self):
+        self.cfg.write_text("{broken")
+        W.run_loop(self.env, self.logs.append, once=True)
+        self.assertIn("check に失敗した", self.logs[0])
+        self.config()
+        orig = W.check
+        W.check = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("こわれた"))
+        slept = []
+        try:
+            W.run_loop(self.env, self.logs.append, once=True, sleep=slept.append)
+        finally:
+            W.check = orig
+        self.assertIn("RuntimeError: こわれた", self.logs[-1])
+        calls = []
+
+        def sleep(s):
+            calls.append(s)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            W.run_loop(self.env, self.logs.append, sleep=sleep)
+        self.assertEqual(calls, [60, 60])
 
 
 class Integration(Base):
@@ -673,6 +1043,75 @@ class Integration(Base):
         st = {i["name"]: i["status"] for i in rep.items}
         self.assertEqual(st["待ちの台帳"], "ok")
         self.assertEqual(st["待ちの台帳: 届け先"], "ng")
+
+    def test_doctor_daemon_path(self):
+        import doctor
+        self.add(gh_pr=None, when_cmd=None, at="09:00", prompt_file=str(self.cfg))
+        rec = W.get_record(self.env, "k1")
+        W._commit(self.env, "k1", None, lambda r: r.update(kind="gh_pr", cond={"repo": "o/r", "number": 1, "base": {}}))
+        bindir = self.d / "daemonbin"
+        bindir.mkdir()
+
+        class Ctx:
+            env, os_name, home = self.env, "Linux", self.d
+
+            def __init__(s, path):
+                s.path = path
+
+            def which(s, name):
+                return "/usr/bin/systemctl" if name == "systemctl" else None
+
+            def run(s, argv, timeout=5):
+                return 0, f"HOME=/x\nPATH={s.path}\n"
+        rep = doctor.Report()
+        doctor.check_waits_path(Ctx(str(bindir)), rep, {"claude": ["claude-fake-xyz"]}, [W.get_record(self.env, "k1")])
+        [row] = rep.items
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("gh", row["detail"])
+        self.assertIn("claude-fake-xyz", row["detail"])
+        self.assertIn("import-environment PATH", row["fix"])
+        for n in ("gh", "claude-fake-xyz"):
+            (bindir / n).write_text("#!/bin/sh\n")
+            (bindir / n).chmod(0o755)
+        rep = doctor.Report()
+        doctor.check_waits_path(Ctx(str(bindir)), rep, {"claude": ["claude-fake-xyz"]}, [W.get_record(self.env, "k1")])
+        self.assertEqual(rep.items[0]["status"], "ok")
+        rep = doctor.Report()
+        doctor.check_waits_path(Ctx(str(bindir)), rep, {"claude": ["x"]}, [])  # 使う待ちが無ければ出さない
+        self.assertEqual(rep.items, [])
+        # ユニットに書いた Environment=PATH=… を先に見る（systemctl --user edit で足したもの）
+        unit_bin = self.d / "unitbin"
+        unit_bin.mkdir()
+
+        class UnitCtx(Ctx):
+            def run(s, argv, timeout=5):
+                if "show" in argv:
+                    return 0, f'HOME=/x "PATH={unit_bin}"\n'
+                return 0, f"PATH={s.path}\n"
+        rep = doctor.Report()
+        doctor.check_waits_path(UnitCtx(str(bindir)), rep, {"claude": ["claude-fake-xyz"]}, [W.get_record(self.env, "k1")])
+        self.assertEqual(rep.items[0]["status"], "warn")
+        self.assertIn(str(unit_bin), rep.items[0]["detail"])
+
+    def test_doctor_daemon_path_macos(self):
+        import doctor
+        import plistlib
+        agents = self.d / "LaunchAgents"
+        agents.mkdir()
+        with open(agents / "claude-kitty.waits.plist", "wb") as f:
+            plistlib.dump({"Label": "claude-kitty.waits", "EnvironmentVariables": {"PATH": "/opt/x/bin:/usr/bin"}}, f)
+
+        class Ctx:
+            env, os_name, home = dict(self.env, CLAUDE_KITTY_LAUNCH_AGENTS=str(agents)), "Darwin", self.d
+
+            def which(s, name):
+                return "/bin/launchctl" if name == "launchctl" else None
+
+            def run(s, argv, timeout=5):
+                return 0, "/from/launchctl\n"
+        self.assertEqual(doctor.daemon_path(Ctx()), "/opt/x/bin:/usr/bin")
+        (agents / "claude-kitty.waits.plist").unlink()
+        self.assertEqual(doctor.daemon_path(Ctx()), "/from/launchctl")
 
     def test_statusline_segment(self):
         import statusline as SL

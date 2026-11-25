@@ -14,7 +14,8 @@
   key, role（持ち主の役割。セッション id ではない: /clear・restore で id が変わっても続く）, why, then,
   kind = cmd | gh_pr | at | cloud と cond（条件）, action（deliver か prompt）, expires（エポック秒か None = never）,
   status = active | done | expired, rev（add のたびに変わる。調べている間に登録し直された結果を捨てる印）,
-  outbox（まだ届けられていない知らせ。届いたら消す）, 調べた・発火した時刻と結果。
+  outbox（まだ届けられていない知らせ。届いたら id で消す。届かなければ間を伸ばして届け直す）,
+  running（--prompt-file の claude -p を切り離して動かしている間の pid・開始時刻・状態のファイル）, 調べた・発火した時刻と結果。
 詳しくは docs/waits.md。
 """
 import contextlib
@@ -23,7 +24,10 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -43,6 +47,13 @@ MAX_EXPIRES = 366 * 86400
 VIA = "claude-waits"                  # relay の受信箱の記録に付ける印（枠を「claude-waits からの知らせ」にする）
 HOOK_BUDGET = 3000                    # hook の additionalContext に入れる文の上限（毎回のトークンを抑える）
 HOOK_LINE = 160                       # 1 件の行の上限
+OUT_READ_MAX = 1024 * 1024            # 子の出力を読むのはこれだけ（知らせに入れるのは先頭だけなので）
+KILL_WAIT = 5                         # 止めたあとに子の終わりを待つ秒（setsid した孫がいても常駐を止めない）
+RETRY_MAX = 3600                      # 届け直しの間の上限（秒）
+RUN_GRACE = 120                       # claude -p が prompt_timeout_seconds をこれだけ過ぎても動いていれば常駐が止める
+BIN = Path(__file__).resolve().parent.parent / "bin" / "claude-waits"
+_REPORTED_BAD = {}                    # 読めない記録を 1 度だけログに出す（名前 → mtime）
+_RUNNERS = {}                         # この常駐が起こした runner（pid → Popen。終わったら片付ける）
 _CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
@@ -132,8 +143,11 @@ def parse_expires(text, now):
         sec = parse_duration(text)
         t = now + sec
     except Usage:
+        s = str(text).strip()
+        if s[-1:] in ("Z", "z"):
+            s = s[:-1] + "+00:00"  # Python 3.9・3.10 の fromisoformat は末尾の Z を読めない
         try:
-            d = datetime.fromisoformat(str(text).strip())
+            d = datetime.fromisoformat(s)
         except ValueError:
             raise Usage(f"--expires が読めない: {text!r}（2d・12h・2026-12-01T09:00・never）")
         t = d.timestamp()  # 時刻帯の無い日時は手元の時刻として読む
@@ -228,7 +242,10 @@ def clip_bytes(text, limit):
     if len(b) <= limit:
         return text
     note = "\n（長いので途中まで）"
-    return b[:max(0, limit - len(note.encode("utf-8")))].decode("utf-8", "ignore") + note
+    nb = len(note.encode("utf-8"))
+    if limit <= nb:
+        return b[:max(0, limit)].decode("utf-8", "ignore")
+    return b[:limit - nb].decode("utf-8", "ignore") + note
 
 
 # ---- 台帳の読み書き ------------------------------------------------------------------------
@@ -271,21 +288,64 @@ def write_record(env, rec):
     relay.write_private(p, json.dumps(rec, ensure_ascii=False, indent=1))
 
 
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def valid_record(rec, stem):
+    """台帳の 1 件の形が正しいか。手で直した・古い・壊れた記録で check が途中で落ちないよう、使う型を全部見る。"""
+    if not (isinstance(rec, dict) and rec.get("key") == stem and isinstance(rec.get("role"), str) and KEY_RE.match(rec["role"])
+            and rec.get("kind") in KINDS and isinstance(rec.get("cond"), dict) and isinstance(rec.get("rev"), str)
+            and rec.get("status") in ("active", "done", "expired") and isinstance(rec.get("why", ""), str)
+            and isinstance(rec.get("then", ""), str) and (rec.get("expires") is None or _num(rec.get("expires")))
+            and isinstance(rec.get("outbox", []), list) and (rec.get("running") is None or isinstance(rec["running"], dict))):
+        return False
+    a = rec.get("action")
+    if not (isinstance(a, dict) and (a.get("kind") == "deliver"
+                                     or (a.get("kind") == "prompt" and isinstance(a.get("prompt_file"), str)
+                                         and isinstance(a.get("cwd"), (str, type(None)))))):
+        return False
+    if "fired" in rec and not _int(rec["fired"]):
+        return False
+    for k in ("last_check", "last_fired", "t_done", "t"):
+        if rec.get(k) is not None and not _num(rec[k]):
+            return False
+    run_ = rec.get("running")
+    if run_ is not None and not (_num(run_.get("started")) and (run_.get("pid") is None or _int(run_["pid"]))
+                                 and (run_.get("timeout") is None or _num(run_["timeout"]))
+                                 and all(isinstance(run_.get(k, ""), str) for k in ("state", "spec", "out"))
+                                 and isinstance(run_.get("extra", []), list)):
+        return False
+    if not all(isinstance(x, dict) for x in rec.get("outbox", [])):
+        return False
+    c, k = rec["cond"], rec["kind"]
+    if k == "cmd":
+        return (isinstance(c.get("cmd"), str) and _num(c.get("every", DEFAULT_EVERY))
+                and isinstance(c.get("cwd"), (str, type(None))))
+    if k == "gh_pr":
+        return (isinstance(c.get("repo"), str) and _int(c.get("number")) and _num(c.get("every", DEFAULT_EVERY))
+                and isinstance(c.get("base", {}), dict))
+    if k == "at":
+        days = c.get("days")
+        return (_int(c.get("h")) and 0 <= c["h"] <= 23 and _int(c.get("m")) and 0 <= c["m"] <= 59
+                and isinstance(days, list) and days and all(_int(d) and 0 <= d <= 6 for d in days)
+                and (rec.get("next_at") is None or _num(rec.get("next_at"))))
+    return isinstance(c.get("routine"), str)
+
+
 def load_record(path):
     """1 件を読む。読めない・形の違うものは None（壊れた 1 件で全部を止めない）。"""
     try:
         rec = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
         return None
-    if not (isinstance(rec, dict) and isinstance(rec.get("key"), str) and isinstance(rec.get("role"), str)
-            and rec.get("kind") in KINDS and isinstance(rec.get("cond"), dict)):
+    if not valid_record(rec, Path(path).stem):
         return None
-    if rec["key"] != Path(path).stem:
-        return None
-    rec.setdefault("status", "active")
     rec.setdefault("outbox", [])
-    if not isinstance(rec["outbox"], list):
-        rec["outbox"] = []
     return rec
 
 
@@ -323,17 +383,22 @@ def own_role(env):
 
 
 def role_alive(env, role):
-    """その役割の claude が動いているか: claude-state の記録（claude がまだ動いている）か、relay の起こすための
-    socket の記録（同じ端末の別の CLAUDE_CONFIG_DIR のセッションも含む）のどちらかがあれば。止まって入力を
-    待っているセッションも「いる」（起こすのは receive() に任せる）。"""
+    """その役割に、受信箱を受け取れるセッションがいるか。"socket"（いる）・"state"（いない）・None（いない）を返す。
+
+    「いる」は relay の起こすための socket の記録（relay の hook が入っていて、claude が生きているセッション）が
+    あるときだけ。claude-state の記録だけあるときは "state": 動いているが relay の hook が無いかもしれず、
+    受信箱に置いても渡らないので、統括へ回して理由に添える。止まって入力を待っているセッションも「いる」
+    （起こすのは receive() に任せる）。"""
     import relay
     from kstate import alive, all_states, state_dir
+    if relay.wake_records(env, role):
+        return "socket"
     d = state_dir(relay.runtime_env(env))
     if d.is_dir():
         for e in all_states(d):
             if e.get("role") == role and alive(e):
-                return True
-    return bool(relay.wake_records(env, role))
+                return "state"
+    return None
 
 
 # ---- add ---------------------------------------------------------------------------------
@@ -375,22 +440,36 @@ def build_record(env, key, now, role, why, then, kind, cond, expires_text, promp
     return rec
 
 
-def run_group(argv, timeout=None, input=None, **kw):
-    """subprocess.run と同じ形で動かすが、新しいセッション（プロセスグループ）にして、時間切れなら孫ごと止める
-    （/bin/sh -c のパイプの先や claude の子が、時間切れのたびに残らないように）。"""
-    import signal
-    kw.pop("capture_output", None)
-    stdin = subprocess.PIPE if input is not None else kw.pop("stdin", None)
-    kw.pop("stdin", None)
-    p = subprocess.Popen(argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, **kw)
-    try:
-        out, err = p.communicate(input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(OSError):
-            os.killpg(p.pid, signal.SIGKILL)
-        out, err = p.communicate()
-        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
-    return subprocess.CompletedProcess(argv, p.returncode, out, err)
+def _read_head(f):
+    f.seek(0)
+    return f.read(OUT_READ_MAX).decode("utf-8", "replace")
+
+
+def killpg(pid):
+    with contextlib.suppress(OSError):
+        os.killpg(pid, signal.SIGKILL)
+
+
+def run_group(argv, timeout=None, input=None, cwd=None, env=None, **_kw):
+    """subprocess.run（text=True）と同じ形の結果を返すが、終わりは直接の子の終了（wait）で見て、出力は一時ファイルに
+    受ける。パイプで受けると、背景に回した孫（`sleep 30 & true`）がパイプを握っている間 communicate が返らず、
+    成功が時間切れに見えるため。子は新しいセッションで動かし、終わったら・時間切れなら残ったグループごと止める
+    （孫が毎回の poll で残らないように）。止めたあとの待ちにも上限を付ける（setsid した孫がいても常駐を止めない）。"""
+    with tempfile.TemporaryFile() as fo, tempfile.TemporaryFile() as fe, tempfile.TemporaryFile() as fi:
+        if input is not None:
+            fi.write(input.encode("utf-8"))
+            fi.seek(0)
+        p = subprocess.Popen(argv, stdin=fi if input is not None else subprocess.DEVNULL, stdout=fo, stderr=fe,
+                             cwd=cwd, env=env, start_new_session=True)
+        try:
+            rc = p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            killpg(p.pid)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(timeout=KILL_WAIT)
+            raise subprocess.TimeoutExpired(argv, timeout, output=_read_head(fo), stderr=_read_head(fe))
+        killpg(p.pid)  # 終わった子のグループに残った背景の孫
+        return subprocess.CompletedProcess(argv, rc, _read_head(fo), _read_head(fe))
 
 
 def gh_counts(env, repo, number, conf=None, run=run_group):
@@ -405,8 +484,7 @@ def gh_counts(env, repo, number, conf=None, run=run_group):
                       ("comments", f"repos/{repo}/issues/{number}/comments"),
                       ("review_comments", f"repos/{repo}/pulls/{number}/comments")):
         try:
-            r = run([gh, "api", "--paginate", api, "--jq", "length"], capture_output=True, text=True,
-                    timeout=timeout, env=child_env(env), stdin=subprocess.DEVNULL)
+            r = run([gh, "api", "--paginate", api, "--jq", "length"], timeout=timeout, env=child_env(env))
         except subprocess.TimeoutExpired:
             raise OSError(f"gh api {api} が {timeout:g} 秒で終わらない")
         if r.returncode != 0:
@@ -466,6 +544,8 @@ def add(env, key, now=None, role=None, why=None, then=None, when_cmd=None, every
         if old and old.get("outbox"):
             # まだ届いていない知らせ（前の成立・期限切れ）を登録し直しで捨てない。rev が変わっても届け直す
             rec["outbox"] = list(old["outbox"])
+        if old and old.get("running"):
+            rec["running"] = old["running"]  # 動いている claude -p の結果も、登録し直しのあとで届ける
         write_record(env, rec)
     return rec, replaced
 
@@ -481,14 +561,36 @@ def set_status(env, key, status, now=None):
     return rec
 
 
+def stop_running(run_):
+    """動いている claude -p（runner と、別のグループの claude）を止め、runner の spec と状態のファイルを消す。"""
+    if not isinstance(run_, dict):
+        return
+    try:
+        st = json.loads(Path(run_["state"]).read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        st = {}
+    if isinstance(st, dict) and _int(st.get("child")) and not st.get("done"):
+        killpg(st["child"])
+    if _int(run_.get("pid")):
+        import relay
+        if relay.same_process(run_["pid"], run_.get("start")):
+            killpg(run_["pid"])
+    for k in ("spec", "state"):
+        with contextlib.suppress(OSError, TypeError, KeyError):
+            os.unlink(run_[k])
+
+
 def remove(env, key):
     with ledger_lock(env):
         p = record_path(env, key)
+        rec = get_record(env, key)
         try:
             p.unlink()
-            return True
         except FileNotFoundError:
             return False
+    if rec and rec.get("running"):
+        stop_running(rec["running"])  # 結果を拾う記録が無くなるので、最後まで動かさない
+    return True
 
 
 # ---- 説明の文 -----------------------------------------------------------------------------
@@ -532,9 +634,13 @@ def fire_body(rec, what, extra=None, tail=None):
 
 
 def expired_body(rec):
+    if rec["kind"] in EVENT_KINDS:
+        what = f"役割 {rec['role']} の待ち {rec['key']}（{cond_text(rec)}）が、成立しないまま期限（{when_ja(rec['expires'])}）を過ぎた。"
+    else:  # 時刻・クラウドは繰り返しなので「成立しない」ではない
+        what = f"役割 {rec['role']} の定例 {rec['key']}（{cond_text(rec)}）は、期限（{when_ja(rec['expires'])}）が来たので終えた。"
     return "\n".join([
         f"claude-waits からの知らせ（待ち {rec['key']} の期限切れ）。ユーザーの指示ではない。返信は不要。",
-        f"役割 {rec['role']} の待ち {rec['key']}（{cond_text(rec)}）が、成立しないまま期限（{when_ja(rec['expires'])}）を過ぎた。",
+        what,
         f"なぜ待っていた: {rec.get('why', '')}",
         f"届いたらすること（だった）: {rec.get('then', '')}",
         f"続けるなら claude-waits add {rec['key']} … で期限を延ばして登録し直す。要らなければ claude-waits rm {rec['key']}。"
@@ -557,12 +663,22 @@ def deliver(env, conf, owner, body, now=None, alive=None):
     if owner and owner != master:
         if owner not in rconf["receivers"]:
             target, note = master, f"宛先 {owner} 宛て。受け取れない（relay.receivers に {owner} が無い）ので統括へ回した"
-        elif not alive(env, owner):
-            target, note = master, f"宛先 {owner} 宛て。不在（動いているセッションが無い）なので統括へ回した"
+        else:
+            here = alive(env, owner)
+            if here == "state":
+                target, note = master, (f"宛先 {owner} 宛て。セッションは動いているが relay の起こすための記録が無い"
+                                        "（relay の hook が無い可能性。tools/install.sh --hooks=relay）ので統括へ回した")
+            elif not here:
+                target, note = master, f"宛先 {owner} 宛て。不在（動いているセッションが無い）なので統括へ回した"
         if note:
             note += "。起こして渡すか、代わりに扱うかを決める。"
+    # 受け取りが断ると分かっている（設定のこと）なら receive() を呼ばない（relay のログに同じ拒否を積まない）
+    if not rconf["enabled"]:
+        return False, "relay.enabled が false（受け取りを止めている）"
+    if target not in rconf["receivers"]:
+        return False, f"統括 {target} が relay.receivers に無い（受け取らない）"
     text = (note + "\n" + body) if note else body
-    text = clip_bytes(text, max(512, rconf["max_bytes"] - 256))
+    text = clip_bytes(text, rconf["max_bytes"])
     data = json.dumps({"body": text, "via": VIA}, ensure_ascii=False).encode("utf-8")
     line, rc = relay.receive(env, relay.LOCAL, f"recv {target}", data, now=now, local=True)
     return rc == 0, (f"{line}（{note}）" if note else line)
@@ -580,8 +696,8 @@ def child_env(env):
 def run_cmd(env, cmd, cwd, timeout, run=run_group):
     """(成立したか, stdout, 説明)。終了コード 0 で成立。時間切れ・起動の失敗は成立しない。"""
     try:
-        r = run(["/bin/sh", "-c", cmd], cwd=cwd if cwd and os.path.isdir(cwd) else None, capture_output=True,
-                text=True, timeout=timeout, env=child_env(env), stdin=subprocess.DEVNULL)
+        r = run(["/bin/sh", "-c", cmd], cwd=cwd if cwd and os.path.isdir(cwd) else None, timeout=timeout,
+                env=child_env(env))
     except subprocess.TimeoutExpired:
         return False, "", f"{timeout:g} 秒で終わらない（時間切れ）"
     except OSError as e:
@@ -589,29 +705,121 @@ def run_cmd(env, cmd, cwd, timeout, run=run_group):
     return r.returncode == 0, r.stdout or "", f"終了コード {r.returncode}"
 
 
-def run_prompt(env, conf, rec, now, run=run_group):
-    """--prompt-file の定例を claude -p で動かし、出力をファイルに残す。(出力のパスか None, 1 行の結果, 先頭)。"""
-    act = rec["action"]
+# ---- claude -p を切り離して動かす ----------------------------------------------------------------
+#
+# 常駐（check）は claude -p を待たない: .check.lock を持ったまま 30 分待つと、ほかの待ちの判定も届け直しも止まるため。
+# check は「claude-waits _prompt-run <spec>」を新しいセッションで起こし、記録に running（pid・開始時刻・状態の
+# ファイル）を書いて次へ進む。runner が claude を上限付きで動かし、出力を out/ に、結果を状態のファイルに書く。
+# 次の回の check がそれを拾って届ける。runner が状態を書かずに居なくなっていたら（常駐ごと止まったなど）、
+# 「中断した」と届け、再実行はしない（時刻の待ちは動かす前に next_at を進めてあるので、多くても 1 回）。
+
+def prompt_runner(spec_path):
+    """runner の本体（bin/claude-waits _prompt-run）。claude を新しいセッションで動かし、上限を超えたらグループごと止める。"""
+    import relay
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    state = Path(spec["state"])
+    result, rc = None, None
     try:
-        prompt = Path(act["prompt_file"]).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        return None, f"プロンプトのファイルを読めない: {e}", ""
+        with open(spec["prompt_file"], "rb") as fi, open(spec["out"], "ab") as fo:
+            os.chmod(spec["out"], 0o600)
+            p = subprocess.Popen(spec["argv"], stdin=fi, stdout=fo, stderr=fo, cwd=spec.get("cwd"), start_new_session=True)
+            relay.write_private(state, json.dumps({"done": False, "child": p.pid}))
+            try:
+                rc = p.wait(timeout=spec["timeout"])
+                result = f"終了コード {rc}"
+            except subprocess.TimeoutExpired:
+                killpg(p.pid)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    p.wait(timeout=KILL_WAIT)
+                result = f"時間切れ（{spec['timeout']:g} 秒で終わらず止めた）"
+            killpg(p.pid)
+    except (OSError, ValueError) as e:
+        result = f"{' '.join(spec['argv'])} を起動できない: {e}"
+    relay.write_private(state, json.dumps({"done": True, "rc": rc, "result": result}))
+    return 0
+
+
+def start_prompt(env, conf, rec, now):
+    """runner を起こして running（記録に書く dict）を返す。起こせなければ (None, 理由)。"""
+    import proc
+    import relay
+    act = rec["action"]
     od = out_dir(env)
     mkdir_private(od)
-    path = od / f"{rec['key']}-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}.txt"
-    timeout = conf["prompt_timeout_seconds"]
+    base = od / f"{rec['key']}-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}-{uuid.uuid4().hex[:6]}"
+    out, state, spec_p = Path(f"{base}.txt"), Path(f"{base}.state.json"), Path(f"{base}.run.json")
+    if not Path(act["prompt_file"]).is_file():
+        return None, f"プロンプトのファイルが無い: {act['prompt_file']}"
+    cwd = act.get("cwd") if os.path.isdir(act.get("cwd") or "") else None
+    spec = {"argv": list(conf["claude"]), "prompt_file": act["prompt_file"], "cwd": cwd, "out": str(out),
+            "state": str(state), "timeout": conf["prompt_timeout_seconds"]}
+    relay.write_private(spec_p, json.dumps(spec, ensure_ascii=False))
+    relay.write_private(out, "")
     try:
-        r = run(list(conf["claude"]), input=prompt, cwd=act.get("cwd") if os.path.isdir(act.get("cwd") or "") else None,
-                capture_output=True, text=True, timeout=timeout, env=child_env(env))
-        out, result = (r.stdout or "") + (f"\n[stderr]\n{r.stderr}" if r.stderr else ""), f"終了コード {r.returncode}"
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        result = f"{timeout:g} 秒で終わらず止めた"
+        p = subprocess.Popen([sys.executable, str(BIN), "_prompt-run", str(spec_p)], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_env(env),
+                             start_new_session=True)
     except OSError as e:
-        return None, f"{' '.join(conf['claude'])} を起動できない: {e}", ""
+        return None, f"runner を起動できない: {e}"
+    _RUNNERS[p.pid] = p
+    return {"pid": p.pid, "start": proc.start_time(p.pid), "started": now, "out": str(out), "state": str(state),
+            "spec": str(spec_p), "timeout": conf["prompt_timeout_seconds"]}, None
+
+
+def _reap(pid):
+    """runner が常駐の子なら、終わったものを片付ける（ゾンビを生きていると見ないように）。"""
+    p = _RUNNERS.get(pid)
+    if p is not None:
+        if p.poll() is not None:
+            _RUNNERS.pop(pid, None)
+        return
+    with contextlib.suppress(ChildProcessError, OSError):
+        os.waitpid(pid, os.WNOHANG)
+
+
+def poll_running(env, conf, run_, now):
+    """running の様子。("running", None) / ("done", 結果の 1 行) / ("interrupted", 理由) / ("timeout", 理由)。"""
     import relay
-    relay.write_private(path, out)
-    return path, result, out
+    try:
+        st = json.loads(Path(run_["state"]).read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        st = {}
+    if isinstance(st, dict) and st.get("done"):
+        return "done", str(st.get("result") or "?")
+    pid = run_.get("pid")
+    if not _int(pid):
+        # 発火を書いてから runner を起こすまでの印（pending）。そのまま残っていれば、起こす前に常駐が止まった
+        if now - float(run_.get("started") or now) > max(60, 2 * conf["poll_seconds"]):
+            return "interrupted", "claude -p を起こす前に常駐が止まった。再実行はしない"
+        return "running", None
+    _reap(pid)
+    if not relay.same_process(pid, run_.get("start")):
+        try:  # 読んだ直後に runner が結果を書いて終わったのかもしれない
+            st = json.loads(Path(run_["state"]).read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError, TypeError):
+            st = {}
+        if isinstance(st, dict) and st.get("done"):
+            return "done", str(st.get("result") or "?")
+        return "interrupted", "claude -p の実行が中断した（常駐か runner が途中で止まった）。再実行はしない"
+    limit = float(run_.get("timeout") or conf["prompt_timeout_seconds"]) + RUN_GRACE
+    if now - float(run_.get("started") or now) > limit:
+        if isinstance(st, dict) and _int(st.get("child")):
+            killpg(st["child"])
+        killpg(pid)
+        return "timeout", f"時間切れ（{limit:g} 秒たっても終わらず、常駐が止めた）"
+    return "running", None
+
+
+def prompt_lines(conf, result, out):
+    try:
+        with open(out, "rb") as f:
+            text = f.read(OUT_READ_MAX).decode("utf-8", "replace")
+    except (OSError, TypeError):  # 起こす前に止まった（pending）なら出力のファイルは無い
+        text = ""
+    if not out:
+        return [f"claude -p は動かなかった（{result}）"]
+    return [f"claude -p で実行した（{result}）。出力: {out}",
+            f"出力の先頭: {clean(text.strip(), conf['body_max'])}" if text.strip() else "出力は空"]
 
 
 def evaluate(env, conf, rec, now, run=run_group):
@@ -645,10 +853,11 @@ def _outbox_item(owner, body, now, what):
 
 def _commit(env, key, rev, fn, active=False):
     """台帳のロックの中で、記録を読み直して rev が同じなら fn(rec) を当てて書く（調べている間に add し直された・
-    消された記録に、古い結果を書かない）。書いたら記録、書かなければ None。"""
+    消された記録に、古い結果を書かない）。rev が None なら rev を比べない（outbox の id・running のように、
+    登録し直しでも引き継ぐものを扱うとき）。書いたら記録、書かなければ None。"""
     with ledger_lock(env):
         rec = get_record(env, key)
-        if rec is None or rec.get("rev") != rev:
+        if rec is None or (rev is not None and rec.get("rev") != rev):
             return None
         if active and rec.get("status") != "active":
             return None  # 調べている間に done にされた（止めた待ちを発火・期限切れにしない）
@@ -658,50 +867,113 @@ def _commit(env, key, rev, fn, active=False):
 
 
 def flush_outbox(env, conf, rec, now, alive=None, log=None):
-    """記録の outbox を届ける。届いたものは消す（届かなければ次の回にもう一度）。"""
-    done = []
+    """記録の outbox を届ける。届いたものは id で消す（登録し直されて rev が変わっていても。二重に届けない）。
+    届かなければ、その item の間を倍々に伸ばして（上限 RETRY_MAX）次に回す。同じ理由の失敗はログに 1 度だけ。"""
     for item in list(rec.get("outbox") or []):
         if not isinstance(item, dict) or not isinstance(item.get("body"), str):
-            done.append(None)  # 下で形の壊れたものとして外す
+            _commit(env, rec["key"], None, lambda r, x=item: r.update(outbox=[y for y in r.get("outbox") or [] if y != x]))
+            continue
+        if _num(item.get("next_try")) and now < item["next_try"]:
             continue
         try:
             ok, line = deliver(env, conf, item.get("owner"), item["body"], alive=alive)
         except Exception as e:  # noqa: BLE001 — 1 件の失敗で残りを止めない
             ok, line = False, f"{type(e).__name__}: {e}"
-        # 届かない理由が前の回と同じなら書かない（統括が受け取れないままだと、毎回の poll で同じ行が積もるため）
-        if log and (ok or clean(line, 300) != rec.get("last_error")):
+        line = clean(line, 300)
+        if log and (ok or line != item.get("error")):
             log(f"{rec['key']}: {item.get('what') or '知らせ'} → {'届けた' if ok else '届かない'}: {line}")
+        iid = item.get("id")
         if ok:
-            done.append(item.get("id"))
-        else:
-            _commit(env, rec["key"], rec["rev"], lambda r: r.update(last_error=clean(line, 300)))
-    if done:
-        # 届いたものと、形の壊れたもの（届けようがない）を外す
-        _commit(env, rec["key"], rec["rev"],
-                lambda r: r.update(outbox=[x for x in r.get("outbox") or [] if isinstance(x, dict)
-                                           and isinstance(x.get("body"), str) and x.get("id") not in done],
-                                   last_error=None))
+            _commit(env, rec["key"], None,
+                    lambda r: r.update(outbox=[y for y in r.get("outbox") or [] if not (isinstance(y, dict) and y.get("id") == iid)],
+                                       last_error=None))
+            continue
+        tries = int(item.get("tries") or 0) + 1
+        wait = min(conf["poll_seconds"] * 2 ** min(tries, 20), RETRY_MAX)
+
+        def failed(r):
+            for y in r.get("outbox") or []:
+                if isinstance(y, dict) and y.get("id") == iid:
+                    y.update(tries=tries, next_try=now + wait, error=line)
+            r["last_error"] = line
+        _commit(env, rec["key"], None, failed)
+
+
+def _add_outbox(r, owner, body, now, what):
+    r["outbox"] = list(r.get("outbox") or []) + [_outbox_item(owner, body, now, what)]
+
+
+def finish_running(env, conf, rec, now, log=None):
+    """running の claude -p が終わったら（中断・時間切れも）知らせを outbox に積んで running を外す。"""
+    run_ = rec["running"]
+    state, why = poll_running(env, conf, run_, now)
+    if state == "running":
+        return
+    result = why
+    body = fire_body(rec, run_.get("what") or "?", list(run_.get("extra") or []) + prompt_lines(conf, result, run_.get("out")),
+                     run_.get("tail"))
+
+    def fin(r):
+        if (r.get("running") or {}).get("pid") != run_.get("pid"):
+            return
+        r.pop("running", None)
+        r["last_result"] = clean(result, 300)
+        _add_outbox(r, r["role"], body, now, run_.get("label") or "実行")
+    if _commit(env, rec["key"], None, fin) and log:
+        log(f"{rec['key']}: claude -p が終わった（{result}）")
+    for k in ("spec", "state"):  # 出力（.txt）は知らせが指すので残す（prune が keep_days で消す）
+        with contextlib.suppress(OSError, TypeError, KeyError):
+            os.unlink(run_[k])
+
+
+def fire_action(env, conf, key, what, extra, tail, label, now, log=None):
+    """発火のあとの動作: prompt なら runner を起こして running を書く（起こせなければその理由を届ける）。
+    発火の commit で running に pending の印を書いてあるので、ここまでに常駐が止まっても「中断した」が届く。"""
+    rec = get_record(env, key)
+    if rec is None or (rec.get("action") or {}).get("kind") != "prompt":
+        return
+    try:
+        run_, err = start_prompt(env, conf, rec, now)
+    except Exception as e:  # noqa: BLE001 — 起こせなかった理由を届ける（pending のまま残さない）
+        run_, err = None, f"{type(e).__name__}: {e}"
+    if run_ is None:
+        body = fire_body(rec, what, list(extra) + [f"claude -p を動かせなかった: {err}"], tail)
+
+        def failed(r):
+            r.pop("running", None)
+            _add_outbox(r, r["role"], body, now, label)
+        _commit(env, key, None, failed)
+        return
+    run_.update(what=what, extra=list(extra), tail=tail, label=label)
+    if _commit(env, key, None, lambda r: r.update(running=run_)) is None:
+        stop_running(run_)  # 記録が消された（rm）
+    elif log:
+        log(f"{key}: claude -p を動かし始めた（pid {run_['pid']}）")
 
 
 def check_one(env, conf, rec, now, run=run_group, log=None):
     """1 件を調べ、要るなら発火・期限切れにして outbox に積む（届けるのは flush_outbox）。"""
     key, rev = rec["key"], rec["rev"]
+    if rec.get("running"):
+        finish_running(env, conf, rec, now, log=log)
+        return  # 動いている間は、同じ待ちを重ねて発火させない
     if rec["status"] != "active":
         return
     if rec.get("expires") is not None and now >= rec["expires"]:
         def expire(r):
             r.update(status="expired", finished_at=now_iso(now), t_done=now)
-            r["outbox"] = list(r.get("outbox") or []) + [_outbox_item(None, expired_body(r), now, "期限切れ")]
+            _add_outbox(r, None, expired_body(r), now, "期限切れ")
         if _commit(env, key, rev, expire, active=True) and log:
             log(f"{key}: 期限切れ（統括に知らせる）")
         return
     kind = rec["kind"]
+    prompt = rec["action"].get("kind") == "prompt"
     if kind == "cloud":
         return  # クラウドのルーティンが動かす。台帳はポインタ（一覧と hook に出すだけ）
     if kind == "at":
         c = rec["cond"]
         nxt = rec.get("next_at")
-        if not isinstance(nxt, (int, float)):
+        if not _num(nxt):
             _commit(env, key, rev, lambda r: r.update(next_at=next_occurrence(now, c["h"], c["m"], c["days"])))
             return
         if now < nxt:
@@ -720,62 +992,86 @@ def check_one(env, conf, rec, now, run=run_group, log=None):
         what = f"予定の時刻 {days_ja(c['days'])} {c['at']}（{when_ja(latest)}）"
         if late > max(2 * conf["poll_seconds"], 300):
             what += f"。止まっていた間の分を 1 回だけ後追いで（{int(late // 60)} 分遅れ）"
-        extra = []
-        if rec["action"].get("kind") == "prompt":
-            path, result, out = run_prompt(env, conf, rec, now, run=run)
-            extra = [f"claude -p で実行した（{result}）。" + (f"出力: {path}" if path else "出力は無い"),
-                     f"出力の先頭: {clean(out.strip(), conf['body_max'])}" if out.strip() else "出力は空"]
         tail = f"定例なので次は {when_ja(upcoming)}。やめるなら claude-waits rm {key}"
-        body = fire_body(rec, what, extra, tail)
 
         def fire(r):
+            # 動かす前に next_at を進めて書く（常駐が途中で止まっても、同じ回を 2 度動かさない）
             r.update(next_at=upcoming, last_fired=now, fired=int(r.get("fired") or 0) + 1, last_result="発火")
-            r["outbox"] = list(r.get("outbox") or []) + [_outbox_item(r["role"], body, now, "発火")]
-        if _commit(env, key, rev, fire, active=True) and log:
-            log(f"{key}: 発火（{what}）")
+            if prompt:
+                r["running"] = {"pending": True, "started": now, "what": what, "extra": [], "tail": tail, "label": "発火"}
+            else:
+                _add_outbox(r, r["role"], fire_body(r, what, [], tail), now, "発火")
+        if _commit(env, key, rev, fire, active=True):
+            if log:
+                log(f"{key}: 発火（{what}）")
+            if prompt:
+                fire_action(env, conf, key, what, [], tail, "発火", now, log=log)
         return
     # 出来事: every ごとに調べる
     every = float(rec["cond"].get("every") or DEFAULT_EVERY)
     last = rec.get("last_check")
-    if isinstance(last, (int, float)) and now - last < every:
+    if _num(last) and now - last < every:
         return
     ok, what, extra, how, _ = evaluate(env, conf, rec, now, run=run)
     if not ok:
         _commit(env, key, rev, lambda r: r.update(last_check=now, last_result=clean(how, 300)))
         return
-    if rec["action"].get("kind") == "prompt":
-        path, result, out = run_prompt(env, conf, rec, now, run=run)
-        extra = list(extra) + [f"claude -p で実行した（{result}）。" + (f"出力: {path}" if path else "出力は無い"),
-                               f"出力の先頭: {clean(out.strip(), conf['body_max'])}" if out.strip() else "出力は空"]
-    body = fire_body(rec, what, extra, f"一度きりの待ちなので done にした（台帳から消すなら claude-waits rm {key}）")
+    tail = f"一度きりの待ちなので done にした（台帳から消すなら claude-waits rm {key}）"
 
     def fire(r):
         r.update(status="done", last_check=now, last_fired=now, fired=int(r.get("fired") or 0) + 1,
                  last_result="成立", finished_at=now_iso(now), t_done=now)
-        r["outbox"] = list(r.get("outbox") or []) + [_outbox_item(r["role"], body, now, "成立")]
-    if _commit(env, key, rev, fire, active=True) and log:
-        log(f"{key}: 成立（{what}）")
+        if prompt:
+            r["running"] = {"pending": True, "started": now, "what": what, "extra": list(extra), "tail": tail, "label": "成立"}
+        else:
+            _add_outbox(r, r["role"], fire_body(r, what, extra, tail), now, "成立")
+    if _commit(env, key, rev, fire, active=True):
+        if log:
+            log(f"{key}: 成立（{what}）")
+        if prompt:
+            fire_action(env, conf, key, what, extra, tail, "成立", now, log=log)
 
 
 def prune(env, conf, now, recs):
-    """done・expired で、届け残りが無く、keep_days より前に終わったものを消す（台帳が積もらないように）。"""
+    """done・expired で、届け残りも動いているものも無く、keep_days より前に終わったものを消す（台帳が積もらないように）。"""
     keep = conf["keep_days"] * 86400
     for r in recs:
-        if r["status"] in ("done", "expired") and not r.get("outbox") and now - float(r.get("t_done") or now) > keep:
+        if (r["status"] in ("done", "expired") and not r.get("outbox") and not r.get("running")
+                and now - float(r.get("t_done") or now) > keep):
             with ledger_lock(env):
                 cur = get_record(env, r["key"])
-                if cur and cur.get("rev") == r.get("rev") and cur["status"] == r["status"]:
+                if cur and cur.get("rev") == r.get("rev") and cur["status"] == r["status"] and not cur.get("running"):
                     with contextlib.suppress(FileNotFoundError):
                         record_path(env, r["key"]).unlink()
     # claude -p の出力も同じだけ残す（毎日の定例で 1 日 1 つずつ積もるため）。届いた知らせが指す間は消さないよう 1 日は残す
+    live = set()
+    for r in recs:
+        for k in ("spec", "state"):
+            if isinstance(r.get("running"), dict) and isinstance(r["running"].get(k), str):
+                live.add(r["running"][k])
     try:
-        outs = list(out_dir(env).glob("*.txt"))
+        # runner の spec・状態は、どの記録の running も指していなければ（rm・常駐が止まった）同じだけ残して消す
+        outs = list(out_dir(env).glob("*.txt")) + [f for f in out_dir(env).glob("*.json") if str(f) not in live]
     except OSError:
         outs = []
     for f in outs:
         with contextlib.suppress(OSError):
             if now - f.stat().st_mtime > max(keep, 86400):
                 f.unlink()
+
+
+def report_bad(env, names, log):
+    """読めない記録を、そのファイルが変わるまで 1 度だけログに出す（毎回の poll で同じ行を積まない）。"""
+    d = ledger_dir(env)
+    for n in names:
+        try:
+            m = (d / n).stat().st_mtime
+        except OSError:
+            continue
+        if _REPORTED_BAD.get(str(d / n)) != m:
+            _REPORTED_BAD[str(d / n)] = m
+            if log:
+                log(f"読めない記録を飛ばした（直すか消す）: {d / n}")
 
 
 def check(env, now=None, run=run_group, alive=None, log=None):
@@ -790,10 +1086,10 @@ def check(env, now=None, run=run_group, alive=None, log=None):
             if log:
                 log("別の check が動いている（この回は飛ばす）")
             return False
+        for pid in list(_RUNNERS):
+            _reap(pid)  # 終わった runner（ゾンビ）を片付ける
         recs, bad = all_records(env)
-        for n in bad:
-            if log:
-                log(f"読めない記録を飛ばした: {ledger_dir(env) / n}")
+        report_bad(env, bad, log)
         for rec in recs:
             try:
                 check_one(env, conf, rec, now, run=run, log=log)
