@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-25
+
 ### 追加
 
 - `claude-waits`（新しいツール）: 待ちと定例の台帳。Slack への投稿や PR のあとに返事を待つ流れを、セッションの中の polling（`/loop`・ScheduleWakeup）で回すと、起きるたびに会話の全文を読み直してトークンが要り、背景の待ちは claude の終了や kitty の再起動で消え、AI が仕込んだこと自体を忘れるため。台帳は 1 か所（`$XDG_STATE_HOME/claude-kitty/waits/<キー>.json`）、書くのは各セッション、動かすのは LLM でない常駐（[docs/waits.md](docs/waits.md)）。
@@ -26,6 +28,7 @@
 
 ### 上げるときに手で行うこと
 
+- コマンドのリンクを足す: `tools/install.sh --links`（新しいコマンド `claude-waits` を `~/.local/bin` に入れる。hook と常駐は絶対パスで呼ぶので、リンクはセッションや人が手で打つときのため）。
 - 常駐を入れる: `tools/install.sh --systemd`（macOS は `--launchd`）。`claude-waits.service`（`claude-kitty.waits`）が写されて動き出す（台帳が空なら何もしない）。入れないと `claude-kitty doctor` が「入っていない」と注意を出す。
 - 使うなら hook を入れる: `tools/install.sh --hooks=waits`。届いた知らせをセッションに渡すのは claude-relay の hook なので、待ちの持ち主になる役割には `tools/install.sh --hooks=relay` と、設定の `relay.receivers` への登録も要る（無ければ統括へ回る）。
 - 使うなら skill を入れる: `mkdir -p ~/.claude/skills && ln -s ~/claude-kitty/contrib/skills/claude-waits ~/.claude/skills/claude-waits`。
@@ -458,7 +461,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/hummer98/claude-kitty/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/hummer98/claude-kitty/compare/v0.7.9...v0.8.0
 [0.7.9]: https://github.com/hummer98/claude-kitty/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/hummer98/claude-kitty/compare/v0.7.7...v0.7.8
