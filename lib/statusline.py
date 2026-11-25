@@ -1,6 +1,6 @@
 """Claude Code のステータス行（statusLine の command）の 1 行を作る（bin/claude-statusline）。
 
-  名前 | モデル | ctx 380k | sub: 2 | 2d4h 41.2%
+  名前 | モデル | ctx 380k | sub: 2 | wait: 1 | 2d4h 41.2%
 
 - 名前: stdin の session_name（無ければ <設定の置き場>/sessions/*.json の name を session_id で探す）。
   claude-state の記録の状態の色で塗る（claude-state paint と同じ）。
@@ -8,6 +8,7 @@
   input + cache_creation + cache_read。無ければ total_input_tokens）。context_window の無い古い Claude Code では
   transcript_path の最後の usage から読む。
 - sub: N: 動いているサブエージェントの数（claude-state subagents と同じ）。
+- wait: N: 自分の役割（claude-state の記録の role）の claude-waits の active な待ちの数（0 なら省く。statusline.waits）。
 - 週の使用量: rate_limits.seven_day の残り時間と %。設定 statusline.weekly_roles の役割だけ。
 
 30 秒ごと（refreshInterval）と会話の出来事ごとに呼ばれるので、別のプロセスを起こさず、ここで直接読む。
@@ -209,6 +210,9 @@ def build(data, env, now, conf, state=None, config_error=False):
         from state import subagent_summary
         add(lambda: subagent_summary(rec, now, state.get("subagent_colors")))
     role = rec.get("role") if rec and isinstance(rec.get("role"), str) else None
+    if conf.get("waits", True) and role:
+        from waits import status_line
+        add(lambda: status_line(env, role))
     if wants_weekly(conf["weekly_roles"], name, role):
         add(lambda: weekly_segment(data, now, conf))
     if config_error:

@@ -5,13 +5,14 @@
 #
 # 部品（何も書かなければ --all）:
 #   --links            bin/ の全コマンドを ~/.local/bin にリンクする（既にある別のファイルは上書きしない）
-#   --hooks[=LIST]     ~/.claude/settings.json に hook を足す。LIST は state,lang,guard,relay,model,suffix から選ぶ（既定は state,guard）
+#   --hooks[=LIST]     ~/.claude/settings.json に hook を足す。LIST は state,lang,guard,relay,model,suffix,waits から選ぶ（既定は state,guard）
 #                      state = claude-state（状態の色）、guard = claude-guard、lang = claude-lang-check
 #                      （返答の言語を調べる。--hooks=lang と明示したときだけ入れる。言語は設定の lang.language で決める）、
 #                      relay = claude-relay（別の端末からのメッセージを渡す。--hooks=relay と明示したときだけ。docs/relay.md）、
 #                      model = claude-presence（離席中のサブエージェントのモデルの切り替え。--hooks=model と明示したときだけ。
 #                      設定 model_policy.enabled も要る。docs/config.md）、suffix = claude-prompt-suffix（文の最後の略号
-#                      wdt・opt などの意味を足す。--hooks=suffix と明示したときだけ。docs/prompt-suffix.md）
+#                      wdt・opt などの意味を足す。--hooks=suffix と明示したときだけ。docs/prompt-suffix.md）、
+#                      waits = claude-waits（登録中の待ちをセッションに見せる。--hooks=waits と明示したときだけ。docs/waits.md）
 #   --kitty            kitty.conf の末尾に「include <リポジトリ>/kitty/claude-kitty.conf」を足し、
 #                      watcher と claude3.session のリンクを ~/.config/kitty に張る
 #   --systemd          contrib/systemd のユニットを ~/.config/systemd/user に写して enable --now（Linux だけ）
@@ -33,7 +34,7 @@
 # ~/Library/LaunchAgents）。
 
 usage() {
-	sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
@@ -48,7 +49,7 @@ SETTINGS=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json
 CONF_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
 KITTY_DIR=${KITTY_CONFIG_DIRECTORY:-$CONF_HOME/kitty}
 UNIT_DIR=$CONF_HOME/systemd/user
-UNITS_ENABLE="claude-state-watch.service claude-roster-save.timer claude-session-stats.timer"
+UNITS_ENABLE="claude-state-watch.service claude-roster-save.timer claude-session-stats.timer claude-waits.service"
 KITTY_MARK="# claude-kitty: tools/install.sh が足した行（tools/install.sh --uninstall --kitty で外す）"
 UNIT_MARK="# claude-kitty: tools/install.sh が contrib/systemd から作った（手で直すなら、この行を消すと install.sh は触らない）"
 AGENT_MARK="<!-- claude-kitty: tools/install.sh が contrib/launchd から作った（手で直すなら、この行を消すと install.sh は触らない） -->"
@@ -78,11 +79,11 @@ done
 [ "$any" = 1 ] || { do_links=1 do_hooks=1 do_kitty=1 do_systemd=$all_systemd do_launchd=$all_launchd all=1; }
 # ステータス行は 1 つしか持てず、使う人が選ぶもの。入れるのは --statusline のときだけで、外すのは --all でも行う
 [ "$all" = 1 ] && [ "$uninstall" = 1 ] && do_statusline=1
-# lang（返答の言語の検査）・relay（端末をまたぐ連絡）・model（モデルの切り替え）・suffix（文の最後の略号）は
+# lang（返答の言語の検査）・relay（端末をまたぐ連絡）・model（モデルの切り替え）・suffix（文の最後の略号）・waits（待ちの台帳）は
 # 使う人だけが --hooks=lang などで入れる（suffix は statusline と同じく --all に入れない）。
 # 外すときは、--all で全部の hook を外す
 if [ -z "$hook_parts" ] && [ "$hooks_named" = 0 ]; then
-	if [ "$uninstall" = 1 ]; then hook_parts=state,lang,guard,relay,model,suffix; else hook_parts=state,guard; fi
+	if [ "$uninstall" = 1 ]; then hook_parts=state,lang,guard,relay,model,suffix,waits; else hook_parts=state,guard; fi
 fi
 
 # ツールは python3 の 3.9 以降で動く（macOS の Command Line Tools の /usr/bin/python3 が 3.9）
@@ -94,8 +95,8 @@ if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2
 fi
 # 部品の名前は先に確認する（見せたあとで知らない名前で止まらないように）
 if [ "$do_hooks" = 1 ]; then
-	python3 -c 'import sys; ok={"state","lang","guard","relay","model","suffix"}; p=[x for x in sys.argv[1].split(",") if x]; sys.exit(0 if p and set(p)<=ok else 1)' "$hook_parts" ||
-		{ echo "install.sh: --hooks= に使えるのは state,lang,guard,relay,model,suffix: $hook_parts" >&2; exit 2; }
+	python3 -c 'import sys; ok={"state","lang","guard","relay","model","suffix","waits"}; p=[x for x in sys.argv[1].split(",") if x]; sys.exit(0 if p and set(p)<=ok else 1)' "$hook_parts" ||
+		{ echo "install.sh: --hooks= に使えるのは state,lang,guard,relay,model,suffix,waits: $hook_parts" >&2; exit 2; }
 fi
 
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/claude-kitty-install.XXXXXX") || exit 1
@@ -376,7 +377,7 @@ step_systemd() {
 
 # ---- launchd（macOS）---------------------------------------------------------
 
-AGENTS="claude-kitty.state-watch claude-kitty.roster-save claude-kitty.session-stats"
+AGENTS="claude-kitty.state-watch claude-kitty.roster-save claude-kitty.session-stats claude-kitty.waits"
 
 # LaunchAgent の中身を作る: @@REPO@@ などを置き換え（XML の文字はエスケープ）、DOCTYPE の後に印の行を入れる。
 # PATH は hook と同じツールが見つかるように: ~/.local/bin（$BIN_DIR）・Homebrew・システム。XDG_RUNTIME_DIR は、

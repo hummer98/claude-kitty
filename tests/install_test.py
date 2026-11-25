@@ -106,7 +106,8 @@ class MergeHooks(unittest.TestCase):
         self.assertEqual(again, new)
         self.assertTrue(all(line.startswith("= ") for line in lines2))
         self.assertEqual(M.status(new), dict({p: ("all", []) for p in M.PARTS}, relay=("none", ["UserPromptSubmit", "Stop", "SessionStart"]),
-                                             model=("none", ["PreToolUse"]), suffix=("none", ["UserPromptSubmit"])))
+                                             model=("none", ["PreToolUse"]), suffix=("none", ["UserPromptSubmit"]),
+                                             waits=("none", ["SessionStart", "UserPromptSubmit"])))
 
     def test_parts_are_selectable(self):
         _lines, new = M.install({}, "/r", ["guard"])

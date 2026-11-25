@@ -1,6 +1,6 @@
 # 設定ファイル（config.json）
 
-claude-kitty のツールは、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`・`disk_watch`・`statusline`・`prompt_suffix`）から読みます。
+claude-kitty のツールは、1 つの設定ファイルの節（`view`・`kitty`・`browser`・`state`・`lang`・`guard_hook`・`session_stats`・`roster`・`relay`・`model_policy`・`disk_watch`・`statusline`・`waits`・`prompt_suffix`）から読みます。
 **どの節も、どの項目も省けます。** ファイルが無ければ、すべて下の表の既定値で動きます。
 
 - 場所: `$CLAUDE_KITTY_CONFIG` > `$XDG_CONFIG_HOME/claude-kitty/config.json` > `~/.config/claude-kitty/config.json`。リポジトリの外に置きます（手元の役割名やパスが入るため）。
@@ -224,9 +224,29 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `weekly_roles` | `["left"]` | 週の使用量（`rate_limits.seven_day` の残り時間と %）を出す役割のリスト。セッションの名前（`session_name`）か、claude-state の記録の役割（kitty の `role`）が当たれば出す。`"left"` は `view.left`（環境変数 `CLAUDE_VIEW_LEFT` が優先）、`"*"` は全員、`[]` は誰にも出さない。週の使用量はアカウントで 1 つなので、既定は統括だけ |
 | `weekly_thresholds` | `[85, 95]` | 週の使用量の色を変える %（0〜100、小さい順）。% の整数部がこの数を**超え**たら、同じ位置の色にする（既定: 86 % から橙、96 % から赤） |
 | `weekly_colors` | `[208, 196]` | `weekly_thresholds` の各段の色（0〜255。しきい値と同じ数） |
+| `waits` | `true` | `false` で自分の役割の claude-waits の待ちの数（`wait: N`。0 なら出さない）を出さない（[waits.md](waits.md)） |
 
 - 設定が壊れていれば、既定で出したうえで、行の末尾に「設定の誤り（claude-kitty doctor）」と出す（`claude-kitty doctor` の「設定: statusline」が NG）。`state` が壊れていても同じ（名前の色は既定に戻す）。
 - 名前の色は `state.colors.<状態>.name`、`sub: N` の色は `state.subagent_colors.running`（claude-state と同じ設定）。
+
+## waits（claude-waits: 待ちと定例の台帳）
+
+`claude-waits`（[waits.md](waits.md)）の常駐と届け方を変える。
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `enabled` | `true` | `false` で `check`・`run` が何も調べず、届けない（台帳への登録・一覧・hook はできる） |
+| `poll_seconds` | `60` | 常駐 `claude-waits run` が台帳を調べる間隔（秒。5〜3600）。出来事の待ちは、これと各自の `--every` の長い方ごとに調べる。時刻の待ちは、予定の時刻からこの秒数ほど遅れて届く |
+| `master_role` | `null` | 統括の役割。期限切れの知らせと、持ち主が不在・`relay.receivers` に無いときの知らせの届け先。`null` なら設定ファイルの `view.left`（無ければ `main`。`$CLAUDE_VIEW_LEFT` は見ない: 常駐は kitty の外から動くので、`relay.receivers` の `"left"` と同じ決め方） |
+| `catchup_hours` | `12` | 常駐が止まっていた（PC が寝ていた）間に過ぎた時刻の待ちを、後追いで発火する窓（時間。0〜168）。いちばん近い予定がこの時間より前なら発火せずに次の予定へ。何回分過ぎていても後追いは 1 回だけ。窓は少なくとも `poll_seconds` の 2 倍（0 でも定刻の分は届く） |
+| `claude` | `["claude", "-p"]` | `--prompt-file` の待ちを動かすコマンドと引数（プロンプトは標準入力で渡す）。権限のモードなどを足すならここに |
+| `prompt_timeout_seconds` | `1800` | `claude -p` の上限（秒。10〜21600）。超えたら止め、そこまでの出力を届ける |
+| `cmd_timeout_seconds` | `60` | `--when-cmd` と `gh api` 1 回の上限（秒。1〜600）。超えたら成立しないとみなす |
+| `body_max` | `1000` | 知らせに添える出力（`--when-cmd` の stdout・`claude -p` の出力）の先頭の字数（100〜8000）。全文は `claude -p` ならファイルに残る。知らせ全体は `relay.max_bytes` に収める |
+| `keep_days` | `7` | 済み（done）・期限切れ（expired）の記録と `claude -p` の出力（`waits/out/`。こちらは最低 1 日）を残す日数（0〜365）。過ぎたら check が消す |
+
+- 知らない項目があれば設定の誤りとする（書き間違いで黙って既定のまま動かないため）。`"waits": null` は書いていないのと同じ。
+- 常駐は毎回この節を読み直すので、変えても起動し直さなくてよい。
 
 ## prompt_suffix（claude-prompt-suffix: 文の最後の略号）
 

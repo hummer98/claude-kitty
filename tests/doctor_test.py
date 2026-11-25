@@ -362,7 +362,7 @@ class ConfigExample(unittest.TestCase):
 
     def test_every_section_present(self):
         self.assertEqual(set(self.data), {"view", "kitty", "browser", "state", "lang", "guard_hook", "session_stats", "roster",
-                                          "relay", "model_policy", "disk_watch", "statusline", "prompt_suffix"})
+                                          "relay", "model_policy", "disk_watch", "statusline", "waits", "prompt_suffix"})
 
     def test_loaders_read_example(self):
         from config import load_roster_config, load_state_config, load_view_config

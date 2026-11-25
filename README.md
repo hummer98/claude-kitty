@@ -37,7 +37,7 @@ git clone https://github.com/hummer98/claude-kitty ~/claude-kitty
 claude-kitty doctor                       # 足りないものと直し方を 1 行ずつ出す（NG が無ければ終了コード 0）
 ```
 
-- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-guard`。返答の言語を調べる `claude-lang-check` は `--hooks=lang`、文の最後の略号を効かせる `claude-prompt-suffix` は `--hooks=suffix` と明示したときだけ）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）の 1 行を足す、常駐を入れる（Linux は systemd のユーザーユニット、macOS は launchd の LaunchAgent）。部品ごとに `--links` `--hooks[=state,lang,guard,suffix]` `--kitty` `--systemd` `--launchd` で選べる。hook の command はリポジトリの `bin/` の絶対パスで書く（PATH に頼らない）。
+- `install.sh` が行うこと: `bin/` のコマンドを `~/.local/bin` にリンク、`~/.claude/settings.json` に hook（`claude-state`・`claude-guard`。返答の言語を調べる `claude-lang-check` は `--hooks=lang`、文の最後の略号を効かせる `claude-prompt-suffix` は `--hooks=suffix`、待ちの台帳を見せる `claude-waits` は `--hooks=waits` と明示したときだけ）を足す、kitty.conf の末尾に `include …/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）の 1 行を足す、常駐を入れる（Linux は systemd のユーザーユニット、macOS は launchd の LaunchAgent）。部品ごとに `--links` `--hooks[=state,lang,guard,suffix]` `--kitty` `--systemd` `--launchd` で選べる。hook の command はリポジトリの `bin/` の絶対パスで書く（PATH に頼らない）。
 - 既にあるものは壊さない: 別のファイルは上書きせず、既存の hook とキーは残し、同じ hook は二重に足さない。書き換える設定は `<名前>.bak-<日時>` に残す。何度流しても同じで、`--uninstall` で同じ部品を外せる。
 - kitty の設定（リモート操作とソケット）は kitty を起動し直してから効く。そのあと `claude-kitty` で kitty を開き、`claude-kitty doctor` をもう一度。
 - 役割名などの設定は `~/.config/claude-kitty/config.json`（無くても既定値で動く）。全項目の例は [config.example.json](config.example.json)、意味と既定値は [docs/config.md](docs/config.md)。
@@ -61,6 +61,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | `bin/claude-prompt-suffix` | 任意。UserPromptSubmit hook で、指示の文の最後の略号（`wdt` = 意見だけ、`opt` = 案を出す、`pre` = 見せる、`desc 2` = 2 番を解説、`next` = 決めることだけ、`ss` = 最新のスクリーンショットを見る、`aq` = 始める前に質問する、`sub` = サブエージェントにさせる、`htpre` = HTML にして見せる）の意味をモデルに渡し、画面に「略号 wdt を適用」と出す。貼り付けた文・コードブロック・コマンドの行は見ない。略号は設定で足す・変える・消す。`tools/install.sh --hooks=suffix`（[docs/prompt-suffix.md](docs/prompt-suffix.md)） | なし |
 | `bin/claude-statusline` | 任意。Claude Code のステータス行の 1 行: 名前（claude-state の色）・モデル・いまの会話の長さ（`ctx 380k`、20 万・40 万で色）・`sub: N`・統括だけ週の使用量（残り時間と %、85 % 超で橙・95 % 超で赤）。`settings.json` の `statusLine` に自分で入れるか `tools/install.sh --statusline`（[docs/statusline.md](docs/statusline.md)） | なし |
 | `bin/claude-roster` | kitty の中のセッションの名簿を保ち、kitty を起動し直したあとに元の配置・フォルダ・モデル・会話へ戻す。役目を終えた担当は `sleep` で止めてペインを閉じ、名簿に残しておいて `wake` で会話ごと戻す。`status` は 2 時間を超えて続く背景のシェルも出す（`claude-kitty doctor` も同じ）（[docs/roster.md](docs/roster.md)） | プロセスの情報（`lib/proc.py`）、保護する窓の確認だけ KWin |
+| `bin/claude-waits` | 待ちと定例の台帳。PR のレビュー・コマンドの成功・毎朝の時刻などの待ちをセッションが登録し、LLM でない常駐（`claude-waits run`）が調べて、成立したら持ち主の役割の受信箱（claude-relay）に届ける。セッションの中で polling しない（[下の節](#claude-waits待ちと定例の台帳)、[docs/waits.md](docs/waits.md)） | 常駐は systemd のユーザーユニット（macOS は launchd） |
 
 テスト: `python3 tests/run.py`（これ 1 つで全部。標準ライブラリだけで、kitty や Chrome は使わない。GitHub Actions も同じものを回す）
 
@@ -272,6 +273,22 @@ claude-relay ping mac-a / peers / inbox / log / untrust mac-a
 - 止まっている統括も起きる: hook が記録した Claude Code の cross-session messaging の socket に、recv が短い知らせ（本文は入れない）を送る。起きたセッションには UserPromptSubmit の hook が本文を枠付きで渡し、渡ったことを受領としてログに残す（60 秒たっても渡らなければ「未受領」）。別の端末のセッション同士が人を介さずにやりとりできる（受け手の `crossSessionInbound` などで保留になりうる。[docs/relay.md](docs/relay.md#止まっているセッションを起こすsocket)）。
 - 同じ端末の中で別の claude.ai アカウント（別の `CLAUDE_CONFIG_DIR`）で動くセッションへは `claude-relay send local/main "…"`（ssh を通さず、受け取りの検査・起こすのは同じ。どちらの置き場にも claude-kitty の hook を入れておく。[docs/relay.md](docs/relay.md#同じ端末の別のセッションへlocal)）。
 - 相手を自動で見つけること・統括以外の役割への直接の配達・LAN の外は、まだ扱わない。
+
+## claude-waits（待ちと定例の台帳）
+
+PR のレビュー・返事・CI の終わりや毎朝の定例を、セッションの中で polling（`/loop`・ScheduleWakeup）せずに待つ。セッションの中の polling は起きるたびに会話の全文を読み直してトークンが要り、背景の待ちは claude の終了や kitty の再起動で消え、仕込んだことも忘れるため。詳しくは [docs/waits.md](docs/waits.md)。
+
+```sh
+claude-waits add pr-42 --gh-pr OWNER/REPO#42 --expires 3d --why "PR 42 のレビューを待つ" --then "読んで直し、push して返信する"
+claude-waits add morning --at 09:00 --days mon-fri --expires never --why "…" --then "…"
+claude-waits add nightly --cloud ROUTINE_ID --desc "夜のまとめ（/schedule）" --why "…" --expires never
+claude-waits list / done KEY / rm KEY
+```
+
+- 台帳は `$XDG_STATE_HOME/claude-kitty/waits/<キー>.json`（1 件 1 ファイル、同じキーは上書き）。持ち主は役割（セッション ID でない）。
+- 常駐 `claude-waits run`（`tools/install.sh --systemd` / `--launchd`）が出来事（`--when-cmd`・`--gh-pr`）と時刻（`--at`）を調べ、成立したら relay の `receive()`（同じ端末の `local` 送り）で持ち主の受信箱へ。不在・`relay.receivers` に無い役割の分と期限切れは統括へ。時刻は止まっていた間の分を 1 回だけ後追い（既定 12 時間の窓）。`--prompt-file` なら `claude -p` で動かして結果を届ける。
+- `tools/install.sh --hooks=waits` の hook が、その役割の登録中の待ちを SessionStart と、台帳が変わったときの UserPromptSubmit で見せる。ステータス行に `wait: N`。
+- `/schedule`（クラウド）との振り分けは skill（`contrib/skills/claude-waits/SKILL.md`）の決まりで AI が決め、クラウドに回したものも `--cloud` で台帳に残す。
 
 ## claude-presence（離席中のモデル）
 

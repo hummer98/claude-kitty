@@ -417,7 +417,8 @@ def load_disk_watch_config(env, path=None):
 
 # 会話の長さは淡い黄・くすんだ橙にして、週の使用量（鮮やかな橙 208・赤 196）や待受中の名前（208）と見分ける
 DEFAULT_STATUSLINE = {"context": True, "context_thresholds": [200000, 400000], "context_colors": [186, 173],
-                      "weekly_roles": ["left"], "weekly_thresholds": [85, 95], "weekly_colors": [208, 196]}
+                      "weekly_roles": ["left"], "weekly_thresholds": [85, 95], "weekly_colors": [208, 196],
+                      "waits": True}
 
 
 def _color_steps(sl, key, lo, hi, path):
@@ -435,7 +436,7 @@ def _color_steps(sl, key, lo, hi, path):
 
 def load_statusline_config(env, path=None):
     """claude-statusline の設定 {"context", "context_thresholds", "context_colors", "weekly_roles",
-    "weekly_thresholds", "weekly_colors"} を返す（weekly_roles の "left" は view.left に置き換える）。
+    "weekly_thresholds", "weekly_colors", "waits"} を返す（weekly_roles の "left" は view.left に置き換える）。
 
       {"statusline": {"weekly_roles": ["left", "ops"], "context_thresholds": [150000, 300000]}}
 
@@ -468,8 +469,71 @@ def load_statusline_config(env, path=None):
     view = data.get("view") if isinstance(data, dict) else None
     left = env.get("CLAUDE_VIEW_LEFT") or (view.get("left") if isinstance(view, dict) and isinstance(view.get("left"), str)
                                            and view.get("left") else DEFAULT_VIEW["left"])
-    out.update(context=c, context_thresholds=ct, context_colors=cc, weekly_thresholds=wt, weekly_colors=wc,
+    wa = sl.get("waits", True)
+    if not isinstance(wa, bool):
+        raise ValueError(f"{path} の statusline.waits は true / false: {wa!r}")
+    out.update(context=c, context_thresholds=ct, context_colors=cc, weekly_thresholds=wt, weekly_colors=wc, waits=wa,
                weekly_roles=list(dict.fromkeys(left if x == "left" else x for x in roles)))
+    return out
+
+
+DEFAULT_WAITS = {"enabled": True, "poll_seconds": 60, "master_role": None, "catchup_hours": 12,
+                 "claude": ["claude", "-p"], "prompt_timeout_seconds": 1800, "cmd_timeout_seconds": 60,
+                 "body_max": 1000, "keep_days": 7}
+
+
+def _num_in(v, lo, hi):
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and lo <= v <= hi
+
+
+def load_waits_config(env, path=None):
+    """claude-waits（待ちと定例の台帳）の設定 {"enabled", "poll_seconds", "master_role", "catchup_hours", "claude",
+    "prompt_timeout_seconds", "cmd_timeout_seconds", "body_max", "keep_days"} を返す。
+
+      {"waits": {"poll_seconds": 30, "master_role": "main", "catchup_hours": 6}}
+
+    master_role が null なら設定ファイルの view.left（無ければ main。$CLAUDE_VIEW_LEFT は見ない: 常駐は kitty の外の
+    systemd / launchd から動き、hook と常駐で統括が食い違わないように。relay.receivers の "left" と同じ決め方）。
+    壊れていれば ValueError（常駐はその回を飛ばして errors.log に残し、add は止める）。"""
+    import re
+    path = Path(path) if path else config_path(env)
+    out = json.loads(json.dumps(DEFAULT_WAITS))
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as e:
+        raise ValueError(f"設定ファイルを読めない: {path}: {e}")
+    w = data.get("waits", {}) if isinstance(data, dict) else {}
+    if w is None:
+        w = {}
+    if not isinstance(w, dict):
+        raise ValueError(f"{path} の waits がオブジェクトでない")
+    unknown = sorted(set(w) - set(DEFAULT_WAITS))
+    if unknown:  # 書き間違いで、黙って既定のまま動かない
+        raise ValueError(f"{path} の waits に知らない項目: {', '.join(unknown)}")
+    e = w.get("enabled", True)
+    if not isinstance(e, bool):
+        raise ValueError(f"{path} の waits.enabled は true / false: {e!r}")
+    checks = {"poll_seconds": (5, 3600), "catchup_hours": (0, 168), "prompt_timeout_seconds": (10, 6 * 3600),
+              "cmd_timeout_seconds": (1, 600), "body_max": (100, 8000), "keep_days": (0, 365)}
+    for k, (lo, hi) in checks.items():
+        v = w.get(k, DEFAULT_WAITS[k])
+        if not _num_in(v, lo, hi):
+            raise ValueError(f"{path} の waits.{k} は {lo}〜{hi} の数: {v!r}")
+        out[k] = v
+    m = w.get("master_role")
+    if m is not None and not (isinstance(m, str) and re.match(RELAY_NAME, m)):
+        raise ValueError(f"{path} の waits.master_role は役割名（英数字と . _ -、64 字まで）か null: {m!r}")
+    c = w.get("claude", DEFAULT_WAITS["claude"])
+    if isinstance(c, str):
+        c = [c]
+    if not (isinstance(c, list) and c and all(isinstance(x, str) and x for x in c)):
+        raise ValueError(f"{path} の waits.claude はコマンドと引数のリスト（[\"claude\", \"-p\"] など）: {c!r}")
+    view = data.get("view") if isinstance(data, dict) else None
+    left = (view.get("left") if isinstance(view, dict) and isinstance(view.get("left"), str) and view.get("left")
+            else DEFAULT_VIEW["left"])
+    out.update(enabled=e, master_role=m or left, claude=list(c), body_max=int(out["body_max"]))
     return out
 
 

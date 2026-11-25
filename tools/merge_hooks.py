@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """~/.claude/settings.json の hooks に、claude-kitty の hook を足す・外す・調べる（tools/install.sh と claude-kitty doctor が使う）。
 
-  python3 tools/merge_hooks.py --settings PATH --repo DIR [--parts state,lang,guard,relay,model,suffix] [--uninstall] [--dry-run] [--check]
+  python3 tools/merge_hooks.py --settings PATH --repo DIR [--parts state,lang,guard,relay,model,suffix,waits] [--uninstall] [--dry-run] [--check]
 
 - 既存のキーと既存の hook は消さない。同じツールの同じ hook（下の「同じ」）が既にあれば足さない。
 - 「同じ」は command の最初の語のファイル名と、残りの引数で比べる（`claude-state hook Stop` と
@@ -45,8 +45,11 @@ PARTS = {
     "model": [("PreToolUse", "Agent|Task", "claude-presence", ["hook"])],
     # 文の最後の略号（wdt・opt など）の意味を足す（docs/prompt-suffix.md。--hooks=suffix と明示したときだけ）
     "suffix": [("UserPromptSubmit", None, "claude-prompt-suffix", [])],
+    # 待ちと定例の台帳の、その役割の登録中の待ちを見せる（docs/waits.md。--hooks=waits と明示したときだけ）
+    "waits": [("SessionStart", None, "claude-waits", ["hook", "SessionStart"]),
+              ("UserPromptSubmit", None, "claude-waits", ["hook", "UserPromptSubmit"])],
 }
-OPTIONAL = ("relay", "model", "suffix")  # 省いたときには入れない（使う人だけのもの）
+OPTIONAL = ("relay", "model", "suffix", "waits")  # 省いたときには入れない（使う人だけのもの）
 TIMEOUT = 10
 
 

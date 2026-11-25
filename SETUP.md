@@ -34,7 +34,7 @@ claude-kitty doctor                        # 足りないものと直し方
 | 部品 | 行うこと | 外す（`--uninstall`） |
 |---|---|---|
 | `--links` | `bin/` の全コマンドを `~/.local/bin`（`$CLAUDE_KITTY_BIN_DIR`）にリンク。既にある別のファイルは上書きしない | このリポジトリを指すリンクだけ消す |
-| `--hooks[=state,lang,guard,relay,suffix]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。`relay`（claude-relay。7.）と `suffix`（claude-prompt-suffix。5. の終わり）も `--hooks=relay` などと明示したときだけ。既存のキーと hook は残し、同じツール・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じツールの hook を外す（手で入れたものも）。`--all --uninstall` は lang・relay・suffix も外す |
+| `--hooks[=state,lang,guard,relay,suffix,waits]` | `~/.claude/settings.json`（`$CLAUDE_CONFIG_DIR`）に hook を足す（中身は 5. と docs）。既定は `state,guard`。`lang`（claude-lang-check）は `--hooks=lang` と明示したときだけで、言語は設定の `lang.language` で決める。`relay`（claude-relay。7.）・`suffix`（claude-prompt-suffix。5. の終わり）・`waits`（claude-waits。[docs/waits.md](docs/waits.md)）も `--hooks=relay` などと明示したときだけ。既存のキーと hook は残し、同じツール・同じ引数の hook が既にあれば足さない（`claude-state` と `~/.local/bin/claude-state` は同じと数える）。書く前に `settings.json.bak-<日時>`、JSON が壊れていれば何もせず止める | 同じツールの hook を外す（手で入れたものも）。`--all --uninstall` は lang・relay・suffix・waits も外す |
 | `--kitty` | kitty.conf の末尾に `include $REPO/kitty/claude-kitty.conf`（macOS は `claude-kitty-macos.conf`）を足し（末尾なので、自分の `listen_on`・`enabled_layouts`・`allow_remote_control`・`filter_notification` は上書きされる。あれば先に「!」で見せる）、`claude_state_watcher.py` と `claude3.session` のリンクを張る。kitty.conf がこのリポジトリの `kitty/kitty.conf` へのリンクなら触らない | 足した行とリンクだけ外す |
 | `--systemd` | `contrib/systemd/` のユニットを `~/.config/systemd/user/` に、パスを置き換えて写し、`daemon-reload` と `enable --now`（Linux だけ）。手で入れた中身の違うユニットは上書きしない | 自分が入れたユニットを止めて消す |
 | `--launchd` | `contrib/launchd/` の LaunchAgent を `~/Library/LaunchAgents/`（`$CLAUDE_KITTY_LAUNCH_AGENTS`）に、パス・PATH・HOME を置き換えて写し、`launchctl bootstrap gui/<uid>`（macOS だけ）。中身が変わったら `bootout` してから読み込み直す。手で入れた中身の違うものは上書きしない | 自分が入れたものを `launchctl bootout` して消す |
@@ -206,6 +206,14 @@ printf '%s%s%s' "$name" "${subs:+ | $subs}" "${relay:+ | $relay}"
 - **`statusLine` は 1 つだけ。** 既に自分の `statusLine` があるなら、上書きする前にその `command` と中身を控える（戻せるように）。自分の項目を残したいなら、自分のスクリプトから `claude-statusline` を呼んで後ろに足す形でもよい（stdin をそのまま渡す）。
 - `tools/install.sh --statusline` でも入れられる（見せてから確認を取る。別の `statusLine` があれば置き換えない）。外すのは `tools/install.sh --uninstall --statusline`。
 - 週の使用量を出す役割は設定 `statusline.weekly_roles`（既定は `view.left` の統括だけ。`["*"]` で全員）。しきい値と色も同じ節（[docs/config.md](docs/config.md#statuslineclaude-statusline-ステータス行)）。
+
+### 待ちと定例の台帳 claude-waits（任意）
+
+PR のレビュー・返事・CI の終わりや、毎朝の定例を、セッションの中で polling せずに待ちます（[docs/waits.md](docs/waits.md)）。
+
+- 常駐: `tools/install.sh --systemd`（macOS は `--launchd`）で `claude-waits.service`（`claude-kitty.waits`）が入る。台帳が空なら何もしない。
+- hook: `tools/install.sh --hooks=waits`（`--all` には入らない）。届いた知らせをセッションに渡すのは claude-relay の hook なので、受け取る役割には `--hooks=relay` と設定の `relay.receivers` も要る（7.）。
+- skill: `ln -s "$REPO/contrib/skills/claude-waits" ~/.claude/skills/claude-waits`（待ちを登録するときの振り分けの決まり）。
 
 ### 文の最後の略号を効かせる claude-prompt-suffix（任意）
 

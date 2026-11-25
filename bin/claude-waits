@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""待ちと定例の台帳。書くのは各セッション、動かすのは LLM でない常駐（claude-waits run）。
+
+  claude-waits add KEY --why TEXT --then TEXT [--role R] 条件 --expires 2d|ISO|never [--prompt-file F] [--cwd D]
+      条件（どれか 1 つ）:
+        --when-cmd CMD [--every 5m]     出来事: CMD が終了コード 0 で成立（stdout の先頭を添える）
+        --gh-pr URL|owner/repo#N [--every 5m]  出来事: PR のレビュー・コメント・行へのコメントが登録時より増えたら
+        --at HH:MM [--days daily|mon-fri|mon,wed]  時刻: 繰り返し（止まっていた間の分は 1 回だけ後追い）
+        --cloud ROUTINE_ID [--desc TEXT]  /schedule（クラウド）に回したもののポインタ（常駐は何もしない）
+      同じ KEY は上書き。出来事は成立したら done（一度きり）。--prompt-file なら claude -p で実行して結果を届ける
+  claude-waits list [--role R | --all] [--json]
+  claude-waits done KEY / rm KEY
+  claude-waits status              ステータス行用の 1 行（自分の役割の active な数。無ければ何も出さない）
+  claude-waits check               1 回だけ調べて届ける
+  claude-waits run                 常駐（設定 waits.poll_seconds ごとに check）
+  claude-waits hook SessionStart|UserPromptSubmit   Claude Code の hook。何が起きても exit 0
+
+終了コード: 0 = できた、1 = 失敗（無いキー・gh の失敗など）、2 = 引数の誤り。詳しくは docs/waits.md。
+"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+
+def cmd_hook(event, env):
+    """hook。stdout には渡すときの JSON だけを出す（SessionStart・UserPromptSubmit では stdout が文脈に入るため）。"""
+    import waits as W
+    try:
+        text = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+        try:
+            payload = json.loads(text) if text.strip() else {}
+        except ValueError:
+            payload = {}
+        out = W.hook_output(event, payload if isinstance(payload, dict) else {}, env)
+        if out:
+            sys.stdout.write(json.dumps(out, ensure_ascii=False))
+            sys.stdout.flush()
+    except BaseException as e:  # noqa: BLE001 — hook は Claude Code を止めない
+        W.hook_log_error(env, event, f"{type(e).__name__}: {e}")
+    return 0
+
+
+def log_line(msg):
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}", flush=True)
+
+
+def fmt_row(r):
+    import waits as W
+    st = {"active": "待ち", "done": "済み", "expired": "期限切れ"}.get(r["status"], r["status"])
+    extra = []
+    if r.get("kind") == "at" and r["status"] == "active" and isinstance(r.get("next_at"), (int, float)):
+        extra.append(f"次 {W.when_ja(r['next_at'])}")
+    if r.get("outbox"):
+        extra.append(f"届け残り {len(r['outbox'])}")
+    if r.get("last_error"):
+        extra.append(f"誤り: {W.one_line(r['last_error'], 80)}")
+    elif r.get("last_result"):
+        extra.append(f"最後: {W.one_line(r['last_result'], 60)}")
+    return (f"{r['key']}  [{r['role']}] {st}  {W.cond_text(r)}、{W.expires_text(r)}"
+            + (f"（{'・'.join(extra)}）" if extra else "") + f"\n    なぜ: {W.one_line(r.get('why', ''), 100)}"
+            + (f"\n    届いたら: {W.one_line(r['then'], 100)}" if r.get("then") else ""))
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    env = os.environ
+    if argv == ["--version"]:
+        from version import handle_version
+        handle_version(argv, "claude-waits")
+        return 0
+    if len(argv) == 2 and argv[0] == "hook":  # hook は毎ターン走るので、argparse を読み込まない
+        return cmd_hook(argv[1], env)
+    if argv == ["status"]:  # ステータス行から呼ばれうるので軽く。失敗しても何も出さない
+        try:
+            import waits as W
+            line = W.status_line(env, W.own_role(env))
+            if line:
+                print(line)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
+    import argparse
+    import waits as W
+
+    class Parser(argparse.ArgumentParser):
+        def error(self, message):
+            print(f"claude-waits: {message}（claude-waits --help）", file=sys.stderr)
+            sys.exit(2)
+
+    ap = Parser(prog="claude-waits", description="待ちと定例の台帳（docs/waits.md）")
+    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=Parser)
+    a = sub.add_parser("add", help="登録する（同じキーは上書き）")
+    a.add_argument("key")
+    a.add_argument("--role", help="持ち主の役割（既定は呼んだセッションの役割）")
+    a.add_argument("--why", help="なぜ待つか")
+    a.add_argument("--then", help="届いたら何をするか・終わったら何を消すか（届く本文はこれだけで分かるように）")
+    a.add_argument("--when-cmd", help="出来事: このコマンドが終了コード 0 で成立")
+    a.add_argument("--gh-pr", help="出来事: PR の URL か owner/repo#N。レビュー・コメントが増えたら成立")
+    a.add_argument("--every", help="出来事を調べる間隔（既定 5m。30s 以上）")
+    a.add_argument("--at", help="時刻: HH:MM（手元の時刻）")
+    a.add_argument("--days", help="--at の曜日: daily（既定）・mon-fri・mon,wed・sat-sun")
+    a.add_argument("--cloud", help="/schedule に回したルーティンの ID（台帳にはポインタとして残すだけ）")
+    a.add_argument("--desc", help="--cloud の説明")
+    a.add_argument("--expires", help="期限: 2d・12h・ISO の日時・never（出来事は never 不可）")
+    a.add_argument("--prompt-file", help="届ける代わりに、このファイルを claude -p で実行して結果を届ける")
+    a.add_argument("--cwd", help="--when-cmd・--prompt-file を動かすフォルダ（既定は今のフォルダ・プロンプトのフォルダ）")
+    ls = sub.add_parser("list", help="一覧")
+    g = ls.add_mutually_exclusive_group()
+    g.add_argument("--role")
+    g.add_argument("--all", action="store_true")
+    ls.add_argument("--json", action="store_true")
+    for name, h in (("done", "済みにする"), ("rm", "消す")):
+        sub.add_parser(name, help=h).add_argument("key")
+    sub.add_parser("status", help="ステータス行用の 1 行")
+    sub.add_parser("check", help="1 回だけ調べて届ける")
+    sub.add_parser("run", help="常駐")
+    sub.add_parser("hook").add_argument("event")
+    o = ap.parse_args(argv)
+    try:
+        if o.cmd == "add":
+            rec, replaced = W.add(env, o.key, role=o.role, why=o.why, then=o.then, when_cmd=o.when_cmd, every=o.every,
+                                  gh_pr=o.gh_pr, at=o.at, days=o.days, cloud=o.cloud, desc=o.desc, expires=o.expires,
+                                  prompt_file=o.prompt_file, cwd=o.cwd)
+            print(f"{'上書きした' if replaced else '登録した'}: {rec['key']}（役割 {rec['role']}。{W.cond_text(rec)}、"
+                  f"{W.expires_text(rec)}）")
+            return 0
+        if o.cmd == "list":
+            role = None if o.all else (o.role or W.own_role(env))
+            rows, bad = W.list_rows(env, role)
+            if o.json:
+                print(json.dumps({"role": role, "waits": [W.public(r) for r in rows], "unreadable": bad},
+                                 ensure_ascii=False, indent=1))
+                return 0
+            if not rows:
+                print(f"待ちは無い（{'全部の役割' if role is None else '役割 ' + role}）")
+            for r in rows:
+                print(fmt_row(r))
+            for n in bad:
+                print(f"! 読めない記録: {W.ledger_dir(env) / n}（直すか消す）", file=sys.stderr)
+            return 0
+        if o.cmd in ("done", "rm"):
+            W.check_key(o.key)
+            ok = W.set_status(env, o.key, "done") if o.cmd == "done" else W.remove(env, o.key)
+            if not ok:
+                print(f"claude-waits: 無いキー: {o.key}", file=sys.stderr)
+                return 1
+            print(f"{'済みにした' if o.cmd == 'done' else '消した'}: {o.key}")
+            return 0
+        if o.cmd == "check":
+            return 0 if W.check(env, log=log_line) else 1
+        if o.cmd == "run":
+            log_line(f"claude-waits run（台帳 {W.ledger_dir(env)}）")
+            try:
+                W.run_loop(env, log_line)
+            except KeyboardInterrupt:
+                return 0
+        if o.cmd == "hook":
+            return cmd_hook(o.event, env)
+    except W.Usage as e:
+        print(f"claude-waits: {e}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as e:
+        print(f"claude-waits: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

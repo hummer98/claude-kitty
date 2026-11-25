@@ -3,7 +3,7 @@
 Claude Code のステータス行（`settings.json` の `statusLine`）に入れる 1 行のツールです。**入れるかは任意**で、`tools/install.sh` は既定では入れません（`--all` でも入れない）。
 
 ```
-dev-a | Opus | ctx 380k | sub: 2 | 2d4h 41.2%
+dev-a | Opus | ctx 380k | sub: 2 | wait: 1 | 2d4h 41.2%
 ```
 
 | 区切り | 中身 | 色 |
@@ -12,6 +12,7 @@ dev-a | Opus | ctx 380k | sub: 2 | 2d4h 41.2%
 | モデル | `model.display_name` | なし |
 | `ctx 380k` | いまの会話の長さ（文脈に入っているトークンの数。下の「会話の長さ」） | 既定は 20 万未満なし、20 万以上は淡い黄（186）、40 万以上はくすんだ橙（173） |
 | `sub: N` | 動いているサブエージェントの数（`claude-state subagents` と同じ。0 なら省く） | 控えめな青（110） |
+| `wait: N` | 自分の役割（claude-state の記録の `role`）の [claude-waits](waits.md) の登録中の待ちの数（0 なら省く。設定 `statusline.waits: false` で出さない） | なし |
 | 週の使用量 | `rate_limits.seven_day` の残り時間（`2d4h`・`3h`・`59m`）と使った %（小数 1 桁まで） | % の整数部が 85 を超えたら橙（208）、95 を超えたら赤（196） |
 
 - 名前の色と `sub: N` は claude-state の hook（[SETUP.md の 5.](../SETUP.md#5-状態の色claude-state)）が入っているときだけ。無ければ名前は色なし、`sub` は出ない。

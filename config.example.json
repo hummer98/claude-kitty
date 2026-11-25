@@ -105,7 +105,19 @@
     "context_colors": [186, 173],
     "weekly_roles": ["left"],
     "weekly_thresholds": [85, 95],
-    "weekly_colors": [208, 196]
+    "weekly_colors": [208, 196],
+    "waits": true
+  },
+  "waits": {
+    "enabled": true,
+    "poll_seconds": 60,
+    "master_role": null,
+    "catchup_hours": 12,
+    "claude": ["claude", "-p"],
+    "prompt_timeout_seconds": 1800,
+    "cmd_timeout_seconds": 60,
+    "body_max": 1000,
+    "keep_days": 7
   },
   "prompt_suffix": {
     "enabled": true,

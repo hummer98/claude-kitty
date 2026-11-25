@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- claude-waits run: 待ちと定例の台帳を waits.poll_seconds ごとに調べ、成立・定刻・期限切れを受信箱に届ける常駐（macOS の LaunchAgent）。
+     時刻の発火も常駐が自分で判定する（Linux の systemd と同じ動きにするため、StartCalendarInterval は使わない）。
+     tools/install.sh（launchd の部品）がパスを置き換えて ~/Library/LaunchAgents に写し、launchctl bootstrap gui/<uid> で始める。
+     PATH は when-cmd・gh・claude が見つかるように渡す（launchd の既定の PATH には Homebrew も ~/.local/bin も無い）。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>claude-kitty.waits</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@REPO@@/bin/claude-waits</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@@PATH@@</string>
+    <key>HOME</key><string>@@HOME@@</string>@@EXTRA_ENV@@
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>Nice</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>@@LOGDIR@@/waits.log</string>
+  <key>StandardErrorPath</key><string>@@LOGDIR@@/waits.log</string>
+</dict>
+</plist>

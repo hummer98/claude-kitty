@@ -1,0 +1,18 @@
+# claude-waits run: 待ちと定例の台帳（$XDG_STATE_HOME/claude-kitty/waits/）を waits.poll_seconds ごとに調べ、
+# 出来事の成立・定刻・期限切れを持ち主の役割の受信箱（claude-relay）に届ける常駐。LLM でなく、この常駐が polling する
+# （セッションの中で polling すると、起きるたびに会話の全文を読み直してトークンが要るため）。時刻の発火も
+# この常駐が自分で判定する（systemd timer に分けない: macOS の launchd でも同じに動かし、ユニットを 1 つに保つため）。
+# 台帳が空なら何もしない。設定は config.json の waits（docs/config.md）、使い方は docs/waits.md。
+#
+#   tools/install.sh --systemd（写して enable --now）
+[Unit]
+Description=claude-waits run (待ちと定例の台帳を調べて届ける)
+
+[Service]
+ExecStart=/usr/bin/python3 %h/claude-kitty/bin/claude-waits run
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target

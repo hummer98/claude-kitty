@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Claude Code のステータス行（settings.json の statusLine の command）。stdin に Claude Code の JSON を受け、1 行を出す。
 
-  名前 | モデル | ctx 380k | sub: 2 | 2d4h 41.2%
+  名前 | モデル | ctx 380k | sub: 2 | wait: 1 | 2d4h 41.2%
 
   名前      session_name を claude-state の状態の色で（待受中は橙など。claude-state paint と同じ）
   ctx       いまの会話の長さ（文脈のトークン数）。既定 20 万以上は淡い黄、40 万以上はくすんだ橙
   sub: N    動いているサブエージェントの数（claude-state subagents と同じ。0 なら省く）
+  wait: N   自分の役割の claude-waits の active な待ちの数（0 なら省く。設定 statusline.waits で消せる）
   週の使用量  rate_limits.seven_day の残り時間と %（設定 statusline.weekly_roles の役割だけ。既定は view.left）。
             85 % 超は橙 208、95 % 超は赤 196
 

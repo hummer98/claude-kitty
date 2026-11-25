@@ -22,11 +22,12 @@ REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / "tools"))
 
-UNITS = ["claude-state-watch.service", "claude-roster-save.timer", "claude-session-stats.timer"]
-AGENTS = ["claude-kitty.state-watch", "claude-kitty.roster-save", "claude-kitty.session-stats"]
+UNITS = ["claude-state-watch.service", "claude-roster-save.timer", "claude-session-stats.timer", "claude-waits.service"]
+AGENTS = ["claude-kitty.state-watch", "claude-kitty.roster-save", "claude-kitty.session-stats", "claude-kitty.waits"]
 MIN_PYTHON = (3, 9)  # macOS の Command Line Tools の /usr/bin/python3 が 3.9
 HOOK_LABELS = {"state": "claude-state（状態の色）", "lang": "claude-lang-check", "guard": "claude-guard", "relay": "claude-relay",
-               "model": "claude-presence（モデルの切り替え）", "suffix": "claude-prompt-suffix（文の最後の略号）"}
+               "model": "claude-presence（モデルの切り替え）", "suffix": "claude-prompt-suffix（文の最後の略号）",
+               "waits": "claude-waits（待ちの台帳）"}
 
 
 class Ctx:
@@ -316,6 +317,9 @@ def check_hooks(ctx, rep):
         if state == "none" and part == "suffix":
             rep.ok(name, "入っていない（任意。使うなら tools/install.sh --hooks=suffix。docs/prompt-suffix.md）")
             continue
+        if state == "none" and part == "waits":
+            rep.ok(name, "入っていない（任意。待ちを登録したセッションに見せるなら tools/install.sh --hooks=waits。docs/waits.md）")
+            continue
         if state == "none":
             rep.warn(name, "入っていない", f"使うなら tools/install.sh --hooks={part}")
             continue
@@ -493,6 +497,8 @@ def check_config(ctx, rep):
     strict("disk_watch", lambda: load_disk_watch_config(ctx.env, path))
     from config import load_statusline_config
     strict("statusline", lambda: load_statusline_config(ctx.env, path))
+    from config import load_waits_config
+    strict("waits", lambda: load_waits_config(ctx.env, path))
 
 
 # ---- デスクトップ・Chrome ------------------------------------------------------
@@ -753,6 +759,43 @@ def check_disk(ctx, rep):
             rep.warn(name, detail, f"{path} の中の要らないもの（テストの一時フォルダの残りなど）を確認して消す")
 
 
+# ---- 待ちの台帳（claude-waits） ------------------------------------------------------------------
+
+def check_waits(ctx, rep):
+    """台帳の数と、知らせの届け先（統括が relay.receivers にいるか）・届け残り・読めない記録（読むだけ）。"""
+    from config import load_relay_config, load_waits_config
+    import waits as W
+    try:
+        conf = load_waits_config(ctx.env)
+        rconf = load_relay_config(ctx.env)
+    except ValueError:
+        return  # 「設定: waits」「設定: relay」の行で NG にする
+    recs, bad = W.all_records(ctx.env)
+    name = "待ちの台帳"
+    if not recs and not bad:
+        rep.ok(name, f"空（{W.ledger_dir(ctx.env)}。claude-waits add で登録する。docs/waits.md）")
+        return
+    act = [r for r in recs if r["status"] == "active"]
+    roles = sorted({r["role"] for r in act})
+    detail = (f"登録中 {len(act)} 件" + (f"（役割 {', '.join(roles)}）" if roles else "")
+              + f"、済み・期限切れ {len(recs) - len(act)} 件" + ("" if conf["enabled"] else "。ただし waits.enabled が false で調べない"))
+    if bad:
+        rep.warn(name, f"{detail}。読めない記録 {len(bad)} 件: {', '.join(bad[:3])}",
+                 f"{W.ledger_dir(ctx.env)} の中を直すか消す（claude-waits は飛ばして続ける）")
+    else:
+        rep.ok(name, detail)
+    master = conf["master_role"]
+    if master not in rconf["receivers"] or not rconf["enabled"]:
+        why = "relay.enabled が false" if not rconf["enabled"] else f"統括 {master} が relay.receivers に無い"
+        rep.ng("待ちの台帳: 届け先", f"{why}（期限切れ・不在の知らせを受信箱に置けない）",
+               f"設定の relay.receivers に {master} を足す（waits.master_role で統括を変えられる）")
+    stuck = [r for r in recs if r.get("outbox")]
+    if stuck:
+        r = stuck[0]
+        rep.warn("待ちの台帳: 届け残り", f"{len(stuck)} 件（{r['key']}: {W.one_line(r.get('last_error') or '?', 120)}）",
+                 "claude-waits check で届け直す。受け取りの役割は relay.receivers と relay の hook（tools/install.sh --hooks=relay）")
+
+
 def check_bg_shells(ctx, rep):
     """各セッション（claude の pid）の子の背景のシェルのうち、2 時間を超えて続いているものを 1 行ずつ（読むだけ）。
 
@@ -782,7 +825,7 @@ def check_bg_shells(ctx, rep):
 
 
 CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_statusline, check_systemd, check_config, check_desktop,
-          check_relay, check_model_policy, check_disk, check_bg_shells]
+          check_relay, check_model_policy, check_waits, check_disk, check_bg_shells]
 MARK = {"ok": "OK  ", "ng": "NG  ", "warn": "注意", "skip": "--  "}
 
 
