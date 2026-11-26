@@ -46,7 +46,7 @@ class HumanInput(unittest.TestCase):
                   "<task-notification><task-id>a</task-id></task-notification>",
                   '<agent-message from="a1">[Subagent hand-back] 終わった</agent-message>',
                   "<system-reminder>x</system-reminder>",
-                  "claude-relay: 別の端末から 1 通届いた [relay-wake ids=r1]\n（…）"):
+                  "claude-relay: 別の端末から 1 通 [relay-wake ids=r1]。渡っていなければ …"):
             self.assertFalse(P.is_human(p), p)
 
     def test_empty_and_not_text(self):
@@ -462,7 +462,7 @@ class StateRecordsHuman(unittest.TestCase):
         before = self.last()
         for p in ('<cross-session-message from="aom-master">進めて</cross-session-message>',
                   "<task-notification>done</task-notification>",
-                  "claude-relay: 別の端末から 1 通届いた [relay-wake ids=r1]", ""):
+                  "claude-relay: 別の端末から 1 通 [relay-wake ids=r1]", ""):
             self.hook("UserPromptSubmit", p)
             self.assertEqual(self.last(), before, p)
         self.hook("UserPromptSubmit")  # prompt が無い

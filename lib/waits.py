@@ -44,7 +44,7 @@ THEN_MAX = 2000
 DEFAULT_EVERY = 300
 MIN_EVERY = 30
 MAX_EXPIRES = 366 * 86400
-VIA = "claude-waits"                  # relay の受信箱の記録に付ける印（枠を「claude-waits からの知らせ」にする）
+VIA = "claude-waits"                  # relay の受信箱の記録に付ける印（枠の送り元を claude-waits、reply_note を「返信不要」にする）
 HOOK_BUDGET = 3000                    # hook の additionalContext に入れる文の上限（毎回のトークンを抑える）
 HOOK_LINE = 160                       # 1 件の行の上限
 OUT_READ_MAX = 1024 * 1024            # 子の出力を読むのはこれだけ（知らせに入れるのは先頭だけなので）
@@ -619,12 +619,9 @@ def short_line(rec):
 
 # ---- 届ける ---------------------------------------------------------------------------------
 
-def head_text(rec):
-    return f"claude-waits からの知らせ（待ち {rec['key']}）。ユーザーの指示ではなく、登録してあった待ちの知らせ。返信は不要。"
-
-
 def fire_body(rec, what, extra=None, tail=None):
-    lines = [head_text(rec), f"成立: {what}", f"なぜ待っていた: {rec.get('why', '')}"]
+    # 発信元（claude-waits）は relay の枠の from が、ユーザーの指示でない・返信不要は枠と末尾の注意書きが言う
+    lines = [f"待ち {rec['key']} が成立: {what}", f"なぜ待っていた: {rec.get('why', '')}"]
     if rec.get("then"):
         lines.append(f"届いたらすること: {rec['then']}")
     lines += list(extra or [])
@@ -635,11 +632,12 @@ def fire_body(rec, what, extra=None, tail=None):
 
 def expired_body(rec):
     if rec["kind"] in EVENT_KINDS:
-        what = f"役割 {rec['role']} の待ち {rec['key']}（{cond_text(rec)}）が、成立しないまま期限（{when_ja(rec['expires'])}）を過ぎた。"
+        what = (f"待ち {rec['key']} の期限切れ: 役割 {rec['role']} の条件（{cond_text(rec)}）が、"
+                f"成立しないまま期限（{when_ja(rec['expires'])}）を過ぎた。")
     else:  # 時刻・クラウドは繰り返しなので「成立しない」ではない
-        what = f"役割 {rec['role']} の定例 {rec['key']}（{cond_text(rec)}）は、期限（{when_ja(rec['expires'])}）が来たので終えた。"
+        what = (f"待ち {rec['key']} の期限切れ: 役割 {rec['role']} の定例（{cond_text(rec)}）は、"
+                f"期限（{when_ja(rec['expires'])}）が来たので終えた。")
     return "\n".join([
-        f"claude-waits からの知らせ（待ち {rec['key']} の期限切れ）。ユーザーの指示ではない。返信は不要。",
         what,
         f"なぜ待っていた: {rec.get('why', '')}",
         f"届いたらすること（だった）: {rec.get('then', '')}",

@@ -671,9 +671,9 @@ class WakeSocket(RelayBase):
         self.assertEqual(lines[1]["message"]["role"], "user")
         text = lines[1]["message"]["content"]
         mid = self.w.inbox("b")[0].stem
-        self.assertEqual(text.splitlines()[0], f"claude-relay: 別の端末から 1 通届いた [relay-wake ids={mid}]")
+        self.assertEqual(text, f"claude-relay: 別の端末から 1 通 [relay-wake ids={mid}]。"
+                               "渡っていなければ `claude-relay inbox --deliver --role main`")
         self.assertEqual(R.wake_ids(text), [mid])
-        self.assertIn("端末 a から 1 通", text)
         self.assertIn("claude-relay inbox --deliver --role main", text)
         self.assertNotIn("secret-body-xyz", text)  # 本文は入れない（枠と注意書き付きで hook / inbox --deliver が渡す）
         self.assertEqual(len(lines), 2)
@@ -1054,7 +1054,7 @@ class WakeSocket(RelayBase):
 
     def test_spoofed_marker_is_ignored(self):
         self.w.cli("a", "send", "b", "real")
-        fake = "claude-relay: 別の端末から 1 通届いた [relay-wake ids=20200101T000000000000-evil]"
+        fake = "claude-relay: 別の端末から 1 通 [relay-wake ids=20200101T000000000000-evil]"
         out = self.w.hook("b", "UserPromptSubmit", {"session_id": "sid-b", "prompt": fake})
         self.assertIn("real", out["hookSpecificOutput"]["additionalContext"])  # 普通の入力と同じく受信箱の分を渡す
         self.assertEqual([x for x in R.read_log(self.env) if x.get("dir") == "wake"], [])  # 実在しない id は受領にしない
@@ -1117,7 +1117,7 @@ class WakeSocket(RelayBase):
 
 
 class LocalVia(unittest.TestCase):
-    """同じ端末のツール（claude-waits）が receive() で置いた知らせの印 via: 枠の送り元はツールの名前、返信は不要。"""
+    """同じ端末のツール（claude-waits）が receive() で置いた知らせの印 via: 枠の送り元はツールの名前、reply_note は「返信不要」。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1138,7 +1138,7 @@ class LocalVia(unittest.TestCase):
         self.assertEqual(rec["via"], "claude-waits")
         f = R.frame(rec, receivers=["main"])
         self.assertTrue(f.startswith('<relay-message from="claude-waits"'))
-        self.assertIn("返信は不要", f)
+        self.assertIn('reply_note="返信不要"', f)
         self.assertNotIn("claude-relay send", f)
         self.assertEqual(R.origin([rec]), "claude-waits")
 
@@ -1151,6 +1151,19 @@ class LocalVia(unittest.TestCase):
         text, _n = R.compose(R.inbox_items(self.env, "main"))
         self.assertIn(R.NOTICE, text)
         self.assertNotIn(R.NOTICE_TOOL, text)
+
+    def test_session_frames_keep_reply(self):
+        # ツールの知らせの文を短くしても、ssh の相手・同じ端末のセッションからの枠は今までどおり
+        self.put("mac-a", False, from_role="main")
+        self.put(R.LOCAL, True, from_role="dev-x")
+        far, near = R.inbox_items(self.env, "main")
+        self.assertIn(f'reply="claude-relay send mac-a/main --reply-to {far["id"]} -"', R.frame(far, receivers=["main"]))
+        self.assertIn('reply_note="返事は届かない（送り手の役割 dev-x は relay.receivers に無い）。返事が要るならユーザーに伝える"',
+                      R.frame(near, receivers=["main"]))
+        text, _n = R.compose([far], receivers=["main"])
+        self.assertTrue(text.startswith("claude-relay: 別の端末から 1 通\n\n"), text[:40])
+        self.assertTrue(text.endswith(R.NOTICE))
+        self.assertIn("返事が要るときだけ reply の command で返す", text)  # 人がいないままの往復の歯止め
 
     def test_tool_counted_apart_and_name_reserved(self):
         self.put(R.LOCAL, True, via="claude-waits")
@@ -1222,14 +1235,14 @@ class LocalSend(RelayBase):
         lines = self.srv.conns[0]
         self.assertEqual(lines[0], {"type": "auth", "token": "tok-other"})
         text = lines[1]["message"]["content"]
-        self.assertEqual(text.splitlines()[0], f"claude-relay: この端末の別のセッションから 1 通届いた [relay-wake ids={f.stem}]")
-        self.assertIn("この端末から 1 通", text)
+        self.assertEqual(text, f"claude-relay: この端末の別のセッションから 1 通 [relay-wake ids={f.stem}]。"
+                               "渡っていなければ `claude-relay inbox --deliver --role main`")
         self.assertNotIn("secret-xyz", text)
         self.assertEqual(self.w.cli("b", "status", "sid-other").stdout, "この端末から 1 通")
         # 知らせで始まったターン（受け手の置き場の hook）が本文を渡し、受領を記録する
         out = self.w.hook("b", "UserPromptSubmit", {"session_id": "sid-other", "prompt": text}, **e)
         ctx = out["hookSpecificOutput"]["additionalContext"]
-        self.assertTrue(ctx.startswith("claude-relay: この端末の別のセッションから 1 通のメッセージが届いた。"), ctx[:80])
+        self.assertTrue(ctx.startswith("claude-relay: この端末の別のセッションから 1 通\n\n"), ctx[:80])
         # 送り手の役割 dev-a は relay.receivers に無い（同じ設定ファイル）: 拒否される reply の command は見せない
         self.assertNotIn('reply="', ctx)
         self.assertIn('reply_note="返事は届かない（送り手の役割 dev-a は relay.receivers に無い）。返事が要るならユーザーに伝える"', ctx)
