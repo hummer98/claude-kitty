@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-statusline`: 受け取った `rate_limits` の 7 日・5 時間の % と戻る時刻を `$XDG_STATE_HOME/claude-kitty/usage.json` に書き出す。週の使用量はステータス行の入力にしか来ず、「96% に達したら全セッションを止める」のような判断を外のツール（claude-waits の `--when-cmd` など）ができなかったため。`CLAUDE_CONFIG_DIR` が `~/.claude` 以外のセッションは `usage-<8 桁>.json` に書く（アカウント同士で上書きし合わないため）。止まっているセッションの古い値で上書きしないよう、前のファイルと窓ごとに合わせる（戻る時刻を過ぎた値は採らない、同じ窓なら大きい方）。中身が同じなら 60 秒は書き直さない。設定 `statusline.usage_file`（`false` で書かない）。場所は `claude-statusline --usage-file`（[docs/statusline.md](docs/statusline.md#使用量のファイルusagejson)）。
+- `claude-statusline usage [--over [N]] [--window seven_day|five_hour] [--file PATH]`: usage.json の % がしきい値以上なら終了コード 0、未満・前の窓の値（戻る時刻を過ぎた）・値が無いなら 1、引数の誤りは 2（設定が壊れていても既定で判定する）。stdout に 1 行（`seven_day 96.4% ≥ 96%（戻る 12/02 09:00）`）。claude-waits の `--when-cmd "claude-statusline usage --over"` でそのまま使える。しきい値は設定 `statusline.usage_warn_percent`（既定 96、窓ごとの形も）。
+
 ## [0.9.1] - 2026-11-26
 
 ### 変更

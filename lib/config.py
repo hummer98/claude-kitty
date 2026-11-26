@@ -418,7 +418,8 @@ def load_disk_watch_config(env, path=None):
 # 会話の長さは淡い黄・くすんだ橙にして、週の使用量（鮮やかな橙 208・赤 196）や待受中の名前（208）と見分ける
 DEFAULT_STATUSLINE = {"context": True, "context_thresholds": [200000, 400000], "context_colors": [186, 173],
                       "weekly_roles": ["left"], "weekly_thresholds": [85, 95], "weekly_colors": [208, 196],
-                      "waits": True}
+                      "waits": True, "usage_file": True, "usage_warn_percent": 96}
+USAGE_WINDOWS = ("seven_day", "five_hour")
 
 
 def _color_steps(sl, key, lo, hi, path):
@@ -436,7 +437,7 @@ def _color_steps(sl, key, lo, hi, path):
 
 def load_statusline_config(env, path=None):
     """claude-statusline の設定 {"context", "context_thresholds", "context_colors", "weekly_roles",
-    "weekly_thresholds", "weekly_colors", "waits"} を返す（weekly_roles の "left" は view.left に置き換える）。
+    "weekly_thresholds", "weekly_colors", "waits", "usage_file", "usage_warn_percent"} を返す（weekly_roles の "left" は view.left に置き換える）。
 
       {"statusline": {"weekly_roles": ["left", "ops"], "context_thresholds": [150000, 300000]}}
 
@@ -472,7 +473,20 @@ def load_statusline_config(env, path=None):
     wa = sl.get("waits", True)
     if not isinstance(wa, bool):
         raise ValueError(f"{path} の statusline.waits は true / false: {wa!r}")
-    out.update(context=c, context_thresholds=ct, context_colors=cc, weekly_thresholds=wt, weekly_colors=wc, waits=wa,
+    uf = sl.get("usage_file", True)
+    # 相対パスは Claude Code を起動した場所で変わり、どこに書いたか分からなくなるので、絶対パスか ~ だけ
+    if not (isinstance(uf, bool) or uf is None
+            or (isinstance(uf, str) and (uf.startswith("~/") or os.path.isabs(uf)) and uf.rstrip("/") not in ("~", ""))):
+        raise ValueError(f"{path} の statusline.usage_file は絶対パスか ~/…、true（既定の置き場）、false / null（書かない）: {uf!r}")
+    wp = sl.get("usage_warn_percent", DEFAULT_STATUSLINE["usage_warn_percent"])
+
+    def pct_ok(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= 100
+    # 窓ごとの {"seven_day": 96, "five_hour": 90} は書いた窓だけ変える（書かない窓は既定のまま）
+    if not (pct_ok(wp) or (isinstance(wp, dict) and set(wp) <= set(USAGE_WINDOWS) and all(map(pct_ok, wp.values())))):
+        raise ValueError(f"{path} の statusline.usage_warn_percent は 0〜100 の数か、"
+                         f"{{\"seven_day\": 96, \"five_hour\": 90}} の形: {wp!r}")
+    out.update(usage_warn_percent=dict(wp) if isinstance(wp, dict) else wp, usage_file=uf, context=c, context_thresholds=ct, context_colors=cc, weekly_thresholds=wt, weekly_colors=wc, waits=wa,
                weekly_roles=list(dict.fromkeys(left if x == "left" else x for x in roles)))
     return out
 

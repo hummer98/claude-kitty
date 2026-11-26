@@ -106,7 +106,9 @@
     "weekly_roles": ["left"],
     "weekly_thresholds": [85, 95],
     "weekly_colors": [208, 196],
-    "waits": true
+    "waits": true,
+    "usage_file": true,
+    "usage_warn_percent": 96
   },
   "waits": {
     "enabled": true,

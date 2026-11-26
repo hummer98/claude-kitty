@@ -290,6 +290,322 @@ class Cli(Env):
         self.assertEqual(self.cli(json.dumps(data).encode()), (0, "x"))
 
 
+def limits(seven=None, seven_reset=None, five=None, five_reset=None):
+    rl = {}
+    if seven is not None:
+        rl["seven_day"] = {"used_percentage": seven, "resets_at": seven_reset}
+    if five is not None:
+        rl["five_hour"] = {"used_percentage": five, "resets_at": five_reset}
+    return {"session_name": "x", "rate_limits": rl}
+
+
+class Usage(Env):
+    """usage.json（rate_limits の書き出し）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.env["XDG_STATE_HOME"] = str(self.d / "state")
+        self.path = self.d / "state" / "claude-kitty" / "usage.json"
+
+    def read(self, path=None):
+        return json.loads((path or self.path).read_text())
+
+    def write(self, data, now=NOW, env=None, c=None):
+        return SL.write_usage(data, env or self.env, now, c or conf())
+
+    def test_both_windows(self):
+        self.assertEqual(self.write(limits(96.5, NOW + 3600, 12, NOW + 600)), self.path)
+        got = self.read()
+        iso = got.pop("written_at_iso")
+        self.assertEqual(got, {"seven_day": 96.5, "seven_day_resets_at": NOW + 3600, "five_hour": 12,
+                               "five_hour_resets_at": NOW + 600, "written_at": NOW})
+        from datetime import datetime
+        self.assertEqual(datetime.fromisoformat(iso).timestamp(), NOW)  # オフセット付きのローカル時刻
+        self.assertRegex(iso, r"[+-]\d\d:\d\d$")
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], ["usage.json"])  # 一時ファイルが残らない
+
+    def test_one_window_only(self):
+        self.write(limits(seven=40))  # resets_at が null なら省く
+        self.assertEqual(set(self.read()), {"seven_day", "written_at", "written_at_iso"})
+        self.write(limits(five=7.5, five_reset=NOW + 9), now=NOW + 1)  # 中身が変われば 60 秒以内でも書く
+        # 入力に無い窓（seven_day）は前の値を残す
+        self.assertEqual({k: v for k, v in self.read().items() if k != "written_at_iso"},
+                         {"seven_day": 40, "five_hour": 7.5, "five_hour_resets_at": NOW + 9, "written_at": NOW + 1})
+
+    def test_reset_string_kept_as_is(self):
+        self.write(limits(10, "2027-12-01T00:00:00Z"))
+        self.assertEqual(self.read()["seven_day_resets_at"], "2027-12-01T00:00:00Z")
+
+    def test_absent_or_bad_values_keep_previous_file(self):
+        self.write(limits(50, NOW))
+        before = self.path.read_text()
+        bad = [{}, {"rate_limits": None}, {"rate_limits": "x"}, {"rate_limits": []}, {"rate_limits": {}},
+               limits(-1), limits(five=-1), {"rate_limits": {"seven_day": None, "five_hour": "50"}},
+               {"rate_limits": {"seven_day": {"used_percentage": "50"}}},
+               {"rate_limits": {"seven_day": {"used_percentage": True}}},
+               {"rate_limits": {"seven_day": {"used_percentage": float("nan")}}},
+               {"rate_limits": {"seven_day": [50]}}]
+        for data in bad:
+            with self.subTest(data=data):
+                self.assertIsNone(self.write(data, now=NOW + 3600))
+                self.assertEqual(self.path.read_text(), before)
+
+    def test_bad_items_are_dropped(self):
+        self.write({"rate_limits": {"seven_day": {"used_percentage": 30, "resets_at": -1},
+                                    "five_hour": {"used_percentage": -1, "resets_at": NOW},
+                                    "seven_day_opus": {"used_percentage": 99}}})
+        self.assertEqual(set(self.read()), {"seven_day", "written_at", "written_at_iso"})
+        for r in ("", True, [1], {"a": 1}, float("inf")):
+            with self.subTest(r=r):
+                self.assertNotIn("seven_day_resets_at", SL.usage_record(limits(30, r)))
+
+    def test_same_content_within_60s_not_rewritten(self):
+        data = limits(50, NOW + 86400)
+        self.assertIsNotNone(self.write(data))
+        self.assertIsNone(self.write(data, now=NOW + 59.9))
+        self.assertEqual(self.read()["written_at"], NOW)
+        self.assertIsNotNone(self.write(data, now=NOW + 60))
+        self.assertEqual(self.read()["written_at"], NOW + 60)
+        self.assertIsNotNone(self.write(data, now=NOW + 10))  # 時計が戻った（前の written_at が未来）なら書き直す
+        self.assertEqual(self.read()["written_at"], NOW + 10)
+
+    def test_broken_previous_file_is_replaced(self):
+        self.path.parent.mkdir(parents=True)
+        for old in ("{broken", "[1]", json.dumps({"seven_day": 50, "seven_day_resets_at": NOW, "written_at": "x"})):
+            with self.subTest(old=old):
+                self.path.write_text(old)
+                self.assertEqual(self.write(limits(50, NOW)), self.path)
+                self.assertEqual(self.read()["seven_day"], 50)
+
+    def test_stale_input_does_not_refresh_previous_window(self):
+        # 止まっているセッションは、戻る時刻を過ぎても前の応答の rate_limits を送り続ける
+        self.write(limits(97, NOW + 100), now=NOW)
+        before = self.path.read_text()
+        self.assertIsNone(self.write(limits(97, NOW + 100), now=NOW + 400))
+        self.assertEqual(self.path.read_text(), before)
+        code, line = SL.usage_check(self.path, NOW + 500, "seven_day", 96)
+        self.assertEqual(code, 1)
+        self.assertIn("前の窓の値", line)
+        # 新しい窓の値が来れば、過ぎた窓を置き換える
+        self.write(limits(3, NOW + 7 * 86400), now=NOW + 600)
+        self.assertEqual(self.read()["seven_day"], 3)
+
+    def test_sessions_with_old_and_new_values_do_not_flip(self):
+        r = NOW + 86400
+        self.write(limits(96.5, r, 40, NOW + 3600), now=NOW)       # 動いているセッション
+        self.write(limits(90, r + 2, 10, NOW + 3600), now=NOW + 10)  # 止まっているセッション（同じ窓の古い値。秒のずれも同じ窓）
+        got = self.read()
+        self.assertEqual((got["seven_day"], got["five_hour"]), (96.5, 40))
+        self.assertEqual(SL.usage_check(self.path, NOW + 20, "seven_day", 96)[0], 0)
+        # 窓の中で値は増えるだけ: 新しい大きい値は採る
+        self.write(limits(97, r, None), now=NOW + 20)
+        self.assertEqual((self.read()["seven_day"], self.read()["five_hour"]), (97, 40))
+
+    def test_newer_window_wins_over_older(self):
+        self.write(limits(5, NOW + 7 * 86400), now=NOW)            # 戻ったあとの新しい窓
+        self.write(limits(95, NOW + 2 * 86400), now=NOW + 10)      # 前の窓の古い値（まだ過ぎていない形でも）
+        self.assertEqual(self.read()["seven_day"], 5)
+        self.assertEqual(self.read()["seven_day_resets_at"], NOW + 7 * 86400)
+        # 戻る時刻の分からない入力は比べられないので採る
+        self.write(limits(20), now=NOW + 20)
+        self.assertEqual(set(self.read()) - {"written_at", "written_at_iso"}, {"seven_day"})
+
+    def test_merge_usage_drops_past_windows(self):
+        old = {"seven_day": 99, "seven_day_resets_at": NOW - 1, "five_hour": 50, "five_hour_resets_at": NOW + 9}
+        self.assertEqual(SL.merge_usage(old, {"five_hour": 10, "five_hour_resets_at": NOW + 9}, NOW),
+                         {"five_hour": 50, "five_hour_resets_at": NOW + 9})
+        self.assertIsNone(SL.merge_usage({}, {"seven_day": 1, "seven_day_resets_at": NOW - 1}, NOW))
+
+    def test_disabled_by_config(self):
+        for v in (False, None):
+            with self.subTest(v=v):
+                self.assertIsNone(SL.usage_path(self.env, conf(usage_file=v)))
+                self.assertIsNone(self.write(limits(50), c=conf(usage_file=v)))
+        self.assertFalse(self.path.exists())
+
+    def test_custom_path_and_tilde(self):
+        c = conf(usage_file="~/u/usage.json")
+        self.assertEqual(self.write(limits(50), c=c), self.d / "home" / "u" / "usage.json")
+        p = self.d / "abs.json"
+        self.assertEqual(self.write(limits(50), c=conf(usage_file=str(p))), p)
+        self.assertEqual(SL.usage_path(self.env, conf(usage_file=True)), self.path)
+
+    def test_default_path_without_xdg_state_home(self):
+        env = dict(self.env)
+        del env["XDG_STATE_HOME"]
+        self.assertEqual(SL.usage_path(env, conf()), self.d / "home" / ".local" / "state" / "claude-kitty" / "usage.json")
+
+    def test_claude_config_dir_per_account(self):
+        home_claude = self.d / "home" / ".claude"
+        for cd in (str(home_claude), str(home_claude) + "/", ""):
+            with self.subTest(cd=cd):
+                self.assertEqual(SL.usage_path(dict(self.env, CLAUDE_CONFIG_DIR=cd), conf()), self.path)
+        a = SL.usage_path(dict(self.env, CLAUDE_CONFIG_DIR=str(self.d / "acc-a")), conf())
+        b = SL.usage_path(dict(self.env, CLAUDE_CONFIG_DIR=str(self.d / "acc-b")), conf())
+        b2 = SL.usage_path(dict(self.env, CLAUDE_CONFIG_DIR=str(self.d / "x" / ".." / "acc-b")), conf())
+        self.assertRegex(a.name, r"^usage-[0-9a-f]{8}\.json$")
+        self.assertEqual(a.parent, self.path.parent)
+        self.assertNotEqual(a, b)
+        self.assertEqual(b, b2)
+        self.write(limits(10), env=dict(self.env, CLAUDE_CONFIG_DIR=str(self.d / "acc-a")))
+        self.write(limits(90), env=dict(self.env, CLAUDE_CONFIG_DIR=str(self.d / "acc-b")))
+        self.assertEqual((self.read(a)["seven_day"], self.read(b)["seven_day"]), (10, 90))
+        self.assertFalse(self.path.exists())
+        # 明示のパスは CLAUDE_CONFIG_DIR に関わらずそのまま
+        self.assertEqual(SL.usage_path(dict(self.env, CLAUDE_CONFIG_DIR=str(self.d / "acc-a")),
+                                       conf(usage_file="/u.json")), Path("/u.json"))
+
+    def test_unwritable_place_keeps_line_and_logs_once(self):
+        blocker = self.d / "file"
+        blocker.write_text("")
+        self.cfg.write_text(json.dumps({"statusline": {"usage_file": str(blocker / "usage.json"), "weekly_roles": ["*"]}}))
+        data = json.dumps(limits(50, None)).encode()
+        for _ in range(2):
+            self.assertEqual(self.cli(data), (0, "x | 50%"))
+        log = self.run_dir / "claude-statusline" / "errors.log"
+        lines = log.read_text().splitlines()
+        self.assertEqual(len(lines), 1, lines)  # 同じ失敗を 30 秒ごとに積まない
+        self.assertIn("usage_file", lines[0])
+
+    def test_cli_writes_and_line_unchanged(self):
+        self.cfg.write_text(json.dumps({"statusline": {"weekly_roles": ["*"]}}))
+        data = json.dumps(limits(41.2, None, 3)).encode()
+        self.assertEqual(self.cli(data), (0, "x | 41.2%"))
+        self.assertEqual(self.read()["five_hour"], 3)
+        # 設定が壊れていても既定の置き場に書く
+        self.path.unlink()
+        self.cfg.write_text("{broken")
+        self.assertEqual(self.cli(data), (0, "x | 設定の誤り（claude-kitty doctor）"))
+        self.assertEqual(self.read()["seven_day"], 41.2)
+
+    def test_cli_usage_file_option(self):
+        r = subprocess.run([str(BIN), "--usage-file"], env=self.env, capture_output=True, text=True, timeout=20)
+        self.assertEqual((r.returncode, r.stdout), (0, f"{self.path}\n"))
+        self.cfg.write_text(json.dumps({"statusline": {"usage_file": False}}))
+        r = subprocess.run([str(BIN), "--usage-file"], env=self.env, capture_output=True, text=True, timeout=20)
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+
+    def test_config_values(self):
+        for v, want in ((True, True), (False, False), (None, None), ("~/a.json", "~/a.json"), ("/a/b.json", "/a/b.json")):
+            with self.subTest(v=v):
+                self.cfg.write_text(json.dumps({"statusline": {"usage_file": v}}))
+                self.assertEqual(load_statusline_config(self.env)["usage_file"], want)
+        for v in ("", "rel/usage.json", "~user/a.json", "~", "~/", "/", 1, []):
+            with self.subTest(v=v):
+                self.cfg.write_text(json.dumps({"statusline": {"usage_file": v}}))
+                with self.assertRaises(ValueError):
+                    load_statusline_config(self.env)
+
+
+class UsageCheck(Env):
+    """claude-statusline usage（usage.json を読んで、しきい値以上か）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.env["XDG_STATE_HOME"] = str(self.d / "state")
+        self.path = self.d / "state" / "claude-kitty" / "usage.json"
+        self.path.parent.mkdir(parents=True)
+
+    def put(self, **rec):
+        rec.setdefault("written_at", NOW)
+        self.path.write_text(json.dumps(rec))
+
+    def usage(self, *args, now=NOW + 10):
+        # 子のプロセスでは time.time() が本物の時刻になるので、判定は関数で、CLI は終了コードと出力の形で見る
+        g = {"__file__": str(BIN), "__name__": "claude_statusline"}
+        exec(compile(BIN.read_text(), str(BIN), "exec"), g)
+        return g["usage_main"](list(args), self.env, now)
+
+    def test_over_under_equal(self):
+        self.put(seven_day=96.4, seven_day_resets_at=NOW + 86400)
+        code, out, err = self.usage("--over")
+        self.assertEqual((code, err), (0, ""))
+        self.assertRegex(out, r"^seven_day 96\.4% ≥ 96%（戻る \d\d/\d\d \d\d:\d\d）$")
+        self.assertEqual(self.usage("--over", "96.4")[0], 0)  # ちょうどは「以上」
+        self.assertEqual(self.usage("--over", "96.5")[0], 1)
+        self.assertTrue(self.usage("--over", "96.5")[1].startswith("seven_day 96.4% < 96.5%"))
+
+    def test_default_and_config_threshold(self):
+        self.put(seven_day=95, five_hour=91)
+        self.assertEqual(self.usage(), (1, "seven_day 95% < 96%", ""))  # 既定 96、--over を付けなくても判定する
+        self.assertEqual(self.usage("--window", "five_hour")[0], 1)
+        self.cfg.write_text(json.dumps({"statusline": {"usage_warn_percent": 95}}))
+        self.assertEqual(self.usage("--over")[0], 0)
+        self.assertEqual(self.usage("--window", "five_hour"), (1, "five_hour 91% < 95%", ""))  # 1 つの数は両方の窓に
+        self.cfg.write_text(json.dumps({"statusline": {"usage_warn_percent": {"five_hour": 90}}}))
+        self.assertEqual(self.usage("--window", "five_hour"), (0, "five_hour 91% ≥ 90%", ""))
+        self.assertEqual(self.usage()[0], 1)  # 書かない窓は既定の 96
+        self.assertEqual(self.usage("--over", "50")[0], 0)  # --over N が設定より優先
+
+    def test_stale_previous_window(self):
+        self.put(seven_day=99, seven_day_resets_at=NOW + 5)
+        code, out, _ = self.usage(now=NOW + 6)
+        self.assertEqual(code, 1)
+        self.assertIn("前の窓の値", out)
+        self.assertEqual(self.usage(now=NOW + 5)[0], 0)  # ちょうど戻る時刻はまだ前の窓
+        # 戻ったあとに書かれていても、戻る時刻が過ぎていれば前の窓の値（止まったセッションが古い入力で書き直した）
+        self.put(seven_day=99, seven_day_resets_at=NOW - 100)
+        self.assertEqual(self.usage()[0], 1)
+        self.put(seven_day=99, seven_day_resets_at="2020-01-01T00:00:00Z", written_at=1_500_000_000)
+        self.assertEqual(self.usage()[0], 1)
+
+    def test_missing_or_broken(self):
+        self.put(five_hour=99)
+        self.assertEqual(self.usage(), (1, f"seven_day: 値が無い（{self.path}）", ""))
+        for text in ("{broken", "[]", json.dumps({"seven_day": "99"}), json.dumps({"seven_day": -1})):
+            with self.subTest(text=text):
+                self.path.write_text(text)
+                self.assertEqual(self.usage()[0], 1)
+        self.path.unlink()
+        self.assertEqual(self.usage(), (1, f"seven_day: ファイルが無い（{self.path}）", ""))
+
+    def test_file_option(self):
+        other = self.d / "other.json"
+        other.write_text(json.dumps({"seven_day": 97, "written_at": NOW}))
+        self.assertEqual(self.usage("--file", str(other))[0], 0)
+        self.cfg.write_text(json.dumps({"statusline": {"usage_file": False}}))
+        self.assertEqual(self.usage()[0], 2)
+        self.assertEqual(self.usage("--file", str(other))[0], 0)
+
+    def test_bad_args_and_config(self):
+        self.put(seven_day=99)
+        for args in (("--over", "abc"), ("--over", "101"), ("--over", "-1"), ("--over", "nan"), ("--window", "day"),
+                     ("--window",), ("--file",), ("--x",), ("50",)):
+            with self.subTest(args=args):
+                code, out, err = self.usage(*args)
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("使い方", err)
+        for wp in (101, -1, True, "96", {"seven_days": 96}, {"five_hour": 200}, [96]):
+            with self.subTest(wp=wp):
+                self.cfg.write_text(json.dumps({"statusline": {"usage_warn_percent": wp}}))
+                with self.assertRaises(ValueError):
+                    load_statusline_config(self.env)
+                # 壊れた設定でも既定（96）で判定する（claude-waits は 2 も「成立しない」と扱い、止める待ちが黙って効かなくなるため）
+                code, out, err = self.usage()
+                self.assertEqual((code, out), (0, "seven_day 99% ≥ 96%"))
+                self.assertIn("設定の誤り", err)
+                self.assertEqual(self.usage("--over", "99.5")[0], 1)
+
+    def test_odd_reset_in_hand_made_file(self):
+        for r in ("Infinity", "1e300", "-1e300", '"not a date"'):
+            with self.subTest(r=r):
+                self.path.write_text('{"seven_day": 97, "seven_day_resets_at": %s, "written_at": %d}' % (r, NOW))
+                code, out, _ = self.usage()
+                self.assertIn(code, (0, 1))
+                self.assertTrue(out.startswith("seven_day 97%"), out)
+
+    def test_cli_exit_codes(self):
+        self.put(seven_day=97)
+        def run(*args):
+            r = subprocess.run([str(BIN), "usage", *args], env=self.env, capture_output=True, text=True, timeout=20)
+            return r.returncode, r.stdout
+        self.assertEqual(run("--over"), (0, "seven_day 97% ≥ 96%\n"))
+        self.assertEqual(run("--over", "98"), (1, "seven_day 97% < 98%\n"))
+        self.assertEqual(run("--bad"), (2, ""))
+
+
 class MergeStatusline(unittest.TestCase):
     def setUp(self):
         import merge_statusline as MS

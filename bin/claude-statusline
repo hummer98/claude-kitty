@@ -10,6 +10,13 @@
   週の使用量  rate_limits.seven_day の残り時間と %（設定 statusline.weekly_roles の役割だけ。既定は view.left）。
             85 % 超は橙 208、95 % 超は赤 196
 
+行とは別に、rate_limits の 7 日・5 時間の % と戻る時刻を $XDG_STATE_HOME/claude-kitty/usage.json に書き出す
+（外のツールが jq で読めるように。設定 statusline.usage_file。場所は claude-statusline --usage-file で出る）。
+
+  claude-statusline usage [--over [N]] [--window seven_day|five_hour] [--file PATH]
+    usage.json の % がしきい値（N、無ければ設定 statusline.usage_warn_percent、既定 96）以上なら終了コード 0、
+    未満・前の窓の値・値やファイルが無いなら 1、使い方や設定の誤りは 2。stdout に 1 行（claude-waits の --when-cmd 向け）。
+
 設定は config.json の statusline（docs/config.md）、入れ方は docs/statusline.md。失敗しても何かしら 1 行を出し、
 いつも終了コード 0（ステータス行が空になると、何が起きたか分からないため）。
 """
@@ -40,22 +47,74 @@ def state_info(env, sid):
     return {"record": rec, "colors": colors, "subagent_colors": subc}, bad
 
 
-def run(text, env, now):
+def load_conf(env):
+    """(設定, 壊れていたか)。壊れていれば既定。"""
     from config import DEFAULT_STATUSLINE, load_statusline_config
-    from statusline import build, parse_input
-    data = parse_input(text)
-    bad = False
     try:
-        conf = load_statusline_config(env)
+        return load_statusline_config(env), False
     except ValueError:
         import json
-        conf, bad = json.loads(json.dumps(DEFAULT_STATUSLINE)), True
+        conf = json.loads(json.dumps(DEFAULT_STATUSLINE))
         conf["weekly_roles"] = [(env.get("CLAUDE_VIEW_LEFT") or "main") if x == "left" else x for x in conf["weekly_roles"]]
+        return conf, True
+
+
+def run(text, env, now):
+    from statusline import build, parse_input, write_usage
+    data = parse_input(text)
+    conf, bad = load_conf(env)
     try:
         state, bad_state = state_info(env, data.get("session_id"))
     except Exception:  # noqa: BLE001 — 記録が読めなくても、色と sub を省いて出す
         state, bad_state = None, False
-    return build(data, env, now, conf, state, config_error=bad or bad_state)
+    line = build(data, env, now, conf, state, config_error=bad or bad_state)
+    write_usage(data, env, now, conf)  # 行を作ってから（失敗しても errors.log に残すだけで、行は変えない）
+    return line
+
+
+USAGE_HELP = "使い方: claude-statusline usage [--over [N]] [--window seven_day|five_hour] [--file PATH]"
+
+
+def usage_main(argv, env, now):
+    """claude-statusline usage。(終了コード, stdout, stderr)。"""
+    from config import USAGE_WINDOWS
+    from statusline import usage_check, usage_path, warn_percent
+    over, window, path = None, "seven_day", None
+    i = 0
+    try:
+        while i < len(argv):
+            a = argv[i]
+            if a == "--over":  # 数が続かなければ設定のしきい値
+                if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                    over = float(argv[i + 1])
+                    if not 0 <= over <= 100:
+                        raise ValueError
+                    i += 1
+            elif a == "--window" and i + 1 < len(argv) and argv[i + 1] in USAGE_WINDOWS:
+                window = argv[i + 1]
+                i += 1
+            elif a == "--file" and i + 1 < len(argv) and argv[i + 1]:
+                path = argv[i + 1]
+                i += 1
+            elif a in ("-h", "--help"):
+                return 0, USAGE_HELP, ""
+            else:
+                raise ValueError
+            i += 1
+    except ValueError:
+        return 2, "", f"claude-statusline usage: 引数の誤り: {' '.join(argv)}\n{USAGE_HELP}"
+    # 設定が壊れていても既定（96・既定の置き場）で判定する。claude-waits は 0 以外をみな「成立しない」と扱うので、
+    # 2 で返すと「96 % で止める」が黙って効かなくなる。書く側も壊れた設定では既定の置き場に書く
+    conf, bad = load_conf(env)
+    err = "claude-statusline usage: 設定の誤りのため既定で判定した（claude-kitty doctor）" if bad else ""
+    if over is None:
+        over = warn_percent(conf, window)
+    if path is None:
+        path = usage_path(env, conf)
+        if path is None:
+            return 2, "", "claude-statusline usage: statusline.usage_file が false / null なので読むファイルが無い（--file で渡す）"
+    code, line = usage_check(path, now, window, over)
+    return code, line, err
 
 
 def main(argv=None):
@@ -63,6 +122,24 @@ def main(argv=None):
     if argv == ["--version"]:
         from version import handle_version
         handle_version(argv, "claude-statusline")
+        return 0
+    if argv[:1] == ["usage"]:
+        code, out, err = usage_main(argv[1:], os.environ, time.time())
+        if out:
+            print(out)
+        if err:
+            print(err, file=sys.stderr)
+        return code
+    if argv == ["--usage-file"]:  # 書き出す場所（CLAUDE_CONFIG_DIR ごとに名前が変わりうるので、外のツールの設定に使う）
+        from statusline import usage_path
+        conf, bad = load_conf(os.environ)
+        if bad:
+            print("claude-statusline: 設定の誤りのため既定の置き場（claude-kitty doctor）", file=sys.stderr)
+        path = usage_path(os.environ, conf)
+        if path is None:
+            print("claude-statusline: statusline.usage_file が false / null なので書かない", file=sys.stderr)
+            return 1
+        print(path)
         return 0
     try:
         text = sys.stdin.buffer.read().decode("utf-8", "replace")

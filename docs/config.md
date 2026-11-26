@@ -225,6 +225,8 @@ hook は `tools/install.sh --hooks=lang` と明示したときだけ入ります
 | `weekly_thresholds` | `[85, 95]` | 週の使用量の色を変える %（0〜100、小さい順）。% の整数部がこの数を**超え**たら、同じ位置の色にする（既定: 86 % から橙、96 % から赤） |
 | `weekly_colors` | `[208, 196]` | `weekly_thresholds` の各段の色（0〜255。しきい値と同じ数） |
 | `waits` | `true` | `false` で自分の役割の claude-waits の待ちの数（`wait: N`。0 なら出さない）を出さない（[waits.md](waits.md)） |
+| `usage_file` | `true` | `rate_limits` の 7 日・5 時間の % と戻る時刻を書き出す場所（[statusline.md の「使用量のファイル」](statusline.md#使用量のファイルusagejson)）。`true` は既定の置き場（`$XDG_STATE_HOME/claude-kitty/usage.json`。`CLAUDE_CONFIG_DIR` が `~/.claude` 以外なら `usage-<8 桁>.json`）。絶対パスか `~/…` で変える（どの `CLAUDE_CONFIG_DIR` のセッションもそこに書く）。`false` / `null` で書かない。相対パスと `~` だけは誤り |
+| `usage_warn_percent` | `96` | `claude-statusline usage` が「以上」と判定する %（0〜100）。1 つの数なら両方の窓に、`{"seven_day": 96, "five_hour": 90}` の形なら窓ごと（書かない窓は 96）。`--over N` が優先 |
 
 - 設定が壊れていれば、既定で出したうえで、行の末尾に「設定の誤り（claude-kitty doctor）」と出す（`claude-kitty doctor` の「設定: statusline」が NG）。`state` が壊れていても同じ（名前の色は既定に戻す）。
 - 名前の色は `state.colors.<状態>.name`、`sub: N` の色は `state.subagent_colors.running`（claude-state と同じ設定）。
