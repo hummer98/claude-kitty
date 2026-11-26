@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-27
+
 ### 追加
 
 - `claude-statusline`: 受け取った `rate_limits` の 7 日・5 時間の % と戻る時刻を `$XDG_STATE_HOME/claude-kitty/usage.json` に書き出す。週の使用量はステータス行の入力にしか来ず、「96% に達したら全セッションを止める」のような判断を外のツール（claude-waits の `--when-cmd` など）ができなかったため。`CLAUDE_CONFIG_DIR` が `~/.claude` 以外のセッションは `usage-<8 桁>.json` に書く（アカウント同士で上書きし合わないため）。止まっているセッションの古い値で上書きしないよう、前のファイルと窓ごとに合わせる（戻る時刻を過ぎた値は採らない、同じ窓なら大きい方）。中身が同じなら 60 秒は書き直さない。設定 `statusline.usage_file`（`false` で書かない）。場所は `claude-statusline --usage-file`（[docs/statusline.md](docs/statusline.md#使用量のファイルusagejson)）。
@@ -477,7 +479,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/hummer98/claude-kitty/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/hummer98/claude-kitty/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hummer98/claude-kitty/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/hummer98/claude-kitty/compare/v0.7.9...v0.8.0
