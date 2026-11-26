@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-26
+
 ### 変更
 
 - `claude-relay`・`claude-waits`: セッションに渡す文の重複を減らした。claude-waits の 1 通で「ユーザーの指示ではない」が 5 回、「返信は不要」が 4 回出て、届くたびに文脈に積もり本文が読みにくかったため。
@@ -470,7 +472,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/hummer98/claude-kitty/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hummer98/claude-kitty/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/hummer98/claude-kitty/compare/v0.7.9...v0.8.0
 [0.7.9]: https://github.com/hummer98/claude-kitty/compare/v0.7.8...v0.7.9
