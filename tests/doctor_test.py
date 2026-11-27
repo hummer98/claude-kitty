@@ -111,6 +111,23 @@ class Doctor(unittest.TestCase):
             if os.path.basename(argv[0]) == "systemctl":
                 self.assertIn(argv[2], ("is-enabled", "is-active"))
 
+    def test_records_row(self):
+        name = "記録（後から数える）"
+        row = self.by_name(self.w.ctx())[name]
+        self.assertEqual(row["status"], "ok")
+        self.assertIn(str(self.w.home / ".local/state/claude-kitty"), row["detail"])
+        self.assertIn("guard/blocks.jsonl まだ無い", row["detail"])
+        st = self.w.root / "xs"
+        (st / "claude-kitty" / "state").mkdir(parents=True)
+        (st / "claude-kitty" / "state" / "tasks.jsonl").write_text("{}\n" * 1000)
+        (st / "claude-kitty" / "guard").write_text("not a folder")
+        row = self.by_name(self.w.ctx(XDG_STATE_HOME=str(st)))[name]
+        self.assertEqual(row["status"], "warn")  # 書けない置き場は注意（hook は黙って続ける）
+        self.assertIn("state/tasks.jsonl 2 KB", row["detail"])
+        (st / "claude-kitty" / "state" / "transitions.jsonl").write_text("")
+        self.assertIn("state/transitions.jsonl 0 B", self.by_name(self.w.ctx(XDG_STATE_HOME=str(st)))[name]["detail"])
+        self.assertIn("書けない: guard/blocks.jsonl", row["detail"])
+
     def test_json(self):
         rc, text = self.result(self.w.ctx(), "--json")
         data = json.loads(text)

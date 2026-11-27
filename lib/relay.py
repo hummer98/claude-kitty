@@ -687,6 +687,9 @@ def notify_role(env, role, event, now=None, alive=None):
                 continue
             new["background"] = background_for(new["state"], c["colors"], c["base"])
             save(path, new)
+            if prev.get("state") != new["state"]:
+                import eventlog  # 状態の移りの記録（claude-state の hook と同じ形。docs/records.md）
+                eventlog.note_transition(env, sid, prev.get("role"), prev.get("state"), new["state"], new.get("reason"), now)
         kit = Kitten(kitten_path(env), sock, 2.0)
         if prev.get("state") != new["state"]:
             kit("set-colors", "--match", f"id:{wid}", f"background={new['background']}")

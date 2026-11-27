@@ -34,6 +34,37 @@ def state_dir(env=None):
     return (Path(base) if base else Path("/tmp") / f"claude-kitty-{os.getuid()}") / "claude-state"
 
 
+def _note_idle(e, now, env=None):
+    """done → idle の移りを $XDG_STATE_HOME/claude-kitty/state/transitions.jsonl に 1 行（lib/eventlog.py と同じ形と
+    置き場。kitty の中では lib を読めないので写して持つ）。kitty を止めないよう、何があっても黙る。"""
+    try:
+        env = os.environ if env is None else env
+        if env.get("XDG_STATE_HOME"):
+            d = Path(env["XDG_STATE_HOME"]) / "claude-kitty" / "state"
+        elif env.get("HOME"):
+            d = Path(env["HOME"]) / ".local" / "state" / "claude-kitty" / "state"
+        else:
+            return
+        if not d.is_dir():
+            d.parent.mkdir(mode=0o700, parents=True, exist_ok=True)  # claude-kitty（その上は umask のまま）
+            d.mkdir(mode=0o700, exist_ok=True)
+        f = d / "transitions.jsonl"
+        try:
+            if f.stat().st_size > 1024 * 1024:
+                os.replace(f, f.with_name(f.name + ".1"))
+        except FileNotFoundError:
+            pass
+        from datetime import datetime
+        role = e.get("role") if isinstance(e.get("role"), str) and e.get("role") else None
+        line = json.dumps({"at": datetime.fromtimestamp(now).astimezone().isoformat(timespec="seconds"), "role": role,
+                           "sid": e.get("session_id"), "from": "done", "to": "idle"}, ensure_ascii=False)
+        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as out:
+            out.write(line + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _load(p):
     try:
         data = json.loads(Path(p).read_text())
@@ -42,8 +73,9 @@ def _load(p):
     return data if isinstance(data, dict) else None
 
 
-def mark_seen(d, wid, sock, now=None):
+def mark_seen(d, wid, sock, now=None, env=None):
     """そのペイン（wid, sock）の done の記録を idle にする。[(session id, 戻す背景色 or None)] を返す。
+    idle にしたものは状態の移りの記録に残す（env は置き場を決める環境。既定は os.environ）。
 
     hook と同時に書かないよう、セッションごとのロックを待たずに取る（取れなければ今回は見送る）。
     """
@@ -78,6 +110,7 @@ def mark_seen(d, wid, sock, now=None):
                 os.replace(tmp, p)
             except OSError:
                 continue
+            _note_idle(dict(e, session_id=e.get("session_id") or p.stem), now, env)
             bg = e.get("idle_background")
             out.append((e.get("session_id") or p.stem, bg if isinstance(bg, str) else None))
         finally:

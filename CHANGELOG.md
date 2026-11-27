@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### 追加
+
+- 後から数える記録（`$XDG_STATE_HOME/claude-kitty/` の jsonl。既定 `~/.local/state/claude-kitty/`、フォルダ 0700・ファイル 0600、1 MB で `.1` に回す）。ガードに止められた回数・人の待ちと担当の稼働の割合・届いたメッセージの数・タスクリストの札の動きが、会話の記録からは下限しか拾えなかったため。書けなくても hook は黙って続ける。形と数え方は [docs/records.md](docs/records.md)。
+  - `claude-guard`: 止めた（deny した）呼び出しを `guard/blocks.jsonl` に（ガードの名前・`path` / `command` / `loop`・コマンドの頭 200 字・役割・セッション ID）。
+  - `claude-state`: 状態の移り（`working`・`waiting`・`done`・`idle`・`end`。`waiting` は理由も）を `state/transitions.jsonl` に。同じ状態への移りは書かない。claude-relay の印 `relay` の付け外しも書く。`done` → `idle` は kitty の watcher と `claude-state watch` が書く（kitty の watcher は kitty が設定を読み直すまで前の版のまま）。
+  - `claude-state`（UserPromptSubmit）: ほかのセッションからのメッセージ（`<cross-session-message>`・claude-relay の印）を `state/messages.jsonl` に（送り元・`cross-session` / `relay`・バイト数。`relay` は通数も）。作業中のターンの途中に届いたものは hook を通らないことがあり、数は下限。
+  - `claude-state`（PostToolUse）: `TaskCreate`・`TaskUpdate` を `state/tasks.jsonl` に（札の id・題の頭 120 字・状態・`create` / `update`）。hook は今の PostToolUse（`*`）のままで、入れ直しは要らない。
+- `claude-kitty doctor`: 「記録（後から数える）」の行（置き場とファイルごとの大きさ。書けない置き場は注意）。
+
 ## [0.9.2] - 2026-11-27
 
 ### 追加

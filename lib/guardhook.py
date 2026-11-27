@@ -1948,6 +1948,7 @@ def find_reasons(guard, tool, tool_input, cwd, env, session=None, owner_ok=True,
 # この形だけは常に止める（設定 guard_hook.wait_loop_check: false で切れる）。
 
 WAIT_LOOP_KEY = "wait_loop_check"
+WAIT_LOOP_NAME = "wait-loop"  # 記録（blocks.jsonl）の guard の名前。ガードの設定とは別の、常に働く判定
 # 値をとる pgrep のオプション（procps-ng と BSD）。パターンの位置を取り違えないため
 PGREP_VALUE_SHORT = set("dgGPstuUFrO")   # -O は procps-ng 4 の --older <秒>
 PGREP_VALUE_LONG = {"--delimiter", "--pgroup", "--group", "--parent", "--session", "--terminal", "--euid", "--uid",
@@ -2156,8 +2157,10 @@ def reason_text(guard, condition, flag_reason, reasons):
     return f"{TAG} {text}"
 
 
-def evaluate(data, env, probe=Probe, now=None, path=None, assume=False):
-    """hook の入力（dict）から、止める理由（文字列）か None（通す）を返す。"""
+def evaluate(data, env, probe=Probe, now=None, path=None, assume=False, blocks=None):
+    """hook の入力（dict）から、止める理由（文字列）か None（通す）を返す。
+
+    blocks（リスト）を渡せば、止めたものごとに (ガードの名前, "path" | "command" | "loop") を足す（記録用）。"""
     tool = data.get("tool_name")
     tool_input = data.get("tool_input")
     if not isinstance(tool, str) or not isinstance(tool_input, dict):
@@ -2171,6 +2174,8 @@ def evaluate(data, env, probe=Probe, now=None, path=None, assume=False):
         pats = self_match_waits(cmd) if enabled and PLATFORM != "darwin" else []
         if pats:
             texts.append(wait_loop_text(pats, cmd))
+            if blocks is not None:
+                blocks.append((WAIT_LOOP_NAME, "loop"))
     guards, problems = load_guard_config(env, path)
     for p in problems:
         log_error(env, p, once=True)
@@ -2193,7 +2198,44 @@ def evaluate(data, env, probe=Probe, now=None, path=None, assume=False):
         if not condition:
             continue
         texts.append(reason_text(g, condition, flag_reason, reasons))
+        if blocks is not None:
+            blocks.append((g["name"], block_kind(g, tool, tool_input, cwd, env, session, flag, now)))
     return "\n".join(texts) if texts else None
+
+
+def block_kind(guard, tool, tool_input, cwd, env, session, flag, now):
+    """止めた理由の種類: パスへの書き込みを含めば "path"、コマンドの形だけなら "command"。
+
+    止めたときにだけ、commands を外したガードで読み直して決める（ふだんの判定を重くしないため）。"""
+    if tool != "Bash":
+        return "path"
+    try:
+        only_paths = dict(guard, commands=[])
+        return "path" if find_reasons(only_paths, tool, tool_input, cwd, env, session, owner_ok=not flag, now=now) else "command"
+    except Exception:  # noqa: BLE001  記録のための読み直しで止める判定を変えない
+        return "command"
+
+
+def log_blocks(data, env, blocks, now=None):
+    """止めたものを $XDG_STATE_HOME/claude-kitty/guard/blocks.jsonl に 1 件 1 行で残す（lib/eventlog.py）。失敗しても黙る。"""
+    try:
+        import eventlog
+        tool = data.get("tool_name")
+        ti = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+        if tool == "Bash":
+            what = ti.get("command") if isinstance(ti.get("command"), str) else ""
+        else:
+            p = ti.get(FILE_TOOLS.get(tool, "file_path")) or ti.get("file_path") or ti.get("notebook_path")
+            what = f"{tool} {p}" if isinstance(p, str) else str(tool)
+        sid = data.get("session_id") if isinstance(data.get("session_id"), str) else None
+        role = session_role(env, sid)
+        t = time.time() if now is None else now
+        for name, kind in blocks:
+            eventlog.append(env, "guard-block", {"at": eventlog.local_time(t), "ev": "guard-block", "role": role,
+                                                 "sid": sid, "guard": name, "kind": kind,
+                                                 "cmd": eventlog.clip(what, eventlog.CMD_MAX)})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def decide(stdin_text, env, probe=Probe, now=None, path=None):
@@ -2207,9 +2249,11 @@ def decide(stdin_text, env, probe=Probe, now=None, path=None):
         return None
     if data.get("hook_event_name", "PreToolUse") != "PreToolUse":
         return None
-    reason = evaluate(data, env, probe, now, path)
+    blocks = []
+    reason = evaluate(data, env, probe, now, path, blocks=blocks)
     if not reason:
         return None
+    log_blocks(data, env, blocks, now)
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                    "permissionDecisionReason": reason}}
 

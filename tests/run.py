@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 """最小のテスト。python3 tests/run.py"""
+import atexit
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+# hook（claude-state・claude-guard・kitty の watcher）は後から数える記録を $XDG_STATE_HOME/claude-kitty に書く
+# （lib/eventlog.py）。os.environ を写して hook を動かすテストが、手元の本物の置き場に書かないよう、全体を一時の置き場に向ける
+_STATE_HOME = tempfile.mkdtemp(prefix="claude-kitty-test-state-")
+os.environ["XDG_STATE_HOME"] = _STATE_HOME
+atexit.register(shutil.rmtree, _STATE_HOME, True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from geometry import (fit_correction, others_area_fraction, pane_fraction, right_area_fraction,  # noqa: E402
@@ -2651,6 +2661,80 @@ class ClaudeStateCli(unittest.TestCase):
         self.hook("SessionEnd")
         self.assertIsNone(self.state())
 
+    # ---- 後から数える記録（lib/eventlog.py。置き場は $XDG_STATE_HOME/claude-kitty/state） ----
+    def records(self, name):
+        p = self.d / "xstate" / "claude-kitty" / "state" / name
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+    def rhook(self, event, payload=None, raw=None, **env):
+        return self.hook(event, payload, raw, XDG_STATE_HOME=str(self.d / "xstate"), **env)
+
+    def test_records_transitions_once_per_change(self):
+        self.rhook("UserPromptSubmit")
+        self.rhook("PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "ls"}})   # working のまま
+        self.rhook("PostToolUse", {"tool_name": "Bash", "tool_input": {"command": "ls"}})
+        self.rhook("Notification", {"notification_type": "permission_prompt"})
+        self.rhook("PostToolUse", {"tool_use_id": "x"})
+        self.rhook("Stop")
+        self.rhook("SessionEnd")
+        recs = self.records("transitions.jsonl")
+        self.assertEqual([(r["from"], r["to"], r.get("reason")) for r in recs],
+                         [(None, "working", None), ("working", "waiting", "permission"), ("waiting", "working", None),
+                          ("working", "done", None), ("done", "end", None)])
+        self.assertEqual({(r["role"], r["sid"]) for r in recs}, {("dev-b", self.SID)})
+        self.assertRegex(recs[0]["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d$")
+
+    def test_records_end_for_the_replaced_session_in_the_same_pane(self):
+        self.rhook("UserPromptSubmit")
+        self.rhook("SessionStart", {"session_id": "sess-2", "source": "clear"})  # /clear: 同じペインに新しいセッション
+        recs = self.records("transitions.jsonl")
+        self.assertIn((self.SID, "working", "end"), [(r["sid"], r["from"], r["to"]) for r in recs])
+        self.assertEqual(recs[-1]["sid"], "sess-2")
+
+    def test_records_no_transition_outside_kitty_or_for_unchanged(self):
+        self.rhook("UserPromptSubmit", KITTY_WINDOW_ID="")
+        self.assertEqual(self.records("transitions.jsonl"), [])
+        self.rhook("UserPromptSubmit")
+        self.rhook("UserPromptSubmit")
+        self.assertEqual(len(self.records("transitions.jsonl")), 1)
+
+    def test_records_messages_from_other_sessions(self):
+        self.rhook("UserPromptSubmit", {"prompt": "人の入力"})
+        self.assertEqual(self.records("messages.jsonl"), [])
+        self.rhook("UserPromptSubmit", {"prompt": '<cross-session-message from="x" from-name="dev-c">頼みます</cross-session-message>'})
+        self.rhook("UserPromptSubmit", {"prompt": "claude-relay: dev-d から 1 通 [relay-wake ids=a1]。"})
+        recs = self.records("messages.jsonl")
+        self.assertEqual([(r["ev"], r["from"], r["via"], r["role"]) for r in recs],
+                         [("msg-in", "dev-c", "cross-session", "dev-b"), ("msg-in", "dev-d", "relay", "dev-b")])
+        self.assertEqual(recs[0]["bytes"], len("頼みます".encode()))
+
+    def test_records_task_cards(self):
+        self.rhook("UserPromptSubmit")
+        self.rhook("PostToolUse", {"tool_name": "TaskCreate", "tool_input": {"subject": "🧑 題の案 A/B"},
+                                   "tool_response": {"task": {"id": "1", "subject": "🧑 題の案 A/B"}}})
+        self.rhook("PostToolUse", {"tool_name": "TaskUpdate", "tool_input": {"taskId": "1", "status": "completed"},
+                                   "tool_response": {"success": True, "taskId": "1",
+                                                     "statusChange": {"from": "pending", "to": "completed"}},
+                                   "agent_id": "ag-1"})
+        self.rhook("PostToolUse", {"tool_name": "TaskUpdate", "tool_input": {"taskId": "2"}, "tool_response": {"success": False}})
+        self.rhook("PostToolUseFailure", {"tool_name": "TaskCreate", "tool_input": {"subject": "x"}})
+        recs = self.records("tasks.jsonl")
+        self.assertEqual([(r["ev"], r["op"], r["id"], r["subject"], r["status"], r["role"]) for r in recs],
+                         [("task", "create", "1", "🧑 題の案 A/B", "pending", "dev-b"),
+                          ("task", "update", "1", None, "completed", "dev-b")])
+        self.assertEqual(recs[1]["agent"], "ag-1")
+        self.assertNotIn("agent", recs[0])
+
+    def test_records_unwritable_or_broken_stay_silent(self):
+        (self.d / "xstate").write_text("not a folder")
+        for ev, payload in (("UserPromptSubmit", {"prompt": '<cross-session-message from="x">a</cross-session-message>'}),
+                            ("PostToolUse", {"tool_name": "TaskCreate", "tool_input": {"subject": "s"}}),
+                            ("Stop", None)):
+            self.rhook(ev, payload)  # exit 0・stdout 空は hook() が確かめる
+        self.assertEqual(self.state()["state"], "done")  # 色の記録は書ける
+        self.rhook("PostToolUse", raw="{broken")
+        self.rhook("UserPromptSubmit", raw=json.dumps({"session_id": self.SID, "prompt": 5}))
+
     def test_stop_on_viewed_pane_is_idle(self):
         self.hook("UserPromptSubmit", KITTY_WINDOW_ID="1")  # main タブの入力先、OS 窓も前面
         self.hook("Stop", KITTY_WINDOW_ID="1")
@@ -3893,6 +3977,7 @@ SIDE_TESTS = {
     "statusline_test": "Statusline",
     "prompt_suffix_test": "PromptSuffix",
     "waits_test": "Waits",
+    "records_test": "Records",
 }
 
 

@@ -49,9 +49,9 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | `bin/claude-view` | 統括用。ペインを役割名で並べ替える（等分割にそろえる） | 「保護する窓が前面か」の確認だけ KWin（macOS は `lsappinfo`） |
 | `bin/claude-wait` | 別の場所で動いている同じセッションの終了を待ってから resume する | プロセスの情報（`lib/proc.py`。Linux は `/proc`、macOS は `sysctl`） |
 | `bin/claude-browser` | ペインごとの Chrome を、そのペインに重ねる | 窓の配置は KWin（macOS は試験的に CoreGraphics と CDP）。Chrome はネイティブでも Flatpak でもよい |
-| `bin/claude-state` | セッションの状態（作業中・待受中・完了（未読）・idle）をペインの背景色とステータス行の色で見せる（Claude Code の hook から呼ぶ）。`claude-state watch` は kitty の外の常駐で、見た完了のペインを idle に戻し、消えた色を塗り直す（[下の節](#claude-state状態の色)） | 入れ子の claude の判定にプロセスの情報（`lib/proc.py`） |
+| `bin/claude-state` | セッションの状態（作業中・待受中・完了（未読）・idle）をペインの背景色とステータス行の色で見せる（Claude Code の hook から呼ぶ）。`claude-state watch` は kitty の外の常駐で、見た完了のペインを idle に戻し、消えた色を塗り直す（[下の節](#claude-state状態の色)）。状態の移り・届いたメッセージ・タスクリストの札を後から数える記録に残す（[docs/records.md](docs/records.md)） | 入れ子の claude の判定にプロセスの情報（`lib/proc.py`） |
 | `bin/claude-show` | 見てほしい HTML（他のペインの場所に縦 100%）・画像（自分のペインの上）を開く（[下の節](#claude-show見てほしいものを開く)） | 保護する窓の確認だけ KWin（macOS は `lsappinfo`）。kitty の外では `xdg-open`（macOS は `open`） |
-| `bin/claude-guard` | PreToolUse hook。名前の付いたガードが働いている間、決めたパスへの書き込みと決めたコマンドを止める。until / while のループの中の `pgrep -f`（待つシェル自身に一致して終わらない）は常に止めて `claude-waitfor` を案内する（[docs/guard-hook.md](docs/guard-hook.md)） | 働く条件の `pgrep` |
+| `bin/claude-guard` | PreToolUse hook。名前の付いたガードが働いている間、決めたパスへの書き込みと決めたコマンドを止める。until / while のループの中の `pgrep -f`（待つシェル自身に一致して終わらない）は常に止めて `claude-waitfor` を案内する。止めたものは記録に残す（[docs/guard-hook.md](docs/guard-hook.md)、[docs/records.md](docs/records.md)） | 働く条件の `pgrep` |
 | `bin/claude-lang-check` | Stop hook で最後の返答の言語を調べ、設定の `lang.language` で決めた言語でなければ書き直させる（決めていなければ何もしない。[docs/lang-check.md](docs/lang-check.md)） | なし |
 | `bin/claude-session-stats` | 会話の記録から、言い直し・英語の返答・返答の長さなどを期間ごとに数えて Markdown に書く（[docs/session-stats.md](docs/session-stats.md)） | なし |
 | `bin/claude-relay` | 互いに承認した端末の Claude Code セッションの間で、LAN の中の ssh でメッセージを渡す（受け取りは統括だけ。[下の節](#claude-relay端末をまたぐ連絡)、[docs/relay.md](docs/relay.md)） | 受け取る側の sshd（macOS はリモートログイン） |

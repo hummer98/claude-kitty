@@ -141,6 +141,8 @@ def _apply(event, payload, env, now, d, sid, wid, sock):
     was_waiting = (prev or {}).get("state") == "waiting"
     if new["state"] == "end":
         path.unlink(missing_ok=True)
+        if prev:
+            note_transition(env, sid, prev.get("role"), prev.get("state"), "end", None, now)
         kit("set-colors", "--match", f"id:{wid}", f"background={c['base']}")
         if was_waiting:
             with state_lock(d) as got:
@@ -171,7 +173,10 @@ def _apply(event, payload, env, now, d, sid, wid, sock):
         if e.get("session_id") != sid and e.get("window") == wid and e.get("socket") == sock:
             stale_waiting |= e.get("state") == "waiting"
             state_file(d, e["session_id"]).unlink(missing_ok=True)
+            note_transition(env, e["session_id"], e.get("role"), e.get("state"), "end", None, now)  # /clear の前のセッション
     save(path, new)
+    if (prev or {}).get("state") != new["state"]:
+        note_transition(env, sid, new.get("role"), (prev or {}).get("state"), new["state"], new.get("reason"), now)
     # 別のペインで resume した: 前のペインを使う記録がもう無ければ、前のペインの色を元に戻す
     pw = (prev or {}).get("window")
     if (isinstance(pw, int) and pw != wid and prev.get("socket") == sock
@@ -200,7 +205,61 @@ def cmd_hook(event, env):
             note_presence(payload, env, result)
         except BaseException as e:  # noqa: BLE001
             log_error(env, event, f"presence: {type(e).__name__}: {e}")
+    try:
+        note_records(event, payload, env, result)
+    except BaseException as e:  # noqa: BLE001
+        log_error(env, event, f"records: {type(e).__name__}: {e}")
     return 0
+
+
+def note_transition(env, sid, role, before, after, reason, now):
+    """状態の移りを state/transitions.jsonl に 1 行（lib/eventlog.py。人の待ち・担当の稼働の割合を後から数えるため）。"""
+    import eventlog
+    eventlog.note_transition(env, sid, role, before, after, reason, now)
+
+
+def note_records(event, payload, env, result, now=None):
+    """届いたメッセージ（UserPromptSubmit）とタスクリストの札（PostToolUse の TaskCreate / TaskUpdate）を記録に残す。
+
+    ほとんどの呼び出しは、安い前置きの判定（prompt の印・ツールの名前）で何も読まずに帰る。何を書いたかの数を返す（テスト用）。"""
+    if result in ("off", "nested claude"):
+        return 0
+    if event == "UserPromptSubmit":
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str) or ("<cross-session-message" not in prompt and "[relay-wake ids=" not in prompt):
+            return 0
+        import eventlog
+        items = eventlog.message_entries(prompt)
+        if not items:
+            return 0
+        sid = payload.get("session_id") if valid_session_id(payload.get("session_id")) else None
+        at = eventlog.local_time(time.time() if now is None else now)
+        role = record_role(env, sid)
+        for m in items:
+            eventlog.append(env, "msg-in", {"at": at, "ev": "msg-in", "role": role, "sid": sid, **m})
+        return len(items)
+    if event == "PostToolUse" and payload.get("tool_name") in ("TaskCreate", "TaskUpdate"):
+        import eventlog
+        item = eventlog.task_entry(payload)
+        if item is None:
+            return 0
+        sid = payload.get("session_id") if valid_session_id(payload.get("session_id")) else None
+        entry = {"at": eventlog.local_time(time.time() if now is None else now), "ev": "task",
+                 "role": record_role(env, sid), "sid": sid, **item}
+        if isinstance(payload.get("agent_id"), str) and payload["agent_id"]:
+            entry["agent"] = payload["agent_id"]  # サブエージェントが付けた札
+        eventlog.append(env, "task", entry)
+        return 1
+    return 0
+
+
+def record_role(env, sid):
+    """そのセッションの役割（claude-state の記録から。kitty には聞かない）。分からなければ None。"""
+    if not sid:
+        return None
+    e = load(state_file(state_dir(env), sid))
+    role = (e or {}).get("role")
+    return role if isinstance(role, str) and role else None
 
 
 def note_presence(payload, env, result, now=None):

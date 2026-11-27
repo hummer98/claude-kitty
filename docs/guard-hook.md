@@ -7,6 +7,7 @@
 - 誤って止めない方に倒す。読めない入力・設定の誤り・hook の中の例外では止めずに通し、`$XDG_RUNTIME_DIR/claude-guard/errors.log` にだけ残す。設定の誤りで保護が外れたことは `claude-guard status` の「問題:」の行で分かる（そのとき exit 1）。
 - 止める候補が無いツール呼び出し（ほとんど）では、働く条件を調べない（pgrep も呼ばない）。許可があるときも調べない。
 - 例外として、until / while のループの中の `pgrep -f`（待つシェル自身に一致して終わらない形）だけは、ガードが無くても常に止める（[下](#待つシェル自身に一致する-pgrep--f-のループ)）。
+- 止めたとき（deny したとき）は、1 件 1 行を `$XDG_STATE_HOME/claude-kitty/guard/blocks.jsonl` に残す（止めた回数を後から数えるため。[records.md](records.md#guardblocksjsonlガードの止め)）。`claude-guard check` は書かない。
 - claude-view の `view.guard`（前面にあったら画面を並べ替えない窓）とは別のもの。こちらはツール呼び出しを止める。
 
 ## ガード

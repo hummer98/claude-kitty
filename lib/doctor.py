@@ -899,8 +899,39 @@ def check_bg_shells(ctx, rep):
         rep.ok("背景のシェル", f"{bgshell.LONG_SECONDS // 3600} 時間を超えて続くものは無い（セッション {len(sessions)} 件）")
 
 
+# ---- 後から数える記録（lib/eventlog.py） ------------------------------------------------
+
+def check_records(ctx, rep):
+    """hook が書く記録の置き場と、ファイルごとの大きさ（読むだけ。無いファイルは「まだ無い」）。"""
+    import eventlog
+    r = eventlog.root(ctx.env)
+    name = "記録（後から数える）"
+    if r is None:
+        rep.skip(name, "HOME も XDG_STATE_HOME も無いので書かない")
+        return
+    parts, bad = [], []
+    for kind, (sub, fname) in eventlog.FILES.items():
+        p = r / sub / fname
+        if p.is_file():
+            size = p.stat().st_size
+            parts.append(f"{sub}/{fname} " + (f"{size // 1024} KB" if size >= 1024 else f"{size} B"))
+        elif p.exists() or (p.parent.exists() and not p.parent.is_dir()):
+            bad.append(f"{sub}/{fname}")
+        else:
+            parts.append(f"{sub}/{fname} まだ無い")
+    unwritable = [d for d in (r, r / "guard", r / "state") if d.is_dir() and not os.access(d, os.W_OK | os.X_OK)]
+    if r.exists() and not r.is_dir():
+        bad.append(str(r))
+    detail = f"{r}: " + "・".join(parts) + "（docs/records.md）"
+    if bad or unwritable:
+        rep.warn(name, detail + "。書けない: " + ", ".join(bad + [str(d) for d in unwritable]),
+                 "その場所のファイルかフォルダを退けるか、書けるようにする（hook は書けなくても黙って続ける）")
+    else:
+        rep.ok(name, detail)
+
+
 CHECKS = [check_kitty, check_kitty_conf, check_runtimes, check_links, check_hooks, check_statusline, check_systemd, check_config, check_desktop,
-          check_relay, check_model_policy, check_waits, check_disk, check_bg_shells]
+          check_relay, check_model_policy, check_waits, check_disk, check_bg_shells, check_records]
 MARK = {"ok": "OK  ", "ng": "NG  ", "warn": "注意", "skip": "--  "}
 
 
