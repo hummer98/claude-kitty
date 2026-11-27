@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-27
+
 ### 追加
 
 - 後から数える記録（`$XDG_STATE_HOME/claude-kitty/` の jsonl。既定 `~/.local/state/claude-kitty/`、フォルダ 0700・ファイル 0600、1 MB で `.1` に回す）。ガードに止められた回数・人の待ちと担当の稼働の割合・届いたメッセージの数・タスクリストの札の動きが、会話の記録からは下限しか拾えなかったため。書けなくても hook は黙って続ける。形と数え方は [docs/records.md](docs/records.md)。
@@ -488,7 +490,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/hummer98/claude-kitty/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/hummer98/claude-kitty/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/hummer98/claude-kitty/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hummer98/claude-kitty/compare/v0.8.0...v0.9.0
