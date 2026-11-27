@@ -14,6 +14,10 @@
 - `claude-guard`: `allow_owner` の項目で止めたとき、コマンドに名乗り（`option` / `env`）が無く、セッションの役割が起動の記録の `owner` か共同作業の `with` に入っていれば、断りの文に「起動の記録の owner は X（このセッションの役割）です。サブコマンドより前に `--owner X` を付けるか、環境変数 …=X を前に付ければ通ります。」を足す。起動した担当が自分のものに名乗りを付け忘れて止まったとき、断りの文に理由が出ず、すぐに気づけなかったため。役割が違う・分からないセッションには出さない（docs/guard-hook.md の allow_owner）。
 - `kitty/claude-kitty.conf`・`claude-kitty-macos.conf`・`kitty/kitty.conf`: `enabled_layouts` に `tall:bias=60;full_size=2` を足した（`full_size` は `enabled_layouts` に書いたときだけ効く）。`kitty/kitty.conf` には map の例も。
 
+### 修正
+
+- `claude-guard`: `git worktree` を、場所（cwd・`-C`）が保護したフォルダというだけで止めていた。保護したフォルダの中のリポジトリから外へ worktree を作る `cd <保護>/repo && git worktree add -b wt/x ~/elsewhere/x <commit>` も止まり、「保護の外の worktree での開発は止めない」という使い方と食い違っていた。守るのは作業ファイルで、cwd の .git（objects・refs・worktrees/）に書くのは外の worktree からの `git commit` と同じなので、行き先だけで見る: `add` の行き先、`move` の元と行き先、`remove` の対象、`repair` に渡したパスのどれかが保護したフォルダなら止める（相対は cwd と `-C` から）。`remove` / `move` の `<worktree>` をパスの末尾（`remove wt`）で渡したときは、リポジトリの `.git/worktrees/*/gitdir` に登録した場所と照らす（cwd・`-C`・`--git-dir`・`--work-tree` から見つかるリポジトリを全部合わせる。前は cwd からの相対に解くだけで、外の cwd から保護の中の worktree を名前で消すのを通していた。照らせなければ名前の形は止める）。`prune` / `lock` / `unlock` / `list` と引数なしの `repair` は通す。`add` の `-b` / `-B` / `--reason` の値（`-bwt/x`・`--reason=r` の形も）は行き先と読まない（`wt/x` が cwd からの相対で保護の中に見えて止めていたため）。`add` の 2 つ目の引数（commit-ish）は、`/`・`~`・`.` で始まるパスの形のときだけ行き先として見る。行き先が無い `add` は今までどおり場所で止める。
+
 ### 上げるときに手で行うこと
 
 - 使うなら kitty.conf に 2 行を書く（`kitty/claude-kitty.conf` を include していれば 1 行目は入っているので、map だけ）:

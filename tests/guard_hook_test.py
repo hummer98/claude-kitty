@@ -331,12 +331,13 @@ class ShellForms(Base):
         self.assertIsNotNone(self.bash(f"git -C {m} init"))
         self.assertIsNotNone(self.bash(f"git -C ~/dev clone ~/dev/src ../app/shared/files/x"))
 
-    def test_git_worktree_prune_lock_unlock_in_protected_cwd(self):
+    def test_git_worktree_prune_lock_unlock_pass(self):
+        # prune / lock / unlock / list は .git の管理情報だけを書く。守るのは作業ファイルなので、cwd が保護した所でも通す
         m = self.shared_dir
-        for c in ("prune", "prune -n", "lock ~/dev/wt", "lock --reason r ~/dev/wt", "unlock ~/dev/wt"):
-            self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree {c}"), c)
+        for c in ("prune", "prune -n", "prune --expire now", "lock ~/dev/wt", "lock --reason r ~/dev/wt",
+                  f"lock {m}/wt", f"unlock {m}/wt", "unlock ~/dev/wt", "list --porcelain"):
+            self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree {c}"), c)
             self.assertIsNone(self.bash(f"cd ~/dev/m1 && git worktree {c}"), c)
-        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree list --porcelain"))
 
     def test_git_archive_format_patch_output_forms(self):
         m = self.shared_dir
@@ -357,12 +358,97 @@ class ShellForms(Base):
 
     def test_git_worktree_branch_options(self):
         m = self.shared_dir
-        for opts in ("-b feat", "-B feat", "--orphan feat", "--lock --reason r", "-f --detach"):
+        for opts in ("-b feat", "-B feat", "--orphan -b feat", "--orphan", "--lock --reason r", "-f --detach",
+                     "-bfeat", "-qb feat", "--reason=r --lock", "--rea r --lock"):
             self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree add {opts} {m}/wt"), opts)
-            self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree add {opts} ~/dev/wt"), opts)   # cwd が保護した所
+            self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree add {opts} ~/dev/wt"), opts)   # 場所だけでは止めない
             self.assertIsNone(self.bash(f"cd ~/dev/m1 && git worktree add {opts} ~/dev/wt"), opts)
         self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree repair {m}/wt"))
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree repair ~/dev/wt {m}/wt"))
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree repair ~/dev/wt"))
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree repair"))     # 引数なしは worktree の .git ファイルだけ
         self.assertIsNone(self.bash("cd ~/dev/m1 && git worktree list"))
+
+    def test_git_worktree_add_from_protected_repo_to_outside(self):
+        # 回帰: cwd が保護した所というだけで、外へ worktree を作るのを止めていた（-b wt/x は cwd からの相対で保護の中に見える）
+        m = self.shared_dir
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree add -b wt/x ~/elsewhere/x 0d529a4"))
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree add -b wt/x ~/elsewhere/x"))
+        self.assertIsNone(self.bash(f"git -C {m}/m1 worktree add ~/dev/wt"))
+        self.assertIsNone(self.bash(f"git -C {m}/m1 worktree add -b wt/x ~/dev/wt HEAD~1"))
+        # -b の値が保護の中のパスに見える名前でも、行き先が外なら通す
+        self.assertIsNone(self.bash("cd ~ && git worktree add -b app/shared/files/x ~/dev/wt"))
+        self.assertIsNone(self.bash("cd ~ && git worktree add -B app/shared/files/x ~/dev/wt"))
+        self.assertIsNone(self.bash(f"cd ~/dev/m1 && git worktree add -b {m}/x ~/dev/wt"))
+        self.assertIsNone(self.bash(f"cd ~ && git worktree add --lock --reason {m}/x ~/dev/wt"))
+
+    def test_git_worktree_add_into_protected(self):
+        m = self.shared_dir
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree add {m}/wt"))               # 絶対
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree add ../../app/shared/files/wt"))   # 相対
+        self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree add ../wt"))                  # 保護の中の相対
+        self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree add -b wt/x sub/x 0d529a4"))
+        self.assertIsNotNone(self.bash(f"git -C {m}/m1 worktree add sub/x"))                     # -C からの相対
+        self.assertIsNotNone(self.bash("git -C ~/app/shared worktree add files/wt"))
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree add -- {m}/wt"))
+        self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree add"))                        # 行き先が読めない: 場所で止める
+        self.assertIsNone(self.bash("cd ~/dev/m1 && git worktree add"))
+        # 知らない値をとるオプションで行き先が 2 つ目にずれても、パスとしか読めない形なら見る
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree add --future v {m}/wt"))
+
+    def test_git_worktree_remove_move(self):
+        m = self.shared_dir
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree remove ~/dev/wt"))
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree remove -f ~/dev/wt"))
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree remove {m}/wt"))
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree remove --force {m}/wt"))
+        self.assertIsNotNone(self.bash(f"cd {m}/m1 && git worktree remove ."))
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree move {m}/wt ~/dev/wt"))     # 元が保護の中
+        self.assertIsNotNone(self.bash(f"cd ~/dev/m1 && git worktree move ~/dev/wt {m}/wt"))     # 行き先が保護の中
+        self.assertIsNone(self.bash(f"cd {m}/m1 && git worktree move ~/dev/wt ~/dev/wt2"))
+
+    def _fake_worktrees(self):
+        """~/dev/repo（メイン）に、保護の中の <保護>/wt と外の ~/dev/wt2 を登録した形を作る（git は使わない）。"""
+        m, h = self.shared_dir, self.real_home
+        common = h / "dev" / "repo" / ".git"
+        for i, wt in (("wt", m / "wt"), ("wt2", h / "dev" / "wt2")):
+            (common / "worktrees" / i).mkdir(parents=True)
+            (common / "worktrees" / i / "gitdir").write_text(f"{wt}/.git\n")
+            (common / "worktrees" / i / "commondir").write_text("../..\n")
+            wt.mkdir(parents=True, exist_ok=True)
+            (wt / ".git").write_text(f"gitdir: {common}/worktrees/{i}\n")
+
+    def test_git_worktree_remove_move_by_name(self):
+        # 回帰: <worktree> は登録した worktree のパスの末尾でも指せる。cwd からの相対に解くだけで、
+        # 外の cwd から保護の中の worktree を名前で消す・動かすのを通していた
+        self._fake_worktrees()
+        for c in ("remove wt", "remove -f wt", "remove wt/", "remove files/wt", "move wt ~/dev/out"):
+            self.assertIsNotNone(self.bash(f"cd ~/dev/repo && git worktree {c}"), c)
+            self.assertIsNotNone(self.bash(f"cd ~/dev/wt2 && git worktree {c}"), c)       # linked worktree から
+            self.assertIsNotNone(self.bash(f"git -C ~/dev/repo worktree {c}"), c)
+        for c in ("remove wt2", "remove -f dev/wt2", "move wt2 ~/dev/wt3"):
+            self.assertIsNone(self.bash(f"cd ~/dev/repo && git worktree {c}"), c)
+        # 回帰: --work-tree / GIT_WORK_TREE で別のリポジトリを指すと、そちらの一覧だけで照らして通していた
+        (self.real_home / "dev" / "other" / ".git").mkdir(parents=True)
+        for pre in ("git --work-tree=~/dev/other", "GIT_WORK_TREE=~/dev/other git"):
+            self.assertIsNotNone(self.bash(f"cd ~/dev/repo && {pre} worktree remove wt"), pre)
+        # リポジトリが見つからず照らせないときは、名前の形を止める側
+        self.assertIsNotNone(self.bash("cd ~/dev/m1 && git worktree remove wt"))
+        self.assertIsNone(self.bash("cd ~/dev/m1 && git worktree remove ~/dev/wt"))
+
+    def test_git_worktree_remove_by_name_relative_gitdir_and_bare(self):
+        # --relative-paths の worktree（gitdir が相対）と、--git-dir で bare を指す形
+        m, h = self.shared_dir, self.real_home
+        bare = h / "dev" / "bare.git"
+        (bare / "objects").mkdir(parents=True)
+        (bare / "HEAD").write_text("ref: refs/heads/main\n")
+        (bare / "worktrees" / "rel").mkdir(parents=True)
+        rel = os.path.relpath(m / "rel" / ".git", bare / "worktrees" / "rel")
+        (bare / "worktrees" / "rel" / "gitdir").write_text(rel + "\n")
+        self.assertIsNotNone(self.bash("git --git-dir=~/dev/bare.git worktree remove rel"))
+        self.assertIsNotNone(self.bash("GIT_DIR=~/dev/bare.git git worktree move rel ~/dev/out"))
+        self.assertIsNotNone(self.bash("cd ~/dev/bare.git && git worktree remove rel"))
+        self.assertIsNone(self.bash("cd ~/dev/bare.git && git worktree remove other"))
 
     def test_subshell_cd_does_not_leak(self):
         self.assertIsNone(self.bash(f"(cd {self.shared_dir}; ls) ; mkdir ~/dev/x"))

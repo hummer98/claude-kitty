@@ -860,6 +860,10 @@ GIT_INIT_SHORT = {"b"}
 GIT_INIT_LONG = {"--template", "--separate-git-dir", "--initial-branch", "--object-format", "--ref-format"}
 # 値がパスで、そこにも書く（--template は読む側だが、迷ったら止める側に倒す）
 GIT_DIR_OPTS = ("--separate-git-dir", "--template")
+# git worktree の、作業ファイルを作る・動かす・消すサブコマンドと、その値をとるオプション（短い, 長い）。
+# --orphan は値をとらない（ブランチ名は -b で渡す。git 2.42 から）
+GIT_WORKTREE_WRITE = {"add": ({"b", "B"}, {"--reason"}), "move": (set(), set()),
+                       "remove": (set(), set()), "repair": (set(), set())}
 
 
 def _git_opts(args, short_vals, long_vals):
@@ -895,6 +899,59 @@ def _git_opts(args, short_vals, long_vals):
                         i += 1
                     break
     return pos, vals
+
+
+def _git_worktrees(dirs):
+    """dirs のそれぞれを含むリポジトリの、登録した worktree の場所（メインも）を合わせたもの。どれも見つからなければ None。
+    git worktree remove / move の <worktree> を末尾の名前で渡されたときに照らすため（git は末尾でも探す）。
+    git が探すのは --git-dir / GIT_DIR か cwd からで、--work-tree の側ではないが、どちらが当たるか迷うので全部を合わせる（止める側）"""
+    found = None
+    for d in dirs:
+        p = os.path.abspath(d)
+        while True:
+            dot = os.path.join(p, ".git")
+            common = None
+            if os.path.isdir(dot):
+                common = dot
+            elif os.path.isfile(dot):
+                try:
+                    with open(dot, encoding="utf-8", errors="replace") as f:
+                        line = f.read().strip()
+                except OSError:
+                    line = ""
+                if line.startswith("gitdir:"):
+                    gd = os.path.join(p, line[7:].strip())
+                    common = gd
+                    try:                            # linked worktree の gitdir は <common>/worktrees/<id>
+                        with open(os.path.join(gd, "commondir"), encoding="utf-8", errors="replace") as f:
+                            common = os.path.join(gd, f.read().strip())
+                    except OSError:
+                        pass
+            elif os.path.isfile(os.path.join(p, "HEAD")) and os.path.isdir(os.path.join(p, "objects")):
+                common = p                          # GIT_DIR / --git-dir で .git そのものを指したとき
+            if common:
+                common = os.path.normpath(common)
+                out = [os.path.dirname(common)] if os.path.basename(common) == ".git" else []
+                try:
+                    ids = os.listdir(os.path.join(common, "worktrees"))
+                except OSError:
+                    ids = []
+                for i in ids:
+                    try:
+                        with open(os.path.join(common, "worktrees", i, "gitdir"), encoding="utf-8",
+                                  errors="replace") as f:
+                            g = f.read().strip()
+                    except OSError:
+                        continue
+                    g = os.path.normpath(os.path.join(common, "worktrees", i, g))   # 相対のこともある（--relative-paths）
+                    out.append(os.path.dirname(g))
+                found = (found or []) + out
+                break
+            parent = os.path.dirname(p)
+            if parent == p:
+                break
+            p = parent
+    return found
 
 
 def allow_names(value):
@@ -1714,13 +1771,43 @@ class Analyzer:
                     return
             return
         if sub == "worktree":
-            # list 以外（prune / lock / unlock も）は cwd の .git に書くので、cwd が保護した所なら止める。
-            # add などは行き先も見る。-b / -B / --orphan / --reason の値もパスとして見る（取り違えても止める側に倒れるだけ）。
-            # repair も行き先の .git を書く
-            if pos and pos[0] != "list" and (self.roots.covers(where) or (
-                    pos[0] in ("add", "move", "remove", "repair")
-                    and any(self.roots.covers(self.path(p, where)) for p in pos[1:]))):
-                self.add(f"git worktree {pos[0]}")
+            # 守るのは作業ファイルなので、行き先だけで見る。cwd の .git（objects・refs・worktrees/）に書くのは、
+            # 保護の外の worktree からの commit と同じで止めない（保護の中のリポジトリから外へ worktree を作って開発できるように）。
+            # prune / lock / unlock / list は .git の管理情報だけ。repair は引数なしなら worktree の .git ファイルを直すだけ
+            if not pos or pos[0] not in GIT_WORKTREE_WRITE:
+                return
+            act = pos[0]
+            short, long_ = GIT_WORKTREE_WRITE[act]
+            # -b wt/x の値を位置引数と読むと、cwd が保護の中のとき where からの相対で保護の中に解けて誤って止めるので外す
+            wargs = _git_opts(rest[rest.index(act) + 1:], short, long_)[0]
+            if act == "add":
+                # 2 つ目は commit-ish。保護の中の cwd からだと相対のパスに見えて誤って止めるので、パスとしか読めない形
+                # （/・~・. で始まる。ref 名には使えない）だけを見る: 知らない値をとるオプションで行き先がずれたときの止める側
+                targets = wargs[:1] + [a for a in wargs[1:] if a.startswith(("/", "~", "."))]
+                if not wargs and (self.roots.covers(where) or self.roots.covers(base)):
+                    self.add(f"git worktree add（{where}）")     # 行き先が読めない: 今までどおり場所で止める
+                    return
+            else:
+                targets = wargs                 # move は元と行き先の両方、remove は対象、repair は渡したパス
+                if act in ("move", "remove") and wargs:
+                    # <worktree> は登録した worktree のパスの末尾（remove wt）でも指せる。cwd からの相対に解くだけだと、
+                    # 外の cwd から保護の中の worktree を消す・動かすのを通すので、登録の記録と照らす
+                    t = wargs[0].rstrip("/")
+                    wts = _git_worktrees([where, base])
+                    if wts is None:
+                        if t and not t.startswith(("/", "~")):
+                            self.add(f"git worktree {act} {wargs[0]}（worktree の一覧が読めない）")   # 止める側
+                            return
+                    else:
+                        for w in wts:
+                            if t and (w == t or w.endswith("/" + t)) and self.roots.covers(w):
+                                self.add(f"git worktree {act} {wargs[0]}（{w}）")
+                                return
+            for t in targets:
+                # 相対は git では -C の後の cwd から。GIT_WORK_TREE などで where がずれたときも見る（止める側）
+                if self.roots.covers(self.path(t, where)) or self.roots.covers(self.path(t, base)):
+                    self.add(f"git worktree {act} {t}")
+                    return
             return
         if sub in ("archive", "format-patch"):
             # 出力先は -o <dir>・-o<dir>・--output(-directory)・略した --out。-Sfoo の o のような、まとまりの中の o は
