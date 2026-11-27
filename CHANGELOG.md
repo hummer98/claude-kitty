@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-27
+
 ### 追加
 
 - `claude-view hot WINDOW_ID|ROLE`: そのペインを統括（`view.left`）のすぐ右の 2 列目に縦 100% で出し、もう一度で元の splits の配置に戻す。kitty のキー（`map … launch --type=background claude-view hot @active-kitty-window-id`）で、入力中のペインを一時的に大きくして読むため。統括や skill からは役割の名前で呼べる。kitty の tall レイアウト（`tall:bias=60;full_size=2`。列は 30% / 30% / 右 40%）を使い、戻すのは `goto_layout splits`（splits の分割がそのまま戻る）。並べる間だけフォーカスを移し、最後に呼ぶ前の入力先へ戻す。統括がいない・注目が統括自身・`kitten @ ls` が読めないなどの失敗は、キーからだと stderr が見えないので `$XDG_RUNTIME_DIR/claude-view/errors.log` にも残す。キーから呼ぶと `KITTY_LISTEN_ON` が渡らないので、親の kitty の `kitty-<pid>` のソケットを使う（README の「注目のペインを 2 列目に出す（hot）」）。
@@ -512,7 +514,8 @@
 - 設定ファイル `~/.config/claude-kitty/config.json`（`view.left`・`view.restore`・`view.guard`）。
 - テスト `python3 tests/run.py`（標準ライブラリだけ。kitty や Chrome は偽物）。
 
-[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/hummer98/claude-kitty/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/hummer98/claude-kitty/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/hummer98/claude-kitty/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/hummer98/claude-kitty/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/hummer98/claude-kitty/compare/v0.9.0...v0.9.1
