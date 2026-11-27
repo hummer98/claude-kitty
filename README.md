@@ -46,7 +46,7 @@ claude-kitty doctor                       # 足りないものと直し方を 1 
 | ツール | 何をするか | OS 依存 |
 |---|---|---|
 | `bin/claude-kitty` | kitty を `CLAUDE_*` 環境変数なしで起動し、セッションファイルどおりにペインを開く | 仮想デスクトップへの移動と最大化だけ KWin（macOS では行わない） |
-| `bin/claude-view` | 統括用。ペインを役割名で並べ替える（等分割にそろえる） | 「保護する窓が前面か」の確認だけ KWin（macOS は `lsappinfo`） |
+| `bin/claude-view` | 統括用。ペインを役割名で並べ替える（等分割にそろえる）。`hot` は入力中のペインを統括の右の 2 列目に縦 100% で出し、もう一度で元に戻す（kitty のキーから。[下の節](#注目のペインを-2-列目に出すhot)） | 「保護する窓が前面か」の確認だけ KWin（macOS は `lsappinfo`） |
 | `bin/claude-wait` | 別の場所で動いている同じセッションの終了を待ってから resume する | プロセスの情報（`lib/proc.py`。Linux は `/proc`、macOS は `sysctl`） |
 | `bin/claude-browser` | ペインごとの Chrome を、そのペインに重ねる | 窓の配置は KWin（macOS は試験的に CoreGraphics と CDP）。Chrome はネイティブでも Flatpak でもよい |
 | `bin/claude-state` | セッションの状態（作業中・待受中・完了（未読）・idle）をペインの背景色とステータス行の色で見せる（Claude Code の hook から呼ぶ）。`claude-state watch` は kitty の外の常駐で、見た完了のペインを idle に戻し、消えた色を塗り直す（[下の節](#claude-state状態の色)）。状態の移り・届いたメッセージ・タスクリストの札を後から数える記録に残す（[docs/records.md](docs/records.md)） | 入れ子の claude の判定にプロセスの情報（`lib/proc.py`） |
@@ -95,7 +95,7 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
 
 ## claude-view（統括用の配置）
 
-`claude-view all | focus ROLE | pair A B | restore | add ROLE [--row N] | remove ROLE | swap A B | equalize | rows "a,b/c" | status`
+`claude-view all | focus ROLE | pair A B | restore | add ROLE [--row N] | remove ROLE | swap A B | equalize | rows "a,b/c" | status | hot WINDOW_ID|ROLE`
 
 - ペインは kitty の user var `role`（セッションファイルの `--var role=...`）で呼ぶ。
 - 左の列（`--left`、既定は設定の `view.left`、無ければ `main`）は固定。毎回いったん左以外を standby タブへ下げてから組み直し、最後に入力先を左へ戻す。
@@ -105,6 +105,30 @@ claude-kitty doctor                       # kitty のペインで。NG が無け
 - 設定の `view.guard`（プロセスの正規表現）に当たる窓（全画面のアプリや発表中の画面など、キーやフォーカスを奪われたくない窓）が前面なら何もせず通知だけ（`--force` で実行）。close 系と send-text は使わない。
 - ペインの位置は `kitten @ ls` の `layout_state.pairs`（分割の木）から計算する。`neighbors` の番号は window id ではなく group id で、ペインを移すとずれる。
 - `--dry-run` は kitty に `ls` だけして、行う操作を表示する。
+
+### 注目のペインを 2 列目に出す（hot）
+
+`claude-view hot WINDOW_ID|ROLE` — そのペインを統括（`view.left`）のすぐ右の 2 列目に縦 100% で出す。もう一度呼ぶと元の splits の配置に戻す。kitty のキーに割り当てて、入力中のペインを一時的に大きくして読むのに使う。統括のセッションや skill からは役割の名前で `claude-view hot dev-a`。
+
+kitty.conf に 2 行（`tools/install.sh --kitty` で include する `kitty/claude-kitty.conf` には 1 行目が入っている。map は自分で書く）:
+
+```conf
+enabled_layouts splits,stack,tall:bias=60;full_size=2
+map ctrl+shift+m launch --type=background claude-view hot @active-kitty-window-id
+```
+
+書いたら `kitten @ load-config`（か kitty の再起動）。`claude-view` が kitty から見つからなければ（kitty はログインシェルの PATH から探す）、`/path/to/claude-kitty/bin/claude-view` と絶対パスで書く。
+
+- kitty の tall レイアウトを使う。統括を左の列（`move_window_to_top`）、注目のペインをそのすぐ右（`move_window_backward` を 2 列目に来るまで）に並べ、ほかは右の列に積む。列の幅は 30% / 30% / 右 40%（`bias=60`）。tall は列の幅の偏りを覚えているので、毎回 `resize-window --axis reset` で戻す。幅を resize で寄せると数秒ガクガク動くので寄せない。
+- `full_size` は `enabled_layouts` に書いたときだけ効く（`goto_layout` の引数では効かない）。戻すのは `goto_layout splits` で、splits の分割がそのまま戻る（`toggle_layout`・`last_used_layout` では戻らなかった）。どれも kitty 0.51 で確認。
+- 戻すのは、tall のタブで、出しているペインか統括に対して呼んだとき（キーなら同じペインでもう一度押す）。tall のまま別のペインで呼ぶと、そのペインに出し替える。
+- `move_window_*` は入力先の窓に効く（`action --match` は効かない）ので、並べる間だけフォーカスを移し、最後に呼ぶ前の入力先へ戻す（キーなら押したペイン、統括から役割の名前で呼べば統括）。
+- 統括がそのタブにいない・注目のペインが統括自身のときは何もしない。`launch --type=background` の子は stderr がどこにも出ないので、失敗は `$XDG_RUNTIME_DIR/claude-view/errors.log` にも残す。
+- 子には `KITTY_LISTEN_ON` が渡らないので、親（キーを押した kitty）の pid の `kitty-<pid>` のソケットを使う。
+- tall のままのタブで、ほかの `claude-view` の並べ替え（`focus`・`restore` など）をすると、先に splits に戻してから並べる。
+- tall の間は、`claude-roster` が開くペイン（tall では vsplit・hsplit が効かず、列の末尾に入る）と、`claude-browser`・`claude-show` の重ね置きの位置が splits のときとずれうる。使い終わったら戻しておく。
+- 並べる間（数百 ms）は入力先が統括と注目のペインに移る（`move_window_*` が入力先に効くため）。
+- ほかの並べ替えと同じく、`view.guard` の窓が前面なら何もしない（`--force` で実行）。`--dry-run` は行う操作を表示するだけ。
 
 ### 設定
 

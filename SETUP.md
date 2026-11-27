@@ -107,9 +107,12 @@ ln -sfn "$REPO/kitty/mine.session" ~/.config/kitty/mine.session
 allow_remote_control socket-only
 # kitty ごとに別のソケット。ツールは $KITTY_LISTEN_ON か、$XDG_RUNTIME_DIR/kitty-<pid> を探す
 listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}
-# 任意の位置に分割・移動できる splits（claude-view は splits の分割の木を前提にする）
-enabled_layouts splits,stack
+# 任意の位置に分割・移動できる splits（claude-view は splits の分割の木を前提にする）。
+# tall は claude-view hot 用（full_size は enabled_layouts に書いたときだけ効く）
+enabled_layouts splits,stack,tall:bias=60;full_size=2
 ```
+
+- 任意: `map ctrl+shift+m launch --type=background claude-view hot @active-kitty-window-id` で、入力中のペインを統括の右の 2 列目に縦 100% で出す／もう一度で戻す（README の「注目のペインを 2 列目に出す（hot）」）。
 
 - `allow_remote_control` と `listen_on` は kitty の起動時にしか読まれない。変えたら kitty を起動し直す。
 - ソケット名は `kitty-<pid>` の形のままにする（`lib/core.py` の `kitty_pid_from_socket` がこの名前から pid を取る）。

@@ -174,3 +174,72 @@ def overlay_ids(tab):
         main = roled[0] if len(roled) == 1 else ids[0]
         out.update(i for i in ids if i != main)
     return out
+
+
+# --- claude-view hot: 注目のペインを統括の右の 2 列目に縦 100% で出す（kitty の tall レイアウト） ---
+# kitty.conf の enabled_layouts に tall:bias=60;full_size=2 がある前提（full_size は enabled_layouts に書いたときだけ効き、
+# goto_layout の引数では効かない。kitty 0.51 で計測）。tall ではタブの window group の並び（ls の
+# layout_state.all_windows.window_groups）がそのまま列の順になる: 0 番が左の列、1 番が 2 列目、2 番以降が右の列に積まれる。
+
+def tab_groups(tab):
+    """タブの window group を列の順に [[window id, …], …] で返す。"""
+    groups = ((tab.get("layout_state") or {}).get("all_windows") or {}).get("window_groups")
+    if groups is None:
+        groups = [{"window_ids": g.get("windows") or []} for g in tab.get("groups") or []]
+    return [list(g.get("window_ids") or []) for g in groups]
+
+
+def base_window(tab, wid):
+    """overlay（claude-show の画像など）の id なら、重ねた先の本体の id にする。本体ならそのまま。"""
+    skip = overlay_ids(tab)
+    if wid not in skip:
+        return wid
+    for ids in tab_groups(tab):
+        if wid in ids:
+            return next((i for i in ids if i not in skip), wid)
+    return wid
+
+
+def find_window(osw_list, target):
+    """target（window id の数字か role）→ (本体の window id, タブ)。見つからなければ None。"""
+    want = int(target) if str(target).isdigit() else None
+    for osw in osw_list:
+        for tab in osw.get("tabs") or []:
+            skip = overlay_ids(tab)
+            for w in tab.get("windows") or []:
+                if want is not None and w.get("id") == want:
+                    return base_window(tab, want), tab
+                if want is None and w.get("id") not in skip and (w.get("user_vars") or {}).get("role") == target:
+                    return w["id"], tab
+    return None
+
+
+def role_window(tab, role):
+    """タブの中の role の本体の window id（いなければ None）。"""
+    skip = overlay_ids(tab)
+    return next((w["id"] for w in tab.get("windows") or []
+                 if w.get("id") not in skip and (w.get("user_vars") or {}).get("role") == role), None)
+
+
+def column_of(tab, wid):
+    """tall の列の順での wid の group の番号（無ければ None）。"""
+    return next((i for i, ids in enumerate(tab_groups(tab)) if wid in ids), None)
+
+
+def is_hot(tab, wid, left_id):
+    """tall で、統括が 0 番（左の列）、wid が 1 番（統括のすぐ右の 2 列目）にいる。"""
+    return tab.get("layout") == "tall" and column_of(tab, left_id) == 0 and column_of(tab, wid) == 1
+
+
+def focused_window(osw_list):
+    """いま入力先の window id（kitty にフォーカスが無ければ、前面の OS 窓の表示中のタブの入力先）。"""
+    for key in ("is_focused", "is_active"):
+        for osw in osw_list:
+            if not osw.get(key):
+                continue
+            for tab in osw.get("tabs") or []:
+                if tab.get("is_active"):
+                    w = next((w for w in tab.get("windows") or [] if w.get("is_active")), None)
+                    if w:
+                        return w["id"]
+    return None

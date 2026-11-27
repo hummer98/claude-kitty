@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `claude-view hot WINDOW_ID|ROLE`: そのペインを統括（`view.left`）のすぐ右の 2 列目に縦 100% で出し、もう一度で元の splits の配置に戻す。kitty のキー（`map … launch --type=background claude-view hot @active-kitty-window-id`）で、入力中のペインを一時的に大きくして読むため。統括や skill からは役割の名前で呼べる。kitty の tall レイアウト（`tall:bias=60;full_size=2`。列は 30% / 30% / 右 40%）を使い、戻すのは `goto_layout splits`（splits の分割がそのまま戻る）。並べる間だけフォーカスを移し、最後に呼ぶ前の入力先へ戻す。統括がいない・注目が統括自身・`kitten @ ls` が読めないなどの失敗は、キーからだと stderr が見えないので `$XDG_RUNTIME_DIR/claude-view/errors.log` にも残す。キーから呼ぶと `KITTY_LISTEN_ON` が渡らないので、親の kitty の `kitty-<pid>` のソケットを使う（README の「注目のペインを 2 列目に出す（hot）」）。
+- `claude-view`: tall のままのタブでほかの並べ替え（`focus`・`restore` など）をすると、先に splits に戻してから並べる（分割の木が前提のため）。
+- `kitty/claude-kitty.conf`・`claude-kitty-macos.conf`・`kitty/kitty.conf`: `enabled_layouts` に `tall:bias=60;full_size=2` を足した（`full_size` は `enabled_layouts` に書いたときだけ効く）。`kitty/kitty.conf` には map の例も。
+
+### 上げるときに手で行うこと
+
+- 使うなら kitty.conf に 2 行を書く（`kitty/claude-kitty.conf` を include していれば 1 行目は入っているので、map だけ）:
+  ```conf
+  enabled_layouts splits,stack,tall:bias=60;full_size=2
+  map ctrl+shift+m launch --type=background claude-view hot @active-kitty-window-id
+  ```
+  `claude-view` が kitty から見つからなければ絶対パス（`/path/to/claude-kitty/bin/claude-view`）で書く。
+- 書いたら設定を読み直す: `kitten @ load-config`（各 kitty の中で。外からなら `--to unix:$XDG_RUNTIME_DIR/kitty-<pid>`）か kitty の再起動。include の `enabled_layouts` が変わるので、hot を使わなくても読み直すと tall がレイアウトの切り替え（`next_layout`）の候補に入る。
+
 ## [0.9.3] - 2026-11-27
 
 ### 追加

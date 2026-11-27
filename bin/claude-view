@@ -11,13 +11,18 @@
   claude-view equalize               いまの配置のまま等分割にそろえる
   claude-view rows "a,b/c"           任意の段組み（/ で段、, で横並び）
   claude-view status                 いまの配置
+  claude-view hot WINDOW_ID|ROLE     そのペインを統括の右の 2 列目に縦 100% で出す（kitty の tall レイアウト）。
+                                     もう一度（tall のまま、出したペインか統括に）すると元の splits の配置に戻す。
+                                     kitty.conf の map から `launch --type=background … hot @active-kitty-window-id` で呼ぶ
 どの操作も最後は等分割（段ごとに幅を等しく、統括の左の列も 1 列分）にそろえる。
 設定の view.pinned の役割は統括と同じく常時表示: どの操作のあとも右側の 1 段目の先頭（複数ならその順）に置き、
 focus・remove などで standby に下げない（kitty にいなければ警告して続ける）。
   共通: --left ROLE（既定は設定の view.left か $CLAUDE_VIEW_LEFT、無ければ main）、--to SOCKET、--dry-run、
         --force（保護する窓が前面でも実行）
 
-左の枠（統括）は動かさず、最後に入力先を左へ戻す。ペインを閉じる操作と send-text は使わない。
+左の枠（統括）は動かさず、最後に入力先を左へ戻す（hot だけは、呼ぶ前の入力先へ戻す。キーで呼べば押したペイン）。
+ペインを閉じる操作と send-text は使わない。
+hot の失敗は stderr のほか $XDG_RUNTIME_DIR/claude-view/errors.log にも残す（キーから呼ぶと stderr はどこにも出ない）。
 設定の view.guard（プロセスの正規表現）に当たる窓（全画面のアプリや発表中の画面など、キーやフォーカスを奪われたくない窓）が前面にあるときは何もせず、通知だけする。
 設定は lib/config.py（~/.config/claude-kitty/config.json と環境変数）。
 """
@@ -31,20 +36,53 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "lib"))
+import time  # noqa: E402
+
 from config import kitten_path, load_view_config  # noqa: E402
 from geometry import tab_pane_fraction  # noqa: E402
 from guard import guarded_in_front as _guarded_in_front  # noqa: E402
 from kstate import Kitten, refresh_marks, state_dir, state_lock  # noqa: E402
 from rundir import live_kitty_sockets, runtime_dir  # noqa: E402
-from view import (active_pins, add_role, current_rows, overlay_ids, parse_rows, pin_rows, plan,  # noqa: E402
-                  remove_role, split_two, swap_roles, validate)
+from view import (active_pins, add_role, column_of, current_rows, find_window, focused_window,  # noqa: E402
+                  is_hot, overlay_ids, parse_rows, pin_rows, plan, remove_role, role_window, split_two,
+                  swap_roles, validate)
 
 KITTEN = kitten_path(os.environ)
 STANDBY = "standby"
+# hot はキーから launch --type=background で呼ばれ、stderr がどこにも出ない。失敗を残す先（main が決める）
+ERROR_LOG = None
+LOG_MAX = 256 * 1024
+
+
+def log_error(msg):
+    if ERROR_LOG is None:
+        return
+    try:
+        ERROR_LOG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # 上限を超えたら .1 に回す（止めると、いちばん見たい新しい失敗が残らない）
+        if ERROR_LOG.exists() and ERROR_LOG.stat().st_size >= LOG_MAX:
+            os.replace(ERROR_LOG, ERROR_LOG.with_name("errors.log.1"))
+        with open(ERROR_LOG, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {' '.join(sys.argv[1:])}: {msg}\n")
+    except OSError:
+        pass
+
+
+_LOCK = None
+
+
+def take_lock():
+    """claude-view 同士の並べ替えを 1 つずつにする（同時に動くと形が崩れる）。同じプロセスで 2 回目は何もしない
+    （flock は開いたファイルごとなので、開き直すと自分を待って止まる）。"""
+    global _LOCK
+    if _LOCK is None:
+        _LOCK = open(runtime_dir() / "claude-view.lock", "w")
+        fcntl.flock(_LOCK, fcntl.LOCK_EX)
 
 
 def die(msg, code=1):
     print(f"claude-view: {msg}", file=sys.stderr)
+    log_error(msg)
     sys.exit(code)
 
 
@@ -55,6 +93,11 @@ def kitty_socket(arg, left):
         return os.environ["KITTY_LISTEN_ON"]
     # 生きている kitty の socket（$XDG_RUNTIME_DIR か /tmp の kitty-<pid>。落ちて残ったものは除く）
     live = live_kitty_sockets(os.environ)
+    # kitty.conf の map の launch --type=background の子には KITTY_LISTEN_ON が渡らない（kitty 0.51 で計測）。
+    # 親が kitty なので、listen_on の kitty-{kitty_pid} の名前から決める（キーを押した kitty を取り違えない）
+    parent = [s for s in live if os.path.basename(s) == f"kitty-{os.getppid()}"]
+    if parent:
+        return parent[0]
     if not live:
         die("kitty が見つからない（kitty の中で動かすか、claude-kitty で起動する。別の場所の socket なら --to で指定する）")
     # 統括（左の枠）のいる kitty を選ぶ（テスト用の kitty が同時にあっても取り違えない）
@@ -72,7 +115,14 @@ def kitten(sock, *args, check=True):
 
 
 def ls(sock):
-    return json.loads(kitten(sock, "ls"))
+    out = kitten(sock, "ls")
+    try:
+        data = json.loads(out)
+    except ValueError:
+        die(f"kitten @ ls の出力が読めない: {out[:80]!r}")
+    if not isinstance(data, list):
+        die(f"kitten @ ls の出力が読めない: {out[:80]!r}")
+    return data
 
 
 def windows(osw_list):
@@ -123,6 +173,76 @@ def execute(sock, ops, main_tab_id, roles, dry):
             kitten(sock, "action", "layout_action", "bias", str(op[1]))
 
 
+def hot(sock, target, left, dry):
+    """target を統括の右の 2 列目に縦 100% で出す（tall）。tall で出しているペインか統括なら splits に戻す。
+
+    tall の列の幅は 2 列とも同じ（bias=60 で 30%/30%/右 40%）。resize で寄せると数秒ガクガク動くので
+    寄せない（利用者の判断「最初の一発で大きくなるほうがいい」）。kitty.conf の enabled_layouts の
+    tall:bias=60;full_size=2 がそのまま効く。
+    """
+    osw_list = ls(sock)
+    found = find_window(osw_list, target)
+    if not found:
+        die(f"{target} が kitty に見つからない")
+    wid, tab = found
+    left_id = role_window(tab, left)
+    back = focused_window(osw_list) or wid
+    ops = []
+    if tab.get("layout") == "tall" and (left_id is None or wid == left_id or is_hot(tab, wid, left_id)):
+        # 戻すのは goto_layout splits（splits の分割の木がそのまま戻る）。toggle_layout・last_used_layout では
+        # splits に戻らなかった（kitty 0.51 で計測）
+        ops = [("goto-layout", "--match", f"window_id:{wid}", "splits")]
+    else:
+        if left_id is None:
+            die(f"{target} のタブに統括（{left}）がいない（統括の右に出すので中止）")
+        if wid == left_id:
+            die(f"{target} は統括（{left}）自身（統括の右に出すものではないので中止）")
+        ops = [("goto-layout", "--match", f"window_id:{wid}", "tall"),
+               # tall は列の幅の偏りを覚えている（前の resize が残り、注目の列が 70% になった）。毎回、設定の bias に戻す
+               ("resize-window", "--match", f"id:{wid}", "--axis", "reset")]
+        # move_window_to_top・move_window_backward は入力先の窓に効く（action の --match は効かなかった）ので、
+        # いったんフォーカスを移して並べ、最後に呼ぶ前の入力先へ戻す
+        ops += [("focus-window", "--match", f"id:{left_id}"), ("action", "move_window_to_top"),
+                ("focus-window", "--match", f"id:{wid}"), "backward"]
+    ops.append(("focus-window", "--match", f"id:{back}"))
+    if dry:
+        for op in ops:
+            print("move_window_backward（2 列目まで）" if op == "backward" else " ".join(op))
+        return 0
+    try:
+        for op in ops[:-1]:
+            if op == "backward":
+                to_second(sock, tab["id"], wid, left_id, target)
+            else:
+                kitten(sock, *op)
+    finally:
+        # 途中で失敗しても、入力先は呼ぶ前のペインへ戻す（統括や注目のペインに移ったままにしない）
+        kitten(sock, *ops[-1], check=False)
+    return 0
+
+
+def to_second(sock, tab_id, wid, left_id, target):
+    """統括が 0 番にいることを確かめ、wid を 1 番（統括のすぐ右）まで move_window_backward で前へ出す。
+
+    フォーカスが注目のペインに移っている間（打った文字がそこに入る）を短くするため、ls は 1 回にして
+    要る回数をまとめて送り、もう一度の ls で確かめる。kitty の動きが違ったときのために、やり直しは 3 回まで。
+    """
+    for _ in range(3):
+        cur = next((t for o in ls(sock) for t in o.get("tabs") or [] if t.get("id") == tab_id), None)
+        if cur is None:
+            die("並べ替えの途中でタブが見つからなくなった")
+        if column_of(cur, left_id) != 0:
+            die("統括を先頭に動かせなかった")
+        col = column_of(cur, wid)
+        if col is None:
+            die(f"並べ替えの途中で {target} が見つからなくなった")
+        if col == 1:
+            return
+        for _ in range(col - 1):
+            kitten(sock, "action", "move_window_backward")
+    die(f"{target} を 2 列目に動かせなかった")
+
+
 def status(sock):
     for osw in ls(sock):
         for tab in osw["tabs"]:
@@ -153,7 +273,17 @@ def main(argv=None):
     p = sub.add_parser("add"); p.add_argument("role"); p.add_argument("--row", type=int)
     p = sub.add_parser("remove"); p.add_argument("role")
     p = sub.add_parser("swap"); p.add_argument("a"); p.add_argument("b")
+    p = sub.add_parser("hot"); p.add_argument("target", metavar="WINDOW_ID|ROLE")
     args = ap.parse_args(argv)
+    if args.cmd == "hot":
+        global ERROR_LOG
+        ERROR_LOG = runtime_dir() / "claude-view" / "errors.log"
+        try:
+            return run_hot(args, conf)
+        except SystemExit:
+            raise
+        except Exception as e:  # キーから呼ぶと traceback はどこにも出ないので、残してから落とす
+            die(f"{type(e).__name__}: {e}")
 
     sock = kitty_socket(args.to, args.left)
     if args.cmd == "status":
@@ -162,6 +292,21 @@ def main(argv=None):
     smap = role_map(snapshot)
     if args.left not in smap:
         die(f"{args.left} が kitty に見つからない")
+    if smap[args.left][1].get("layout") == "tall":
+        # hot で tall にしたままのタブ。並べ替えは splits の分割の木が前提なので、先に splits に戻す
+        if args.dry_run:
+            # tall の位置からは段を正しく読めない（2 列目と右の列の上が同じ段に見える）ので、ここで止める
+            print("goto-layout splits（tall から戻す。戻したあとの操作は、戻すまで決まらないので表示しない）")
+            return 0
+        else:
+            if not args.force and guarded_in_front(conf["guard"]):
+                die("保護する窓（view.guard）が前面にあるので何もしない（--force で実行）", 2)
+            take_lock()  # hot の並べ替えの途中で splits に切り替えないよう、戻す前から取る
+            kitten(sock, "goto-layout", "--match", f"window_id:{smap[args.left][0]}", "splits")
+            snapshot = ls(sock)
+            smap = role_map(snapshot)
+            if args.left not in smap:
+                die(f"{args.left} が kitty に見つからない")
     now = current_rows(smap[args.left][1], args.left, tab_pane_fraction)
     others = [r for r in smap if r != args.left and all(r not in row for row in now)]
     try:
@@ -203,8 +348,7 @@ def main(argv=None):
         print("常時表示（view.pinned）を 1 段目の先頭に置いた: " + "/".join(",".join(r) for r in rows))
 
     # 同時に 2 つ並べ替えると形が崩れるので 1 つずつ
-    lock = open(runtime_dir() / "claude-view.lock", "w")
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    take_lock()
     osw_list = ls(sock)
     rmap = role_map(osw_list)
     try:
@@ -230,6 +374,15 @@ def main(argv=None):
         execute(sock, ops, main_tab["id"], roles, False)
         refresh_marks(kit, d, args.left)
     status(sock)
+
+
+def run_hot(args, conf):
+    sock = kitty_socket(args.to, args.left)
+    if not args.dry_run and not args.force and guarded_in_front(conf["guard"]):
+        die("保護する窓（view.guard）が前面にあるので何もしない（--force で実行）", 2)
+    # ほかの claude-view と同時に並べ替えると形が崩れるので 1 つずつ
+    take_lock()
+    return hot(sock, args.target, args.left, args.dry_run)
 
 
 if __name__ == "__main__":
