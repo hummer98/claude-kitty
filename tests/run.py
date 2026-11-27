@@ -3282,6 +3282,29 @@ class ClaudeShowPlaytest(unittest.TestCase):
         self.assertNotIn("playtest", out)
         self.assertIn("JSON", out["skipped"])
 
+    def test_process_unless_zero_is_not_playtest(self):
+        # ゲームが落ちてダイアログを出したまま残っているだけ（process_unless が 0）なら、人はプレイしていない
+        conf = json.loads(self.conf.read_text())
+        conf["guard_hook"]["guards"]["tf3-running"]["process_unless"] = ["app-status", "--crashed"]
+        self.conf.write_text(json.dumps(conf))
+        codes = {}
+
+        def run(argv, **kw):
+            if argv[0] == "app-status":
+                self.assertEqual(kw.get("timeout"), 3.0)    # process_unless_timeout の既定
+                if codes["unless"] is None:
+                    raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+                return SimpleNamespace(returncode=codes["unless"], stdout="", stderr="")
+            return self.run_(argv, **kw)
+        codes["unless"] = 0
+        code, out = self.show.show(str(self.html), self.env, None, run=run)
+        self.assertEqual(code, 0, out)
+        for rc in (1, None):                          # 0 以外・時間切れは今までどおり人がプレイ中
+            codes["unless"] = rc
+            code, out = self.show.show(str(self.html), self.env, None, run=run)
+            self.assertEqual(code, 2, (rc, out))
+            self.assertEqual(out["skipped"], "ゲームをテストプレイ中")
+
     def test_game_not_running_is_unchanged(self):
         self.game_running = False
         code, out = self.show.show(str(self.html), self.env, None, run=self.run_)

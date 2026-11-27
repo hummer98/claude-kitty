@@ -17,6 +17,8 @@
 | 項目 | 中身 |
 |---|---|
 | `process` | 働く条件: `pgrep -f` に渡す正規表現（リスト可。どれか 1 つが動いていれば働く） |
+| `process_unless` | `process` の例外: 判定のコマンド（書き方は `command` と同じ）。`process` が当たったときだけ呼び、終了コード 0 なら `process` の条件は働いていないと数える（[下](#落ちて残っているだけのプロセスprocess_unless)） |
+| `process_unless_timeout` | `process_unless` の打ち切り（秒。既定 3、30 まで） |
 | `command` | 働く条件: 判定のコマンド。文字列なら `sh -c`、リストならそのまま。終了コード 0 なら働く。`command_timeout` 秒（既定 2、30 まで）で打ち切り、時間切れは働かないと数える |
 | （旗） | 働く条件: `claude-guard on` / `acquire` で立てた旗。どのガードにも常にある。期限が来たら自動で外れる |
 | `paths` | 書き込みを止めるパス（絶対パスか `~` で始める）。その下も含む |
@@ -25,7 +27,26 @@
 | `message` | 理由の文の後に足す一文。`{name}`（ガードの名前）、`{reason}`（旗の理由）、`{condition}`（働いている条件）、`{what}`（止めた操作）を差し込める |
 | `enabled` | `false` でこのガードを使わない |
 
-働く条件は OR（旗・`process`・`command` のどれか 1 つで働く）。軽い順（旗 → pgrep → command）に調べ、1 つ当たればそこでやめる。
+働く条件は OR（旗・`process`・`command` のどれか 1 つで働く）。軽い順（旗 → pgrep（当たれば `process_unless`）→ command）に調べ、1 つ当たればそこでやめる。
+
+### 落ちて残っているだけのプロセス（process_unless）
+
+見張るアプリが落ちてエラーのダイアログを出したままだと、プロセスが残るので `process` が当たり続け、害の無い操作まで止める。
+「落ちて残っているだけか」を終了コードで答えるコマンドがあれば、`process_unless` に書くとその間は `process` で働かない。判定そのものは外のコマンドが持ち、ガードは呼ぶだけ。
+
+```json
+{"guard_hook": {"guards": {"app-running": {
+  "process": "^\\./fullscreen-app",
+  "process_unless": ["app-status", "--crashed"],
+  "process_unless_timeout": 3,
+  "paths": ["~/app/shared/files"]}}}}
+```
+
+- `process` が当たったときだけ呼ぶ（当たらなければ呼ばない。ふだんのコストを増やさない）。止める候補が無い呼び出し・許可がある間も呼ばない（pgrep と同じ）。
+- 終了コード 0 のときだけ `process` を外す。0 以外・動かせない・時間切れ（`process_unless_timeout`）は今までどおり `process` で働く（柵を外す例外なので、判定できないときは外さない）。動かせない・時間切れは `errors.log` に残し（同じものは 1 度）、`claude-guard status` にもその旨を出す。
+- 外すのは `process` の条件だけ。旗（`claude-guard on` / `acquire`）と `command` の条件には効かない。`process` を外したあとも `command` は今までどおり調べる。
+- `process` の無いガードに書くと「問題:」に出し、使わない。形の誤り（文字列でも文字列のリストでもない）も「問題:」に出し、使わない（= `process` で働く）。
+- `claude-show` の `view.playtest_guard`（人がテストプレイ中か）も同じ判定を通す: 0 で終われば、プロセスが動いていないときと同じく今までどおり開く。起動の記録の pid の照合（`allow_owner`・共同作業）は pid の生死と引数だけを見るもので、`process_unless` は使わない。
 
 `commands` / `allow_commands` の書き方:
 
@@ -185,6 +206,7 @@ $ claude-guard status
 app-running: 働いている（プロセス ^\./fullscreen-app）、条件 process/旗、止めるもの paths 1・commands 1、許可あり（残り 25 分、e2e）
 deploy: 働いている（旗（残り 12 分、持ち主 5d0c…）、v1.4 を出す）、条件 旗、止めるもの paths 1・commands 2・例外 1
 device-test: 働いていない、条件 command/旗、止めるもの paths 1・commands 0
+viewer: 働いていない、条件 process（process_unless あり）/旗、止めるもの paths 1・commands 0、process は当たるが process_unless が 0 で終わった → process の条件は働かないと数える
 game: 働いている（プロセス ^\./game）、条件 process/旗、止めるもの paths 1・commands 1、起動した担当の例外（/run/user/1000/svcctl/launched.json）: owner probe、pid 4242 が動いている → probe は通す（役割も同じとき）、共同作業: aom-ui、16:15（JST）まで（一緒に操作）
 問題: guard_hook.guards.broken.process の正規表現が読めない: …
 ```
@@ -237,7 +259,7 @@ claude-guard release deploy-prod
 - Bash はシェルの静的な読みなので、見えない書き込み（スクリプトの中、alias、`eval`）がある。コマンドの名前を変数に入れた形は、同じコマンドの中で代入したものだけ読む（上の「コマンドの位置の変数」）。
 - `allow_owner` と共同作業の担当の名前は自己申告（`--owner`）と役割の照合で、なりすましは防がない（うっかり別の担当のものを止めることを防ぐ）。
 - 速さ: 止める候補が無ければ Python の起動だけ（手元で約 0.03 秒）。候補があれば pgrep を 1 回（手元で 0.06 秒前後。pgrep 自体が 0.03 秒）。
-- hook の `timeout` は、候補に当たるガードの `command_timeout` の合計と pgrep（打ち切り 5 秒）より長くする。超えると Claude Code が hook を打ち切り、そのときは止めずに通る。
+- hook の `timeout` は、候補に当たるガードの `command_timeout`・`process_unless_timeout` の合計と pgrep（打ち切り 5 秒）より長くする。超えると Claude Code が hook を打ち切り、そのときは止めずに通る。
 
 ## 入れ方
 

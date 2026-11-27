@@ -18,7 +18,7 @@ import guardhook as gh  # noqa: E402
 BIN = ROOT / "bin" / "claude-guard"
 
 
-def fake_probe(process=False, command=False, calls=None):
+def fake_probe(process=False, command=False, calls=None, unless=False):
     class P:
         @staticmethod
         def process(pats):
@@ -31,6 +31,12 @@ def fake_probe(process=False, command=False, calls=None):
             if calls is not None:
                 calls.append(("command", tuple(argv)))
             return command
+
+        @staticmethod
+        def unless(argv, timeout):
+            if calls is not None:
+                calls.append(("unless", tuple(argv), timeout))
+            return unless
     return P
 
 
@@ -635,6 +641,168 @@ class Conditions(Base):
     def test_real_pgrep(self):
         self.assertFalse(gh.process_running(["^no-such-process-for-claude-guard$"]))
         self.assertTrue(gh.process_running([f"^{sys.executable}", "^python"]) in (True, False))
+
+
+class ProcessUnless(Base):
+    """process_unless: process が当たったときだけ呼び、exit 0 なら process の条件を外す。判定できなければ外さない。"""
+
+    UNLESS = ["app-status", "--crashed"]
+
+    def setUp(self):
+        super().setUp()
+        g = self.default_guards()
+        g["app-running"]["process_unless"] = self.UNLESS
+        self.write_config(g)
+        self.p = str(self.shared_dir / "m1" / "a.cfg")
+
+    def errors(self):
+        f = self.run_dir / "claude-guard" / "errors.log"
+        return f.read_text() if f.exists() else ""
+
+    def test_exit_zero_passes(self):
+        calls = []
+        self.assertIsNone(self.write(self.p, probe=fake_probe(process=True, unless=True, calls=calls)))
+        self.assertIn(("unless", tuple(self.UNLESS), 3.0), calls)       # 既定の打ち切りは 3 秒
+        self.assertIsNone(self.bash("svcctl deploy a", probe=fake_probe(process=True, unless=True)))
+
+    def test_nonzero_blocks(self):
+        r = self.write(self.p, probe=fake_probe(process=True, unless=False))
+        self.assertIn("app-running", r)
+        self.assertEqual(self.errors(), "")                             # 0 以外は普通の答え。ログに残さない
+
+    def test_cannot_run_or_timeout_blocks_and_logs_once(self):
+        for _ in range(2):
+            self.assertIsNotNone(self.write(self.p, probe=fake_probe(process=True, unless=None)))
+        log = self.errors()
+        self.assertIn("app-running: process_unless を動かせないか時間切れ", log)
+        self.assertEqual(len(log.splitlines()), 1)
+
+    def test_real_command_timeout_and_missing_blocks(self):
+        # Probe の本物（command_true）で: 時間切れ・無いコマンドは止める、true は通す
+        g = self.default_guards()
+        for argv, t, blocked in ((["sleep", "5"], 0.2, True), (["/nonexistent-unless-cmd"], 1, True),
+                                 (["false"], 1, True), (["true"], 1, False)):
+            g["app-running"]["process_unless"] = argv
+            g["app-running"]["process_unless_timeout"] = t
+            self.write_config(g)
+
+            class P(gh.Probe):
+                process = staticmethod(lambda pats: True)
+            r = gh.evaluate(self.hook_input("Write", {"file_path": self.p}), self.env, P)
+            self.assertEqual(r is not None, blocked, argv)
+        self.assertIn("process_unless を動かせないか時間切れ", self.errors())
+
+    def test_probe_without_unless_falls_back_to_real_command(self):
+        # unless を持たない Probe（今までの形）でも壊れず、本物の command_true で判定する
+        class P:
+            process = staticmethod(lambda pats: True)
+            command = staticmethod(lambda argv, t: False)
+        g = self.default_guards()
+        for argv, blocked in ((["true"], False), (["false"], True)):
+            g["app-running"]["process_unless"] = argv
+            self.write_config(g)
+            self.assertEqual(self.write(self.p, probe=P) is not None, blocked, argv)
+
+    def test_not_called_when_process_not_running(self):
+        calls = []
+        self.assertIsNone(self.write(self.p, probe=fake_probe(process=False, unless=True, calls=calls)))
+        self.assertEqual([c for c in calls if c[0] == "unless"], [])
+        calls = []
+        self.assertIsNone(self.write(self.p, probe=fake_probe(process=None, unless=True, calls=calls)))
+        self.assertEqual([c for c in calls if c[0] == "unless"], [])
+
+    def test_not_called_without_candidates(self):
+        calls = []
+        self.assertIsNone(self.bash("ls -la", probe=fake_probe(process=True, unless=True, calls=calls)))
+        self.assertEqual(calls, [])
+
+    def test_flag_is_not_excused(self):
+        gh.write_state(self.env, "app-running", "on", 5, "r")
+        calls = []
+        self.assertIsNotNone(self.write(self.p, probe=fake_probe(process=True, unless=True, calls=calls)))
+        self.assertEqual(calls, [])                                     # 旗で働けば process も unless も調べない
+
+    def test_command_condition_is_not_excused(self):
+        g = self.default_guards()
+        g["app-running"]["process_unless"] = self.UNLESS
+        g["app-running"]["command"] = ["test", "-e", "/x"]
+        self.write_config(g)
+        calls = []
+        r = self.write(self.p, probe=fake_probe(process=True, unless=True, command=True, calls=calls))
+        self.assertIn("判定のコマンド", r)                              # process は外れても command で働く
+        self.assertEqual([c[0] for c in calls], ["process", "unless", "command"])
+        self.assertIsNone(self.write(self.p, probe=fake_probe(process=True, unless=True, command=False)))
+
+    def test_config_problems(self):
+        g = self.default_guards()
+        g["deploy"]["process_unless"] = ["true"]                        # process の無いガード
+        g["app-running"]["process_unless"] = 5
+        g["app-running"]["process_unless_timeout"] = 0
+        self.write_config(g)
+        guards, problems = gh.load_guard_config(self.env)
+        by = {x["name"]: x for x in guards}
+        self.assertIsNone(by["deploy"]["process_unless"])
+        self.assertIsNone(by["app-running"]["process_unless"])
+        self.assertEqual(by["app-running"]["process_unless_timeout"], 3.0)
+        text = "\n".join(problems)
+        self.assertIn("guard_hook.guards.deploy: process_unless は process", text)
+        self.assertIn("guard_hook.guards.app-running.process_unless は文字列", text)
+        self.assertIn("guard_hook.guards.app-running.process_unless_timeout は 0 より大きく", text)
+        # 形の誤りでは外さない（process で今までどおり止める）
+        self.assertIsNotNone(self.write(self.p, probe=fake_probe(process=True, unless=True)))
+        lines, bad = gh.status_lines(self.env, fake_probe())
+        self.assertTrue(bad)
+        self.assertTrue(any("deploy: process_unless は process" in l for l in lines))
+
+    def test_string_form_and_timeout(self):
+        g = self.default_guards()
+        g["app-running"]["process_unless"] = "app-status --crashed"
+        g["app-running"]["process_unless_timeout"] = 1.5
+        self.write_config(g)
+        guards, problems = gh.load_guard_config(self.env)
+        a = next(x for x in guards if x["name"] == "app-running")
+        self.assertEqual(a["process_unless"], ["sh", "-c", "app-status --crashed"])
+        self.assertEqual(a["process_unless_timeout"], 1.5)
+        self.assertEqual(problems, [])
+
+    def test_status_shows_setting_and_excused(self):
+        line = lambda probe: next(l for l in gh.status_lines(self.env, probe)[0] if l.startswith("app-running:"))
+        excused = line(fake_probe(process=True, unless=True))
+        self.assertIn("働いていない", excused)
+        self.assertIn("条件 process（process_unless あり）/旗", excused)
+        self.assertIn("process_unless が 0 で終わった", excused)
+        running = line(fake_probe(process=True, unless=False))
+        self.assertIn("働いている（プロセス", running)
+        self.assertNotIn("0 で終わった", running)
+        failed = line(fake_probe(process=True, unless=None))
+        self.assertIn("働いている（プロセス", failed)
+        self.assertIn("process_unless を動かせないか時間切れ → process の条件で働く", failed)
+        idle = line(fake_probe(process=False, unless=True))
+        self.assertIn("process（process_unless あり）", idle)
+        self.assertNotIn("0 で終わった", idle)
+        # 設定の無いガードは今までどおりの表示
+        dev = next(l for l in gh.status_lines(self.env, fake_probe())[0] if l.startswith("device-test:"))
+        self.assertNotIn("process_unless", dev)
+
+    def test_playtest_state_uses_unless(self):
+        g = self.default_guards()
+        g["app-running"]["process_unless"] = self.UNLESS
+        self.write_config(g)
+        calls = []
+        kind, why = gh.playtest_state(self.env, "app-running", running=lambda pats: True,
+                                      unless=lambda argv, t: calls.append(argv) or True)
+        self.assertIsNone(kind)
+        self.assertIn("process_unless が 0 で終わった", why)
+        self.assertEqual(calls, [self.UNLESS])
+        kind, _ = gh.playtest_state(self.env, "app-running", running=lambda pats: True, unless=lambda argv, t: False)
+        self.assertEqual(kind, "human")                                 # 記録が無い = 人がプレイ中（今までどおり）
+        kind, _ = gh.playtest_state(self.env, "app-running", running=lambda pats: True, unless=lambda argv, t: None)
+        self.assertEqual(kind, "human")
+        calls = []
+        kind, _ = gh.playtest_state(self.env, "app-running", running=lambda pats: False,
+                                    unless=lambda argv, t: calls.append(argv) or True)
+        self.assertIsNone(kind)
+        self.assertEqual(calls, [])
 
 
 class Lock(Base):

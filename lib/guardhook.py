@@ -11,6 +11,8 @@ PreToolUse hook（Bash / Edit / Write / NotebookEdit）から呼ぶ。判定は 
        "process": "^\\\\./slides-app",                 働く条件 1: pgrep -f の正規表現（リストも可）
        "command": ["test", "-e", "/run/lab/busy"],     働く条件 2: 終了コード 0 なら働く（timeout 付き）
        "command_timeout": 2,
+       "process_unless": ["app-status", "--crashed"],  process が当たったときだけ呼ぶ。0 なら process を外す
+       "process_unless_timeout": 3,                    （落ちて残っているだけ、など。動かせない・時間切れ・0 以外は外さない）
                                                       働く条件 3: claude-guard on <名前> で立てた旗（常に有効）
        "paths": ["~/lab/config"],                      書き込みを止めるパス
        "commands": ["git push", {"regex": "^deploy\\\\b"},
@@ -254,10 +256,29 @@ def _entries(value, where, problems, owner_ok=False):
     return out
 
 
+def _argv(c, where, drop, problems):
+    """判定のコマンド（command / process_unless）を argv にする。文字列は sh -c、文字列のリストはそのまま。誤りは None。"""
+    if isinstance(c, str) and c.strip():
+        return ["sh", "-c", c]
+    if isinstance(c, list) and c and all(isinstance(x, str) for x in c):
+        return list(c)
+    problems.append(f"{where} は文字列（sh -c で動かす）か文字列のリスト。{drop}")
+    return None
+
+
+def _timeout(sec, key, default, where, problems):
+    t = sec.get(key, default)
+    if isinstance(t, bool) or not isinstance(t, (int, float)) or not 0 < t <= 30:
+        problems.append(f"{where}.{key} は 0 より大きく 30 以下の秒数: {t!r}")
+        t = default
+    return float(t)
+
+
 def _guard(name, sec, problems, home):
     """1 つのガードの設定を読む。読めない項目は外す（ほかの項目とほかのガードは生かす）。"""
     where = f"guard_hook.guards.{name}"
     g = {"name": name, "enabled": True, "process": [], "command": None, "command_timeout": 2.0,
+         "process_unless": None, "process_unless_timeout": 3.0,
          "paths": [], "commands": [], "allow_commands": [], "message": ""}
     enabled = sec.get("enabled", True)
     if not isinstance(enabled, bool):
@@ -278,18 +299,16 @@ def _guard(name, sec, problems, home):
                 break
         g["process"] = procs
     if "command" in sec:
-        c = sec["command"]
-        if isinstance(c, str) and c.strip():
-            g["command"] = ["sh", "-c", c]
-        elif isinstance(c, list) and c and all(isinstance(x, str) for x in c):
-            g["command"] = list(c)
-        else:
-            problems.append(f"{where}.command は文字列（sh -c で動かす）か文字列のリスト。この条件は使わない")
-    t = sec.get("command_timeout", 2)
-    if isinstance(t, bool) or not isinstance(t, (int, float)) or not 0 < t <= 30:
-        problems.append(f"{where}.command_timeout は 0 より大きく 30 以下の秒数: {t!r}")
-        t = 2
-    g["command_timeout"] = float(t)
+        g["command"] = _argv(sec["command"], f"{where}.command", "この条件は使わない", problems)
+    g["command_timeout"] = _timeout(sec, "command_timeout", 2, where, problems)
+    if "process_unless" in sec:
+        # 読めなければ例外を使わない（= process で今までどおり働く。柵を外す側の設定なので、誤りでは外さない）
+        g["process_unless"] = _argv(sec["process_unless"], f"{where}.process_unless", "この例外は使わない", problems)
+        if g["process_unless"] and not g["process"]:
+            problems.append(f"{where}: process_unless は process（pgrep -f の正規表現）のあるガードでだけ効く。"
+                            "この例外は使わない")
+            g["process_unless"] = None
+    g["process_unless_timeout"] = _timeout(sec, "process_unless_timeout", 3, where, problems)
     paths = _strings(sec.get("paths", []))
     if paths is None:
         problems.append(f"{where}.paths は文字列のリスト")
@@ -1195,7 +1214,7 @@ def known_roles(env):
     return roles
 
 
-def playtest_state(env, name, running=None, path=None, role=None, now=None):
+def playtest_state(env, name, running=None, path=None, role=None, now=None, unless=None):
     """claude-show 用: ガード name のプロセス（ゲームなど）を、人がテストプレイしているか。(種類, 説明) を返す。
 
     種類は "config"（ガードが無い・無効・process が無い → 今までどおりだが、設定の誤りかもしれないので知らせる）、
@@ -1205,15 +1224,18 @@ def playtest_state(env, name, running=None, path=None, role=None, now=None):
     "e2e"（記録が生きていて共同作業の印（coop のキー）が無く、owner が役割 = 担当の e2e）、
     "human"（それ以外 = 人がプレイ中。印が効いていて role が with に無ければ、owner が役割でもこれ。
     期限切れ・形の誤りの印がどれかの記録にあれば、誰が呼んでもこれ）。
-    記録・pid の照合は allow_owner と同じ read_launch_record。running は patterns → True / False / None（pgrep）。"""
+    記録・pid の照合は allow_owner と同じ read_launch_record。running は patterns → True / False / None（pgrep）、
+    unless は (argv, timeout) → True / False / None（process_unless を動かす）。process_unless が 0 で終われば
+    （落ちてダイアログを出したまま残っているだけ、など）人はプレイしていないので None（ガードと同じ helper）。"""
     guards, _ = load_guard_config(env, path)
     g = next((x for x in guards if x["name"] == name), None)
     if g is None:
         return "config", f"view.playtest_guard のガード {name} が guard_hook.guards に無い（か設定の誤りで外された）"
     if not g["enabled"] or not g["process"]:
         return "config", f"view.playtest_guard のガード {name} が無効か、process が無い"
-    if not (running or process_running)(g["process"]):
-        return None, f"ガード {name} のプロセスが動いていない"
+    r, note = process_state(g, env, running or process_running, unless)
+    if not r:
+        return None, (f"ガード {name}: {note}" if note else f"ガード {name} のプロセスが動いていない")
     files = []
     for kind, spec in g["commands"]:
         o = spec.get("allow_owner") if kind == "program" else None
@@ -1885,9 +1907,32 @@ def command_true(argv, timeout):
 
 
 class Probe:
-    """働く条件を調べる。テストでは差し替える。"""
+    """働く条件を調べる。テストでは差し替える。unless は process_unless を動かす（command と同じく True / False / None）。"""
     process = staticmethod(process_running)
     command = staticmethod(command_true)
+    unless = staticmethod(command_true)
+
+
+UNLESS_NOTE = "process は当たるが process_unless が 0 で終わった → process の条件は働かないと数える"
+UNLESS_FAILED_NOTE = "process_unless を動かせないか時間切れ → process の条件で働く"
+
+
+def process_state(guard, env, running=None, unless=None):
+    """process の条件が働いているか。(True / False / None（pgrep を呼べない）, 説明 か "")。説明は process_unless で
+    外したとき（False と）か、process_unless を判定できなかったとき（True と）。status で原因が分かるように返す。
+
+    process_unless（落ちて残っているだけか、などを答える外のコマンド）は process が当たったときだけ呼ぶ（ふだんの
+    コストを増やさない）。exit 0 のときだけ外す。動かせない・時間切れ・0 以外は外さない: 柵を外す例外なので、
+    判定できないときは今までどおり働く側に倒す。running / unless は Probe.process / Probe.unless と同じ形。"""
+    r = (running or Probe.process)(guard["process"])
+    if not r or not guard.get("process_unless"):
+        return r, ""
+    u = (unless or Probe.unless)(guard["process_unless"], guard["process_unless_timeout"])
+    if u is None:
+        log_error(env, f"{guard['name']}: process_unless を動かせないか時間切れ。process の条件は今までどおり働く",
+                  once=True)
+        return True, UNLESS_FAILED_NOTE
+    return (False, UNLESS_NOTE) if u else (True, "")
 
 
 def _minutes_left(until, now):
@@ -1895,10 +1940,12 @@ def _minutes_left(until, now):
     return max(1, math.ceil((until - now) / 60))
 
 
-def active(guard, env, probe=Probe, now=None, assume=False):
+def active(guard, env, probe=Probe, now=None, assume=False, notes=None):
     """ガードが働いていれば、その条件の説明（文字列）と旗の理由を返す。働いていなければ (None, "")。
 
-    軽い順に調べる: 旗（ファイル 1 つ）→ process（pgrep 1 回）→ command。"""
+    軽い順に調べる: 旗（ファイル 1 つ）→ process（pgrep 1 回。当たれば process_unless）→ command。
+    notes（リスト）を渡せば、process_unless で process を外したときその説明を足す（status 用）。
+    process_unless は process の条件だけを外す（旗・command はそのまま。旗は人が明示に立てたもののため）。"""
     if assume:
         return "--assume-active", ""
     flag = read_state(env, guard["name"], "on", now)
@@ -1907,10 +1954,12 @@ def active(guard, env, probe=Probe, now=None, assume=False):
         who = f"、持ち主 {flag['owner']}" if flag.get("owner") else ""
         return f"旗（残り {left} 分{who}）", flag.get("reason", "")
     if guard["process"]:
-        r = probe.process(guard["process"])
+        r, note = process_state(guard, env, probe.process, getattr(probe, "unless", None))
         if r is None:
             log_error(env, f"{guard['name']}: pgrep を呼べない。process の条件は働かないと数える", once=True)
-        elif r:
+        if note and notes is not None:
+            notes.append(note)
+        if r:
             return f"プロセス {', '.join(guard['process'])}", ""
     if guard["command"]:
         r = probe.command(guard["command"], guard["command_timeout"])
@@ -2312,13 +2361,16 @@ def status_lines(env, probe=Probe, now=None, path=None):
         if not g["enabled"]:
             lines.append(f"{g['name']}: 無効（enabled: false）")
             continue
-        condition, flag_reason = active(g, env, probe, now)
-        conds = (["process"] if g["process"] else []) + (["command"] if g["command"] else []) + ["旗"]
+        notes = []
+        condition, flag_reason = active(g, env, probe, now, notes=notes)
+        proc = "process（process_unless あり）" if g["process_unless"] else "process"
+        conds = ([proc] if g["process"] else []) + (["command"] if g["command"] else []) + ["旗"]
         parts = [f"{g['name']}: " + (f"働いている（{condition}" + (f"、{flag_reason}" if flag_reason else "") + "）"
                                       if condition else "働いていない")]
         parts.append("条件 " + "/".join(conds))
         parts.append(f"止めるもの paths {len(g['paths'])}・commands {len(g['commands'])}"
                      + (f"・例外 {len(g['allow_commands'])}" if g["allow_commands"] else ""))
+        parts.extend(notes)
         allow = read_state(env, g["name"], "allow", now) or read_state(env, "all", "allow", now)
         if allow:
             parts.append(f"許可あり（残り {_minutes_left(allow['until'], now)} 分、{allow.get('reason', '')}）")

@@ -10,6 +10,7 @@
 
 - `claude-view hot WINDOW_ID|ROLE`: そのペインを統括（`view.left`）のすぐ右の 2 列目に縦 100% で出し、もう一度で元の splits の配置に戻す。kitty のキー（`map … launch --type=background claude-view hot @active-kitty-window-id`）で、入力中のペインを一時的に大きくして読むため。統括や skill からは役割の名前で呼べる。kitty の tall レイアウト（`tall:bias=60;full_size=2`。列は 30% / 30% / 右 40%）を使い、戻すのは `goto_layout splits`（splits の分割がそのまま戻る）。並べる間だけフォーカスを移し、最後に呼ぶ前の入力先へ戻す。統括がいない・注目が統括自身・`kitten @ ls` が読めないなどの失敗は、キーからだと stderr が見えないので `$XDG_RUNTIME_DIR/claude-view/errors.log` にも残す。キーから呼ぶと `KITTY_LISTEN_ON` が渡らないので、親の kitty の `kitty-<pid>` のソケットを使う（README の「注目のペインを 2 列目に出す（hot）」）。
 - `claude-view`: tall のままのタブでほかの並べ替え（`focus`・`restore` など）をすると、先に splits に戻してから並べる（分割の木が前提のため）。
+- `claude-guard`: ガードごとの `process_unless`（判定のコマンド。書き方は `command` と同じ）と `process_unless_timeout`（秒、既定 3）。`process` が当たったときだけ呼び、終了コード 0 なら `process` の条件は働いていないと数える。見張るアプリが落ちてエラーのダイアログを出したまま残ると、プロセスが残るのでガードが働き続け、害の無い操作まで止めていたため。「落ちて残っているだけか」の判定は外のコマンドが持ち、ガードは呼ぶだけ。0 以外・動かせない・時間切れは今までどおり働く（柵を外す例外なので、判定できないときは外さない。動かせない・時間切れは `errors.log` に）。旗と `command` には効かない。`process` の無いガードに書くと「問題:」に出す。`claude-guard status` は条件に「process（process_unless あり）」と、いま外れていればその旨を出す。`claude-show` の `view.playtest_guard`（人がテストプレイ中か）も同じ判定を通す（docs/guard-hook.md の「落ちて残っているだけのプロセス」）。
 - `kitty/claude-kitty.conf`・`claude-kitty-macos.conf`・`kitty/kitty.conf`: `enabled_layouts` に `tall:bias=60;full_size=2` を足した（`full_size` は `enabled_layouts` に書いたときだけ効く）。`kitty/kitty.conf` には map の例も。
 
 ### 上げるときに手で行うこと

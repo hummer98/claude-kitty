@@ -111,6 +111,17 @@ def pgrep_running(patterns, run=subprocess.run):
     return {0: True, 1: False}.get(r.returncode)
 
 
+def command_ok(argv, timeout, run=subprocess.run):
+    """判定のコマンド（ガードの process_unless）が exit 0 なら True、0 以外は False、動かせない・時間切れは None
+    （guardhook.command_true と同じ。run を差し替えて試せるようここで持つ）。"""
+    try:
+        # 出力は捨てる（パイプを持ったままの子が残ると EOF を待って時間切れになり、hook の判定とずれるため）
+        return run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=timeout).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def playtesting(env, run=subprocess.run):
     """(人がテストプレイ中か, 説明, 知らせ, 共同作業のときガード名)。view.playtest_guard が無ければ
     (False, None, None, None)（今までどおり）。playtest_guard の値の誤りは「開かない」側に倒す（is_guarded と同じ）。
@@ -122,7 +133,8 @@ def playtesting(env, run=subprocess.run):
     if not name:
         return False, None, None, None
     from guardhook import playtest_state, window_role
-    kind, why = playtest_state(env, name, running=lambda pats: pgrep_running(pats, run), role=window_role(env))
+    kind, why = playtest_state(env, name, running=lambda pats: pgrep_running(pats, run), role=window_role(env),
+                               unless=lambda argv, t: command_ok(argv, t, run))
     return kind == "human", why, (why if kind == "config" else None), (name if kind == "coop" else None)
 
 

@@ -42,6 +42,8 @@
         "process": "^/usr/bin/slides-app --present",
         "command": "test -e /tmp/presenting",
         "command_timeout": 2,
+        "process_unless": ["slides-app-status", "--crashed"],
+        "process_unless_timeout": 3,
         "paths": ["~/.config/window-layout"],
         "commands": [
           "claude-view",
