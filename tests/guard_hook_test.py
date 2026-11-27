@@ -1034,6 +1034,88 @@ class AllowOwner(Base):
         gh.release(self.env, "app-running", "s-deployer")
         self.assertIsNone(self.bash(c, session="s-probe"))
 
+    # ---- 名乗りを付け忘れた担当への文（owner_hint） ----
+
+    HINT = ("起動の記録の owner は probe（このセッションの役割）です。"
+            "サブコマンドより前に `--owner probe` を付けるか、環境変数 SVCCTL_OWNER=probe を前に付ければ通ります。")
+
+    def test_hint_for_owner_without_claim(self):
+        self.launched()
+        self.role("s-probe", "probe")
+        for c in ("svcctl quit", "python3 /x/svcctl.py deploy",
+                  "svcctl quit --owner probe"):                     # サブコマンドの後は名乗りでない（文は「前に」と書く）
+            r = self.bash(c, session="s-probe")
+            self.assertIsNotNone(r, c)
+            self.assertIn(self.HINT, r, c)
+        self.assertIsNone(self.bash("svcctl --owner probe quit", session="s-probe"))   # 文のとおりに名乗れば通る
+        self.assertIsNone(self.bash("SVCCTL_OWNER=probe svcctl quit", session="s-probe"))
+
+    def test_no_hint_for_other_or_unknown_role(self):
+        # 他の担当に名乗り方を教えない。役割が分からないセッションにも出さない
+        self.launched()
+        self.role("s-ui", "ui")
+        self.role("s-blank", None)
+        for s in ("s-ui", "s-blank", "s-none"):
+            r = self.bash("svcctl quit", session=s)
+            self.assertIsNotNone(r, s)
+            self.assertNotIn("通ります", r, s)
+            self.assertNotIn("probe", r, s)
+
+    def test_no_hint_when_claim_is_other(self):
+        self.launched()
+        self.role("s-probe", "probe")
+        for c in ("svcctl --owner other quit", "SVCCTL_OWNER=other svcctl quit"):
+            r = self.bash(c, session="s-probe")
+            self.assertIsNotNone(r, c)
+            self.assertNotIn("通ります", r, c)
+        r = self.bash("svcctl quit", session="s-probe", env=dict(self.env, SVCCTL_OWNER="other"))   # hook の環境の名乗り
+        self.assertIsNotNone(r)
+        self.assertNotIn("通ります", r)
+        # --owner= は env より先に読まれて名乗りを消す: env の案に従っても通らないので足さない
+        for c in ("svcctl --owner= quit", "SVCCTL_OWNER=probe svcctl --owner= quit"):
+            r = self.bash(c, session="s-probe")
+            self.assertIsNotNone(r, c)
+            self.assertNotIn("通ります", r, c)
+
+    def test_no_hint_under_flag_or_bad_record(self):
+        self.role("s-probe", "probe")
+        self.launched()
+        gh.write_state(self.env, "app-running", "on", 10, "maintenance")    # 旗の間は名乗っても通らない
+        r = self.bash("svcctl quit", session="s-probe")
+        self.assertIsNotNone(r)
+        self.assertNotIn("通ります", r)
+        gh.remove_state(self.env, "app-running", "on")
+        for prep in (lambda: self.launched(pid=999),                        # 記録が生きていない
+                     lambda: self.rec.unlink()):                            # 記録が無い
+            prep()
+            r = self.bash("svcctl quit", session="s-probe")
+            self.assertIsNotNone(r)
+            self.assertNotIn("通ります", r)
+
+    def test_hint_with_one_way_config(self):
+        self.launched()
+        self.role("s-probe", "probe")
+        self.write_owner_config(env=None)
+        r = self.bash("svcctl quit", session="s-probe")
+        self.assertIn("起動の記録の owner は probe（このセッションの役割）です。サブコマンドより前に `--owner probe` を付ければ通ります。", r or "")
+        self.assertNotIn("環境変数", r)
+        self.write_owner_config(option=None)
+        r = self.bash("svcctl quit", session="s-probe")
+        self.assertIn("起動の記録の owner は probe（このセッションの役割）です。環境変数 SVCCTL_OWNER=probe を前に付ければ通ります。",
+                      r or "")
+        self.assertNotIn("--owner", r)
+
+    def test_hint_without_same_role_shows_owner(self):
+        self.launched()
+        self.write_owner_config(same_role=False)
+        r = self.bash("svcctl quit", session="s-none")
+        self.assertIn("起動の記録の owner は probe です。サブコマンドより前に `--owner probe` を付けるか、", r or "")
+        self.assertNotIn("このセッションの役割", r)
+        self.launched(owner=None, coop={"with": "probe", "until": 4e9})     # owner の無い記録: 示す owner が無い
+        r = self.bash("svcctl quit", session="s-none")
+        self.assertIsNotNone(r)
+        self.assertNotIn("通ります", r)
+
     def test_pid_dead_or_other_process(self):
         self.role("s-probe", "probe")
         self.launched(pid=999)                                              # 動いていない
@@ -1223,6 +1305,27 @@ class Coop(Base):
         self.role("s-probe", "probe")
         for c in ("svcctl --owner probe quit", "SVCCTL_OWNER=probe svcctl deploy"):
             self.assertIsNone(self.bash(c), c)
+
+    def test_hint_for_coop_member_without_claim(self):
+        self.launched(coop=self.coop())
+        self.role("s-probe", "probe")
+        self.role("s-ui", "ui")
+        r = self.bash("svcctl quit")
+        self.assertIn("共同作業の担当に probe（このセッションの役割）が入っています。"
+                      "サブコマンドより前に `--owner probe` を付けるか、環境変数 SVCCTL_OWNER=probe を前に付ければ通ります。", r or "")
+        r = self.bash("svcctl quit", session="s-ui")                        # with に無い担当
+        self.assertIsNotNone(r)
+        self.assertNotIn("通ります", r)
+        self.launched(owner=None, coop=self.coop())                         # 人が起動した記録（owner なし）でも同じ
+        self.assertIn("共同作業の担当に probe", self.bash("svcctl quit") or "")
+        self.launched(coop=self.coop(until=self.NOW - 60))                  # 期限切れは期限切れの文だけ
+        r = self.bash("svcctl quit")
+        self.assertIn(self.EXPIRED_TEXT, r or "")
+        self.assertNotIn("通ります", r)
+        self.launched(owner="probe", coop="probe")                          # 形の誤りの印: owner にも足さない
+        r = self.bash("svcctl quit")
+        self.assertIn("共同作業の印の形が正しくない", r or "")
+        self.assertNotIn("通ります", r)
 
     def test_without_coop_unchanged(self):
         self.launched()                                                     # owner は別の担当、印なし

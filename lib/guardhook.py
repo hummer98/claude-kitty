@@ -1511,7 +1511,7 @@ class Analyzer:
         for e in self.guard["commands"]:
             hit = match_entry(e, words)
             if hit and not self.owner_passes(e, words, assigns):
-                note = self.stale_coop(e)
+                note = self.stale_coop(e) or self.owner_hint(e, words, assigns)
                 hit = f"{hit}（{note}）" if note else hit
                 if hit not in self._cmds:
                     self._cmds.append(hit)
@@ -1553,6 +1553,49 @@ class Analyzer:
             return None
         mark, val = coop_mark(rec, self.ctx.now)
         return coop_stale_text(mark, val) if mark in ("expired", "bad") else None
+
+    def owner_hint(self, entry, words, assigns):
+        """名乗りを付け忘れた担当への文（断りの文に足す）。名乗れば allow_owner の例外で通る形のときだけ返す。
+
+        起動した担当が自分のものに名乗りなしで打って止まると、断りの文からは理由が読めなかったため。役割が記録の
+        owner か共同作業の with に入っているセッションにだけ出す: 他の担当に「この名前を名乗れば通る」と教える文に
+        しないため（名乗りは自己申告なので、教えると柵を越える道を示すことになる）。役割が分からないセッションにも
+        出さない（same_role の照合でも通らないので、名乗っても通らない）。"""
+        kind, spec = entry
+        o = spec.get("allow_owner") if kind == "program" else None
+        if not o or not self.ctx.owner_ok:
+            return None
+        if claimed_owner(o, words, assigns, self.vars, self.exported, spec["value_options"]):
+            return None                           # 名乗って違った（か他の理由で通らない）: 今までどおり
+        if o["option"] and option_value(words[1:], o["option"], spec["value_options"]) == "":
+            return None                           # --owner= は env より先に読まれて名乗りを消す: env の案に従っても通らない
+        rec, why = self.ctx.launch(self.guard, o)
+        if why or not rec or coop_mark(rec, self.ctx.now)[0] in ("expired", "bad"):
+            return None
+        owner = rec.get("owner")
+        if not o["same_role"]:
+            # 役割を見ない設定: 名乗れば誰でも通るので、記録の owner を示す（with の担当は誰か決められない）
+            if not owner:
+                return None
+            who, head = owner, f"起動の記録の owner は {owner} です。"
+        else:
+            role = self.ctx.role()
+            if not role:
+                return None
+            coop = coop_of(rec, self.ctx.now)
+            if role == owner:
+                who, head = role, f"起動の記録の owner は {role}（このセッションの役割）です。"
+            elif coop and role in coop["with"]:
+                who, head = role, f"共同作業の担当に {role}（このセッションの役割）が入っています。"
+            else:
+                return None
+        ways = []                                 # 設定にある名乗り方だけ（片方しか無ければその片方）
+        if o["option"]:
+            # option はサブコマンドより前だけを読む（末尾に付けて、また止まる形を避ける）
+            ways.append(f"サブコマンドより前に `{o['option']} {who}` を付け")
+        if o["env"]:
+            ways.append(f"環境変数 {o['env']}={who} を前に付け")
+        return head + "るか、".join(ways) + "れば通ります。"
 
     def writes(self, name, args, assigns):
         if name == "git":
